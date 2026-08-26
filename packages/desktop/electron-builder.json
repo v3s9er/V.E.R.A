@@ -1,0 +1,26 @@
+{
+  "appId": "com.polaris.mrrobot",
+  "productName": "Mr.Robot",
+  "electronVersion": "43.4.1",
+  "asar": true,
+  "compression": "maximum",
+  "electronLanguages": ["en", "ko"],
+  "directories": {
+    "app": ".stage",
+    "output": "../../release"
+  },
+  "files": ["**/*"],
+  "win": {
+    "target": ["nsis"],
+    "artifactName": "Mr.Robot-Setup-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Mr.Robot"
+  }
+}

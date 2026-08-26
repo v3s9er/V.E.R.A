@@ -1,0 +1,18 @@
+{
+  "name": "@mr-robot/desktop",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "description": "Mr.Robot 데스크톱 셸 (Electron) — 에이전트를 내장해 창/트레이로 실행",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "@mr-robot/agent": "*"
+  },
+  "devDependencies": {
+    "electron": "43.4.1"
+  }
+}

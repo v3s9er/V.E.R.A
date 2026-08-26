@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Mr.Robot",
+    "slug": "mr-robot-mobile",
+    "version": "0.2.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b0f1a",
+    "android": {
+      "package": "com.mrrobot.mobile",
+      "versionCode": 4,
+      "permissions": [
+        "CAMERA"
+      ]
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "PC 화면의 페어링 QR 코드를 스캔하기 위해 카메라를 사용합니다."
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "PC 화면의 페어링 QR 코드를 스캔하기 위해 카메라를 사용합니다.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-sharing",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,101 @@
+import { useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import type { MrRobotClient } from '../rpc';
+import type { SavedPc } from '../types';
+import { colors, radius } from '../theme';
+import { ChatScreen } from './ChatScreen';
+import { SchedulesScreen } from './SchedulesScreen';
+import { SettingsScreen } from './SettingsScreen';
+import { FilesScreen } from './FilesScreen';
+
+type Tab = 'chat' | 'files' | 'schedules' | 'settings';
+
+const TABS: Array<{ key: Tab; label: string; icon: string }> = [
+  { key: 'chat', label: '대화', icon: '💬' },
+  { key: 'files', label: '파일', icon: '⇄' },
+  { key: 'schedules', label: '예약', icon: '⏰' },
+  { key: 'settings', label: '설정', icon: '⚙️' },
+];
+
+export function HomeScreen({
+  client,
+  pc,
+  onSwitchPc,
+}: {
+  client: MrRobotClient;
+  pc: SavedPc;
+  onSwitchPc: () => void;
+}) {
+  const [tab, setTab] = useState<Tab>('chat');
+
+  return (
+    <View style={styles.root}>
+      <View style={styles.header}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.pcName} numberOfLines={1}>
+            🖥️ {pc.name}
+          </Text>
+          <Text style={styles.pcAddr} numberOfLines={1}>
+            {pc.host}:{pc.port}
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.switchBtn} onPress={onSwitchPc}>
+          <Text style={styles.switchText}>PC 전환</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.content}>
+        {tab === 'chat' && <ChatScreen client={client} pc={pc} />}
+        {tab === 'files' && <FilesScreen pc={pc} />}
+        {tab === 'schedules' && <SchedulesScreen client={client} />}
+        {tab === 'settings' && <SettingsScreen client={client} />}
+      </View>
+
+      <View style={styles.tabbar}>
+        {TABS.map((t) => (
+          <TouchableOpacity key={t.key} style={styles.tab} onPress={() => setTab(t.key)}>
+            <Text style={[styles.tabIcon, tab === t.key && styles.tabActive]}>{t.icon}</Text>
+            <Text style={[styles.tabLabel, tab === t.key && styles.tabActive]}>{t.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.bg },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: 56,
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  pcName: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  pcAddr: { color: colors.faint, fontSize: 12, marginTop: 2 },
+  switchBtn: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  switchText: { color: colors.dim, fontSize: 13, fontWeight: '600' },
+  content: { flex: 1 },
+  tabbar: {
+    flexDirection: 'row',
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+    paddingBottom: 20,
+    paddingTop: 8,
+  },
+  tab: { flex: 1, alignItems: 'center', gap: 3 },
+  tabIcon: { fontSize: 20, opacity: 0.45 },
+  tabLabel: { fontSize: 11, color: colors.faint, fontWeight: '600' },
+  tabActive: { color: colors.accent, opacity: 1 },
+});
