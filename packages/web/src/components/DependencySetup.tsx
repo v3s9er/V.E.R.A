@@ -8,6 +8,9 @@ interface Props {
   onComplete?: () => void;
 }
 
+const FIRST_RUN_DEPENDENCIES: DependencyId[] = ['node', 'git', 'speech-ko', 'codex', 'claude', 'cloudflared'];
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 60 * 60_000;
+
 export function DependencySetup({ modal = false, onComplete }: Props) {
   const { client } = useMrRobot();
   const canManage = client.isAdmin;
@@ -24,8 +27,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
       setReport(next);
       if (!initialized.current) {
         initialized.current = true;
-        const productDependencies: DependencyId[] = ['node', 'git', 'speech-ko', 'codex', 'claude'];
-        setSelected(new Set(next.items.filter((item) => !item.installed && item.canInstall && productDependencies.includes(item.id)).map((item) => item.id)));
+        setSelected(new Set(next.items.filter((item) => !item.installed && item.canInstall && FIRST_RUN_DEPENDENCIES.includes(item.id)).map((item) => item.id)));
       }
       return next;
     } catch (error) {
@@ -36,9 +38,9 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
-    if (!canManage || !modal || !report || autoStarted.current || report.wizardVersion >= 4) return;
+    if (!canManage || !modal || !report || autoStarted.current || report.wizardVersion >= 5) return;
     autoStarted.current = true;
-    const missing = report.items.filter((item) => !item.installed && ['node', 'git', 'speech-ko', 'codex', 'claude'].includes(item.id));
+    const missing = report.items.filter((item) => !item.installed && FIRST_RUN_DEPENDENCIES.includes(item.id));
     if (missing.length === 0) { void complete(); return; }
     setSelected(new Set(missing.map((item) => item.id)));
     window.setTimeout(() => void installMissing(missing), 250);
@@ -56,7 +58,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
     setBusy(id);
     setMessage('');
     try {
-      const result = await client.call('dependencies.install', { id }) as DependencyInstallResult;
+      const result = await client.call('dependencies.install', { id }, DEPENDENCY_INSTALL_TIMEOUT_MS) as DependencyInstallResult;
       setMessage(`${result.item.name}: ${result.ok ? '설치 완료' : '설치 실패'}${result.output ? `\n${result.output.slice(-2500)}` : ''}`);
       await refresh();
       return result.ok;
@@ -76,7 +78,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
     for (const item of ordered) {
       setMessage(`${item.name} 설치 중…`);
       try {
-        const result = await client.call('dependencies.install', { id: item.id }) as DependencyInstallResult;
+        const result = await client.call('dependencies.install', { id: item.id }, DEPENDENCY_INSTALL_TIMEOUT_MS) as DependencyInstallResult;
         if (!result.ok) {
           setMessage(`${item.name} 설치 실패\n${result.output.slice(-2500)}`);
           break;
@@ -96,7 +98,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
     for (const item of items) {
       setMessage(`${item.name} 자동 설치 중…`);
       try {
-        const result = await client.call('dependencies.install', { id: item.id }) as DependencyInstallResult;
+        const result = await client.call('dependencies.install', { id: item.id }, DEPENDENCY_INSTALL_TIMEOUT_MS) as DependencyInstallResult;
         if (!result.ok) { setMessage(`${item.name} 설치 실패\n${result.output.slice(-2500)}\n설치 버튼으로 다시 시도할 수 있습니다.`); setBusy(null); await refresh(); return; }
       } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); setBusy(null); return; }
     }

@@ -56,7 +56,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.2';
+export const VERSION = '0.3.3';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
@@ -804,7 +804,7 @@ export class AgentServer {
     });
     h.set('dependencies.complete', (_params, client) => {
       assertAdmin(client);
-      return this.updateSettings({ setup: { dependencyWizardCompletedAt: Date.now(), dependencyWizardVersion: 4 } });
+      return this.updateSettings({ setup: { dependencyWizardCompletedAt: Date.now(), dependencyWizardVersion: 5 } });
     });
     h.set('routing.get', () => this.getRouting());
     h.set('routing.set', (params, client) => { assertAdmin(client); return this.updateRouting(p(params) as Partial<RoutingSettings>); });

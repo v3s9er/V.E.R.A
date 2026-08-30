@@ -39,7 +39,7 @@ Windows 설치 파일을 실행한 뒤 Mr.Robot을 켜면 PC 앱은 다른 기�
 
 Tailscale은 선택 플러그인입니다. 금융 앱 때문에 휴대폰 VPN을 계속 켜기 불편하면 다음 흐름을 사용합니다.
 
-임시 연결은 PC 앱의 `플러그인 → Cloudflare Remote Link`에서 **Quick Tunnel**을 선택하고 `빠른 연결`을 누릅니다. 처음 한 번만 cloudflared를 자동 설치하며, 표시된 HTTPS QR을 모바일에 등록합니다. PIN은 5분 동안 한 번만 쓸 수 있고 성공 즉시 새 PIN으로 바뀝니다.
+임시 연결은 PC 앱의 `플러그인 → Cloudflare Remote Link`에서 **Quick Tunnel**을 선택하고 `빠른 연결`을 누릅니다. cloudflared가 없으면 첫 실행 의존성 마법사 v5, 플러그인의 `cloudflared 설치` 버튼, 또는 첫 Quick Link 승인 중 하나가 Windows winget의 x64 사용자 범위 portable 패키지로 설치합니다. 설치에는 몇 분이 걸릴 수 있으며 앱은 완료까지 연결 버튼을 정상 대기 상태로 유지합니다. 표시된 HTTPS QR을 모바일에 등록합니다. PIN은 5분 동안 한 번만 쓸 수 있고 성공 즉시 새 PIN으로 바뀝니다.
 
 주소를 계속 유지하려면 같은 화면에서 **Cloudflare 고정 Tunnel**을 선택합니다.
 
@@ -84,10 +84,10 @@ CTF는 본인이 소유하거나 명시적으로 허가받은 문제·워게임 
 
 ## 8. 설치 파일
 
-- Windows x64: `release/Mr.Robot-Setup-0.3.2-x64.exe`
-- Android: `release/mobile/Mr.Robot-Mobile-0.3.2.apk`
+- Windows x64: `release/Mr.Robot-Setup-0.3.3-x64.exe`
+- Android: `release/mobile/Mr.Robot-Mobile-0.3.3.apk`
 
-0.2.1 이하 모바일 시험판은 Android 디버그 인증서로 서명됐고, 0.3.0부터는 Mr.Robot 전용 릴리스 인증서를 사용합니다. Android 보안 정책상 기존 시험판 위에 바로 덮어쓸 수 없으므로, 필요한 대화·프리셋을 먼저 PC와 동기화한 뒤 기존 앱을 한 번 제거하고 0.3.2를 설치해 다시 페어링하세요. 0.3.0 이상 사용자는 같은 릴리스 키와 더 높은 versionCode를 사용하는 0.3.2로 바로 업데이트할 수 있습니다.
+0.2.1 이하 모바일 시험판은 Android 디버그 인증서로 서명됐고, 0.3.0부터는 Mr.Robot 전용 릴리스 인증서를 사용합니다. Android 보안 정책상 기존 시험판 위에 바로 덮어쓸 수 없으므로, 필요한 대화·프리셋을 먼저 PC와 동기화한 뒤 기존 앱을 한 번 제거하고 0.3.3을 설치해 다시 페어링하세요. 0.3.0~0.3.2 사용자는 같은 릴리스 키와 더 높은 versionCode 8을 사용하는 0.3.3으로 바로 업데이트할 수 있습니다.
 
 현재 Windows 설치본은 상용 Authenticode 인증서가 없어 Windows SmartScreen 확인이 나올 수 있습니다. GitHub 공개 릴리스의 SHA-256과 내려받은 파일의 해시를 대조하세요. Android APK는 릴리스 키로 서명되며, 개발자는 `C:\Users\<사용자>\.mr-robot\signing`의 keystore와 DPAPI 보호 암호를 안전하게 백업해야 이후 업데이트를 같은 서명으로 배포할 수 있습니다. DPAPI 파일만 다른 PC로 복사해서는 복호화할 수 없습니다.
 

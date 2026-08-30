@@ -7,7 +7,7 @@ import { terminateProcessTree } from '../computer/shell.js';
 import type { PluginExecutionContext } from './commands.js';
 import type { MrRobotPlugin } from './loader.js';
 
-const IMAGE = 'mr-robot/ctf-toolbox:0.3.2';
+const IMAGE = 'mr-robot/ctf-toolbox:0.3.3';
 const DOCKERFILE = `FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN apt-get update && apt-get install -y --no-install-recommends \\
@@ -282,7 +282,7 @@ function imageDir(): string {
 export function createDockerPlugin(): MrRobotPlugin {
   return {
     manifest: {
-      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.2', kind: 'tool', enabledByDefault: true,
+      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.3', kind: 'tool', enabledByDefault: true,
       description: 'CTF와 위험한 분석 명령을 호스트와 격리된 제한 컨테이너에서 실행합니다.',
       capabilities: ['container.health', 'container.image.build', 'container.ctf.exec'],
       permissions: ['container.execute', 'process.execute', 'filesystem.read', 'filesystem.write'],

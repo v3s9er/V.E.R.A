@@ -102,7 +102,7 @@ export function App() {
       return;
     }
     void client.call('dependencies.status', {})
-      .then((value) => setShowDependencySetup((value as DependencyReport).wizardVersion < 4))
+      .then((value) => setShowDependencySetup((value as DependencyReport).wizardVersion < 5))
       .catch(() => setShowDependencySetup(false));
   }, [client, ready]);
 

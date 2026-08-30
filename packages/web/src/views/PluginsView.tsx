@@ -62,6 +62,7 @@ export function PluginsView() {
   const [remotePairing, setRemotePairing] = useState<{ pin: string; expiresAt?: number; qrUrl: string } | null>(null);
   const [quickLinkConfirm, setQuickLinkConfirm] = useState<PluginInfo | null>(null);
   const remoteActionRef = useRef(false);
+  const remoteStatusRef = useRef<RemoteLinkStatus | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -71,6 +72,11 @@ export function PluginsView() {
       mountedRef.current = false;
       remoteActionRef.current = true;
     };
+  }, []);
+
+  const commitRemoteStatus = useCallback((status: RemoteLinkStatus | null): void => {
+    remoteStatusRef.current = status;
+    if (mountedRef.current) setRemoteStatus(status);
   }, []);
 
   const refreshRemotePairing = useCallback(async (status: RemoteLinkStatus | null): Promise<void> => {
@@ -104,8 +110,8 @@ export function PluginsView() {
     }
   }, [client]);
 
-  const refreshOrca = useCallback(async (): Promise<void> => {
-    setOrcaBusy(true);
+  const refreshOrca = useCallback(async (interactive = false): Promise<void> => {
+    if (interactive) setOrcaBusy(true);
     try {
       const status = await client.call('plugins.call', { name: 'orca.status', params: {} }) as OrcaStatus;
       setOrcaStatus(status);
@@ -118,39 +124,39 @@ export function PluginsView() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setOrcaBusy(false);
+      if (interactive) setOrcaBusy(false);
     }
   }, [client]);
 
-  const refreshRemoteLink = useCallback(async (): Promise<void> => {
-    setRemoteBusy(true);
+  const refreshRemoteLink = useCallback(async (interactive = false): Promise<void> => {
+    if (interactive) setRemoteBusy(true);
     try {
       const [status, report, system] = await Promise.all([
         client.call('plugins.call', { name: 'remote-link.status', params: {} }) as Promise<RemoteLinkStatus>,
         client.call('dependencies.status', {}) as Promise<{ items: DependencyInfo[] }>,
         client.call('status', {}) as Promise<SystemStatus>,
       ]);
-      setRemoteStatus(status);
+      commitRemoteStatus(status);
       setRemoteConfig(status.running
         ? status.config
-        : { ...status.config, localUrl: `http://127.0.0.1:${system.network.port}`, autoStart: false });
+        : { ...status.config, localUrl: `http://127.0.0.1:${system.network.port}` });
       setCloudflared(report.items.find((item) => item.id === 'cloudflared') ?? null);
       await refreshRemotePairing(status);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setRemoteBusy(false);
+      if (interactive) setRemoteBusy(false);
     }
-  }, [client, refreshRemotePairing]);
+  }, [client, commitRemoteStatus, refreshRemotePairing]);
 
   useEffect(() => {
     void refresh();
     const off = client.on('plugins.changed', (data) => setPlugins(data as PluginInfo[]));
     const offPairing = client.on('pairing.changed', () => {
-      if (canManage) void refreshRemotePairing(remoteStatus).catch(() => setRemotePairing(null));
+      if (canManage) void refreshRemotePairing(remoteStatusRef.current).catch(() => setRemotePairing(null));
     });
     return () => { off(); offPairing(); };
-  }, [canManage, client, refresh, refreshRemotePairing, remoteStatus]);
+  }, [canManage, client, refresh, refreshRemotePairing]);
 
   useEffect(() => {
     if (!canManage) return;
@@ -212,7 +218,7 @@ export function PluginsView() {
     try {
       const saved = await client.call('plugins.call', { name: 'orca.config.set', params: orcaConfig }) as OrcaConfig;
       setOrcaConfig(saved);
-      await refreshOrca();
+      await refreshOrca(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -224,7 +230,7 @@ export function PluginsView() {
     setOrcaBusy(true); setError('');
     try {
       await client.call('plugins.call', { name: 'orca.open', params: {} });
-      window.setTimeout(() => void refreshOrca(), 1200);
+      window.setTimeout(() => void refreshOrca(false), 1200);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -298,6 +304,31 @@ export function PluginsView() {
     }
   };
 
+  const installCloudflared = async (): Promise<void> => {
+    if (remoteBusy) return;
+    setRemoteBusy(true);
+    setRemoteStage('cloudflared 설치');
+    setError('');
+    try {
+      const result = await client.call(
+        'dependencies.install',
+        { id: 'cloudflared' },
+        20 * 60_000,
+      ) as DependencyInstallResult;
+      if (!result.ok || !result.item.installed) {
+        throw new Error(result.output || 'cloudflared 설치 프로그램이 실패했습니다.');
+      }
+      setCloudflared(result.item);
+      setCallResult(`${result.item.version ?? 'cloudflared'} 설치 완료 · Quick Link를 사용할 수 있습니다.`);
+      await refreshRemoteLink(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoteBusy(false);
+      setRemoteStage('');
+    }
+  };
+
   const startRemoteLink = async (plugin: PluginInfo): Promise<void> => {
     if (remoteActionRef.current) return;
     remoteActionRef.current = true;
@@ -325,7 +356,7 @@ export function PluginsView() {
       originalConfig = initialStatus.config;
       if (initialStatus.running && initialStatus.publicUrl) {
         if (mountedRef.current) {
-          setRemoteStatus(initialStatus);
+          commitRemoteStatus(initialStatus);
           setRemoteConfig(initialStatus.config);
         }
         await refreshRemotePairing(initialStatus);
@@ -336,7 +367,7 @@ export function PluginsView() {
       let dependency = dependencyReport.items.find((item) => item.id === 'cloudflared') ?? null;
       if (!dependency?.installed) {
         advance(1, 'cloudflared 설치');
-        const result = await client.call('dependencies.install', { id: 'cloudflared' }) as DependencyInstallResult;
+        const result = await client.call('dependencies.install', { id: 'cloudflared' }, 20 * 60_000) as DependencyInstallResult;
         if (!result.ok) throw new Error(result.output || 'cloudflared 설치 프로그램이 실패했습니다.');
         installedByAction = true;
         const refreshedReport = await client.call('dependencies.status', {}) as { items: DependencyInfo[] };
@@ -363,7 +394,7 @@ export function PluginsView() {
       const status = await client.call('plugins.call', { name: 'remote-link.start', params: {} }) as RemoteLinkStatus;
       if (!status.running || !status.publicUrl) throw new Error(status.lastError || '터널이 공개 HTTPS 주소를 반환하지 않았습니다.');
       if (mountedRef.current) {
-        setRemoteStatus(status);
+        commitRemoteStatus(status);
         setRemoteConfig(status.config);
       }
       advance(5, '모바일 QR 생성');
@@ -390,7 +421,7 @@ export function PluginsView() {
 
       if (confirmedStatus?.running && confirmedStatus.publicUrl) {
         if (mountedRef.current) {
-          setRemoteStatus(confirmedStatus);
+          commitRemoteStatus(confirmedStatus);
           setRemoteConfig(confirmedStatus.config);
           setCallResult(`터널 실행 상태 보존: ${confirmedStatus.publicUrl}`);
           setError(`원격 링크 ${stage} 실패: ${message} 터널은 이미 실행 중이므로 안전하게 유지했습니다.`);
@@ -436,7 +467,7 @@ export function PluginsView() {
     setRemoteBusy(true); setError('');
     try {
       const status = await client.call('plugins.call', { name: 'remote-link.stop', params: {} }) as RemoteLinkStatus;
-      setRemoteStatus(status);
+      commitRemoteStatus(status);
       setRemotePairing(null);
       setCallResult('원격 링크를 닫았습니다. 저장된 고정 주소와 암호화 토큰은 유지됩니다.');
     } catch (err) {
@@ -542,11 +573,11 @@ export function PluginsView() {
               {p.id !== 'voice-wake' && <Button variant={p.enabled ? 'ghost' : 'accent'} onClick={() => void togglePlugin(p)} disabled={p.id === 'remote-link' && remoteBusy}>{p.enabled ? '끄기' : '켜기'}</Button>}
               <Button variant="ghost" onClick={() => setExpanded((current) => current === p.id ? null : p.id)}>{expanded === p.id ? '설정 닫기' : '설정·상세'}</Button>
               {p.id === 'orca' ? <>
-                <Button variant="ghost" onClick={() => void refreshOrca()} disabled={orcaBusy}>상태 확인</Button>
+                <Button variant="ghost" onClick={() => void refreshOrca(true)} disabled={orcaBusy}>상태 확인</Button>
                 <Button variant="ghost" onClick={() => void openOrca()} disabled={orcaBusy || orcaStatus?.installed === false}>Orca 열기</Button>
               </> : <>
                 {p.id === 'remote-link'
-                  ? <Button variant="ghost" onClick={() => void refreshRemoteLink()} disabled={remoteBusy}>상태 확인</Button>
+                  ? <Button variant="ghost" onClick={() => void refreshRemoteLink(true)} disabled={remoteBusy}>상태 확인</Button>
                   : p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>)}
                 {p.id === 'tailscale-connect' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'tailscale.peers')}>기기 목록</Button>}
                 {p.id === 'docker-sandbox' && <Button onClick={() => void pluginCall(p.id, 'docker.ctf.image.ensure')} disabled={busy}>CTF 이미지 준비</Button>}
@@ -590,12 +621,13 @@ export function PluginsView() {
                 <p>토큰은 Windows DPAPI로 암호화되어 현재 Windows 사용자만 복호화할 수 있고, 상태 화면·QR·로그·명령줄에는 반환하지 않습니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
               </div>}
               <p className="panel-hint">이 방식은 시스템 VPN을 만들지 않고 cloudflared 프로세스 하나가 loopback Agent로 outbound 연결합니다. 일반적으로 금융 앱의 VPN 감지에는 영향을 주지 않지만, 기기·앱별 보안 정책은 다를 수 있습니다.</p>
-              {!cloudflared?.installed && <div className="dependency-warning">첫 연결 승인 후 Windows winget으로 Cloudflare cloudflared를 자동 설치합니다. 설치 결과는 다음 연결에서도 재사용합니다.</div>}
+              {!cloudflared?.installed && <div className="dependency-warning">cloudflared가 없습니다. 아래 설치 버튼 또는 첫 연결 승인 시 Windows winget 사용자 범위로 설치하며 다음 연결에서도 재사용합니다.</div>}
               {remoteConfig.provider === 'cloudflare-named' && <div className="type-row remote-link-options">
                 <label><input type="checkbox" checked={remoteConfig.autoStart} onChange={(event) => setRemoteConfig({ ...remoteConfig, autoStart: event.target.checked })} /> Mr.Robot 시작 시 고정 Tunnel 자동 연결</label>
                 {remoteConfig.hasTunnelToken && <Button variant="danger" onClick={() => void clearRemoteTunnelToken()} disabled={remoteBusy || remoteStatus?.running}>저장 토큰 삭제</Button>}
               </div>}
               <div className="type-row">
+                {!cloudflared?.installed && <Button variant="accent" onClick={() => void installCloudflared()} disabled={remoteBusy}>{remoteBusy ? `${remoteStage || '설치 준비 중'}…` : 'cloudflared 설치'}</Button>}
                 <Button variant="ghost" onClick={() => void saveRemoteLink()} disabled={remoteBusy || remoteStatus?.running}>설정 저장</Button>
                 <Button variant="accent" onClick={() => setQuickLinkConfirm(p)} disabled={remoteBusy || remoteStatus?.running || (remoteConfig.provider === 'cloudflare-named' && (!remoteConfig.hostname?.trim() || (!remoteConfig.hasTunnelToken && !remoteTunnelToken.trim())))}>{remoteBusy ? `${remoteStage || '연결 준비 중'}…` : remoteConfig.provider === 'cloudflare-named' ? '고정 Tunnel 연결' : 'Quick Link 빠른 연결'}</Button>
                 <Button variant="ghost" onClick={() => void verifyRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>외부 연결 검사</Button>

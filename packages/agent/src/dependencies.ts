@@ -25,6 +25,7 @@ interface Definition {
 
 const envPath = (name: string): string => process.env[name] ?? '';
 const programFiles = (): string => envPath('ProgramFiles') || 'C:\\Program Files';
+const programFilesX86 = (): string => envPath('ProgramFiles(x86)') || 'C:\\Program Files (x86)';
 const localAppData = (): string => envPath('LOCALAPPDATA');
 const appData = (): string => envPath('APPDATA');
 const windowsDir = (): string => envPath('WINDIR') || 'C:\\Windows';
@@ -98,6 +99,7 @@ const DEFINITIONS: Definition[] = [
     candidates: () => [
       join(localAppData(), 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),
       join(programFiles(), 'cloudflared', 'cloudflared.exe'),
+      join(programFilesX86(), 'cloudflared', 'cloudflared.exe'),
     ],
   },
   {
@@ -338,8 +340,12 @@ export class DependencyManager {
       } else if (definition.wingetId) {
         const winget = await findOnPath('winget');
         if (!winget) throw new Error('Windows 패키지 관리자(winget)를 찾을 수 없습니다.');
+        const portableUserInstall = definition.id === 'cloudflared'
+          ? ['--architecture', 'x64', '--installer-type', 'portable', '--scope', 'user']
+          : [];
         result = await run(winget, [
           'install', '--id', definition.wingetId, '--exact', '--source', 'winget', '--silent', '--disable-interactivity',
+          ...portableUserInstall,
           '--accept-package-agreements', '--accept-source-agreements',
         ], 15 * 60_000);
       } else if (definition.npmPackage) {
