@@ -56,7 +56,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.1';
+export const VERSION = '0.3.2';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
@@ -310,6 +310,10 @@ export class AgentServer {
     // Possession of a short PIN/QR proves proximity, not authorization for
     // unattended writes or administration. Higher access is granted later in
     // the local PC's connected-device settings.
+    // A PIN proves possession of the short-lived enrollment code only. Never
+    // let a modified client bootstrap workspace/full access, even when the
+    // PC's global ceiling is permissive. The local administrator can elevate
+    // this device explicitly after reviewing it in Connected devices.
     const cap = effectiveMode(this.config.settings.safety.mode, effectiveMode(requested, 'ask'));
     const created = this.config.createDeviceLink(deviceName, cap);
     // A displayed PIN enrolls exactly one device. Rotate after successful

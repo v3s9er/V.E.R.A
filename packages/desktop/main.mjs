@@ -9,7 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, safeStorage, se
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { appendFileSync, closeSync, copyFileSync, createWriteStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,7 @@ let quitting = false;
 let stopped = false;
 const activeDownloads = new Map();
 const activeDownloadPaths = new Map();
+const MAX_DESKTOP_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 let desktopPreferences = { openAtLogin: true, closeToTray: true };
 
 function startupLogPath() {
@@ -119,21 +120,103 @@ function rebuildTrayMenu() {
   ]));
 }
 
+function isLoopbackOrTailnetHost(hostname) {
+  const host = String(hostname).replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  const octets = host.split('.').map(Number);
+  return octets.length === 4
+    && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
+}
+
+function normalizeTrustedPcOrigin(value) {
+  const parsed = new URL(String(value ?? ''));
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password
+    || !['', '/'].includes(parsed.pathname) || parsed.search || parsed.hash) {
+    throw new Error('PC 접속 주소가 안전한 origin이 아닙니다.');
+  }
+  if (parsed.protocol === 'http:' && !isLoopbackOrTailnetHost(parsed.hostname)) {
+    throw new Error('평문 PC 접속 주소는 loopback 또는 Tailscale만 허용됩니다.');
+  }
+  return parsed.origin;
+}
+
+function originFromRegistryParts(protocol, host, port) {
+  const literal = String(host ?? '').trim().replace(/^\[|\]$/g, '');
+  if (!literal || literal.length > 512 || /[\s/@?#]/.test(literal)) throw new Error('PC 호스트가 올바르지 않습니다.');
+  const formatted = literal.includes(':') ? `[${literal}]` : literal;
+  return normalizeTrustedPcOrigin(`${protocol}://${formatted}:${port}`);
+}
+
 function sanitizePcRegistry(value) {
   if (!Array.isArray(value) || value.length > 100) throw new Error('PC 등록 정보가 올바르지 않습니다.');
-  return value.map((entry) => ({
-    id: String(entry?.id ?? '').slice(0, 160),
-    name: String(entry?.name ?? '').slice(0, 160),
-    host: String(entry?.host ?? '').slice(0, 512),
-    hosts: Array.isArray(entry?.hosts) ? entry.hosts.map((item) => String(item).slice(0, 512)).slice(0, 16) : undefined,
-    activeHost: entry?.activeHost ? String(entry.activeHost).slice(0, 512) : undefined,
-    origins: Array.isArray(entry?.origins) ? entry.origins.map((item) => String(item).slice(0, 1024)).slice(0, 24) : undefined,
-    activeOrigin: entry?.activeOrigin ? String(entry.activeOrigin).slice(0, 1024) : undefined,
-    protocol: entry?.protocol === 'https' ? 'https' : 'http',
-    port: Math.max(1, Math.min(65535, Number(entry?.port) || 8787)),
-    secret: String(entry?.secret ?? '').slice(0, 4096),
-    addedAt: Number(entry?.addedAt) || Date.now(),
-  })).filter((entry) => entry.id && entry.host && entry.secret);
+  const seen = new Set();
+  return value.flatMap((entry) => {
+    try {
+      const id = String(entry?.id ?? '').trim().slice(0, 160);
+      const name = String(entry?.name ?? '').trim().slice(0, 160) || '연결된 PC';
+      const protocol = entry?.protocol === 'https' ? 'https' : 'http';
+      const port = Math.max(1, Math.min(65535, Number(entry?.port) || 8787));
+      const secret = String(entry?.secret ?? '').slice(0, 4096);
+      const primary = originFromRegistryParts(protocol, entry?.host, port);
+      if (!id || seen.has(id) || secret.length < 32) return [];
+      seen.add(id);
+      const candidates = [
+        primary,
+        entry?.activeOrigin,
+        ...(Array.isArray(entry?.origins) ? entry.origins.slice(0, 24) : []),
+        ...(Array.isArray(entry?.hosts) ? entry.hosts.slice(0, 16).map((item) => {
+          const raw = String(item ?? '').trim();
+          if (!raw) return undefined;
+          return /^https?:\/\//i.test(raw) ? raw : originFromRegistryParts(protocol, raw, port);
+        }) : []),
+      ];
+      const origins = [...new Set(candidates.filter(Boolean).flatMap((candidate) => {
+        try { return [normalizeTrustedPcOrigin(candidate)]; } catch { return []; }
+      }))];
+      const requestedActive = entry?.activeOrigin ? (() => {
+        try { return normalizeTrustedPcOrigin(entry.activeOrigin); } catch { return undefined; }
+      })() : undefined;
+      const activeOrigin = requestedActive && origins.includes(requestedActive) ? requestedActive : primary;
+      const primaryUrl = new URL(primary);
+      const activeUrl = new URL(activeOrigin);
+      return [{
+        id,
+        name,
+        host: primaryUrl.hostname.replace(/^\[|\]$/g, ''),
+        hosts: origins.map((origin) => new URL(origin).hostname.replace(/^\[|\]$/g, '')).slice(0, 16),
+        activeHost: activeUrl.hostname.replace(/^\[|\]$/g, ''),
+        origins,
+        activeOrigin,
+        protocol: primaryUrl.protocol === 'https:' ? 'https' : 'http',
+        port: Number(primaryUrl.port || (primaryUrl.protocol === 'https:' ? 443 : 80)),
+        secret,
+        addedAt: Number(entry?.addedAt) || Date.now(),
+      }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function assertTrustedRenderer(event) {
+  const expected = agentPort ? `http://127.0.0.1:${agentPort}` : '';
+  let actual = '';
+  try { actual = new URL(event.senderFrame?.url ?? '').origin; } catch { /* reject below */ }
+  if (!win || event.sender !== win.webContents || event.senderFrame?.parent || actual !== expected) {
+    throw new Error('신뢰할 수 없는 화면의 데스크톱 요청을 차단했습니다.');
+  }
+}
+
+function createDownloadLimitStream(maxBytes) {
+  let received = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      received += chunk.length;
+      if (received > maxBytes) callback(new Error('다운로드는 최대 2GB까지 허용됩니다.'));
+      else callback(null, chunk);
+    },
+  });
 }
 
 function readPcRegistryFile(file) {
@@ -303,18 +386,24 @@ function createWindow(url) {
   void win.loadURL(url);
 }
 
-ipcMain.handle('mr-robot:choose-directory', async () => {
+ipcMain.handle('mr-robot:choose-directory', async (event) => {
+  assertTrustedRenderer(event);
   const result = await dialog.showOpenDialog(win ?? undefined, { properties: ['openDirectory', 'createDirectory'], title: 'Mr.Robot 작업 폴더 선택' });
   return result.canceled ? null : result.filePaths[0] ?? null;
 });
 
-ipcMain.handle('mr-robot:pcs.load', () => loadPcRegistry());
-ipcMain.handle('mr-robot:pcs.save', (_event, value) => {
+ipcMain.handle('mr-robot:pcs.load', (event) => {
+  assertTrustedRenderer(event);
+  return loadPcRegistry();
+});
+ipcMain.handle('mr-robot:pcs.save', (event, value) => {
+  assertTrustedRenderer(event);
   savePcRegistry(value);
   return { ok: true };
 });
 
-ipcMain.handle('mr-robot:download', async (_event, input) => {
+ipcMain.handle('mr-robot:download', async (event, input) => {
+  assertTrustedRenderer(event);
   const id = String(input?.id ?? '').slice(0, 120);
   const rawUrl = String(input?.url ?? '').slice(0, 4096);
   const token = String(input?.token ?? '').slice(0, 4096);
@@ -327,6 +416,10 @@ ipcMain.handle('mr-robot:download', async (_event, input) => {
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new Error('HTTP 또는 HTTPS 다운로드만 허용됩니다.');
   }
+  const registry = loadPcRegistry();
+  const localAllowed = parsed.origin === `http://127.0.0.1:${agentPort}` && token === server?.secret;
+  const registeredAllowed = registry.ok && registry.value.some((pc) => pc.secret === token && pc.origins?.includes(parsed.origin));
+  if (!localAllowed && !registeredAllowed) throw new Error('등록된 PC 주소와 자격증명이 일치하지 않아 다운로드를 차단했습니다.');
   const picked = await dialog.showSaveDialog(win ?? undefined, { title: 'Mr.Robot 파일 저장', defaultPath: suggestedName });
   if (picked.canceled || !picked.filePath) return { canceled: true };
   const destinationKey = resolve(picked.filePath).toLocaleLowerCase('en-US');
@@ -341,9 +434,12 @@ ipcMain.handle('mr-robot:download', async (_event, input) => {
     const response = await fetch(parsed.href, {
       headers: token ? { 'x-mr-robot-token': token } : undefined,
       signal: controller.signal,
+      redirect: 'error',
     });
     if (!response.ok || !response.body) throw new Error(`다운로드 실패 (HTTP ${response.status})`);
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(partialPath, { flags: 'w' }), { signal: controller.signal });
+    const advertised = Number(response.headers.get('content-length') ?? 0);
+    if (Number.isFinite(advertised) && advertised > MAX_DESKTOP_DOWNLOAD_BYTES) throw new Error('다운로드는 최대 2GB까지 허용됩니다.');
+    await pipeline(Readable.fromWeb(response.body), createDownloadLimitStream(MAX_DESKTOP_DOWNLOAD_BYTES), createWriteStream(partialPath, { flags: 'w' }), { signal: controller.signal });
     // Preserve an existing destination until the complete response has reached
     // disk. The Save dialog already owns the overwrite decision.
     if (existsSync(picked.filePath)) {
@@ -367,7 +463,8 @@ ipcMain.handle('mr-robot:download', async (_event, input) => {
   }
 });
 
-ipcMain.handle('mr-robot:download.cancel', (_event, id) => {
+ipcMain.handle('mr-robot:download.cancel', (event, id) => {
+  assertTrustedRenderer(event);
   const controller = activeDownloads.get(String(id));
   controller?.abort();
   return { ok: Boolean(controller) };
@@ -375,7 +472,8 @@ ipcMain.handle('mr-robot:download.cancel', (_event, id) => {
 
 // The desktop renderer talks directly to the agent embedded in this process.
 // It never needs pairing, a saved PC entry, LAN discovery, or a tunnel plugin.
-ipcMain.handle('mr-robot:local-connection', () => {
+ipcMain.handle('mr-robot:local-connection', (event) => {
+  assertTrustedRenderer(event);
   if (!server || !agentPort) throw new Error('로컬 에이전트가 아직 시작되지 않았습니다.');
   const info = server.pairingInfo(true);
   return {

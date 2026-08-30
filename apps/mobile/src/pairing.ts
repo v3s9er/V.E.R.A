@@ -18,7 +18,7 @@ function securePairingOrigin(value: string, port: number, protocol: 'http' | 'ht
     throw new Error('페어링 QR에는 origin 주소만 사용할 수 있습니다.');
   }
   if (parsed.protocol !== 'https:' && !isTailnetHost(parsed.hostname)) {
-    throw new Error('페어링 QR은 HTTPS Quick Link 또는 Tailscale 주소가 필요합니다.');
+    throw new Error('페어링 QR은 Cloudflare HTTPS 원격 링크 또는 Tailscale 주소가 필요합니다.');
   }
   const resolvedPort = Number(parsed.port || (explicitScheme && parsed.protocol === 'https:' ? 443 : port));
   if (!Number.isInteger(resolvedPort) || resolvedPort < 1 || resolvedPort > 65_535) throw new Error('페어링 포트가 올바르지 않습니다.');

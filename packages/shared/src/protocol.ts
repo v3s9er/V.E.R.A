@@ -449,14 +449,22 @@ export interface SyncMergeResult {
 }
 
 /** Pluggable remote transports. Account relay remains unavailable until its external control plane is configured. */
-export type RemoteTransportProviderId = 'cloudflare-quick' | 'google-relay';
+export type RemoteTransportProviderId = 'cloudflare-quick' | 'cloudflare-named' | 'google-relay';
 
 export interface RemoteLinkConfig {
   provider: RemoteTransportProviderId;
-  /** Only an HTTP loopback Agent URL is accepted by the current quick-link provider. */
+  /** Only this Agent's HTTP loopback URL may be published. */
   localUrl: string;
-  /** Deliberately false for temporary links; they must never silently reopen after login. */
-  autoStart: false;
+  /** Fixed public hostname configured on the user's remotely-managed Cloudflare Tunnel. */
+  hostname?: string;
+  /** Write-only input. Status/config responses never return this credential. */
+  tunnelToken?: string;
+  /** True when a DPAPI-protected token already exists on this Windows account. */
+  hasTunnelToken?: boolean;
+  /** Write-only input for deliberately removing the saved credential. */
+  clearTunnelToken?: boolean;
+  /** Named tunnels may reconnect automatically when the enabled plugin starts. */
+  autoStart: boolean;
 }
 
 export interface RemoteTransportProviderInfo {
@@ -478,8 +486,10 @@ export interface RemoteLinkStatus {
   publicUrl?: string;
   websocketUrl?: string;
   startedAt?: number;
-  temporary: true;
-  beta: true;
+  temporary: boolean;
+  beta: boolean;
+  reachable?: boolean;
+  verifiedAt?: number;
   warning: string;
   lastError?: string;
   diagnostics?: string;

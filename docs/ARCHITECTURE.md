@@ -116,7 +116,7 @@ per-device permission caps at the application layer.
 
 ## CTF sandbox
 
-`mr-robot/ctf-toolbox:0.3.1` is an Ubuntu 24.04 image containing reusable reversing,
+`mr-robot/ctf-toolbox:0.3.2` is an Ubuntu 24.04 image containing reusable reversing,
 pwn, crypto, forensics, and network-analysis tools. Default execution uses a
 read-only root, non-root user, `--cap-drop=ALL`, `no-new-privileges`, no network,
 bounded memory/CPU/PIDs, an in-memory `/tmp`, a read-only challenge mount, and a

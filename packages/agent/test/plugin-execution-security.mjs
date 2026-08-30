@@ -113,7 +113,7 @@ console.log('2. Docker mounts remain under the trusted workspace realpath');
   let replacementRejected = false;
   try { revalidateDockerWorkspacePaths(confined); } catch { replacementRejected = true; }
   check('same-path replacement is caught by pre-run inode revalidation', replacementRejected);
-  check('Docker plugin and toolbox release line is 0.3.1', createDockerPlugin().manifest.version === '0.3.1');
+  check('Docker plugin and toolbox release line is 0.3.2', createDockerPlugin().manifest.version === '0.3.2');
 }
 
 console.log('3. Orca cancellation reaps its subprocess tree');

@@ -19,7 +19,7 @@ const dist = resolve(here, '..', 'dist');
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
 const { browserOriginAllowed, createByteLimitStream, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
-const { createRemoteLinkPlugin, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
+const { createRemoteLinkPlugin, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { screenSize } = await import(pathToFileURL(join(dist, 'computer', 'screen.js')).href);
@@ -70,6 +70,19 @@ try {
 } catch { byteLimitBlocked = true; }
 check('stream byte limit counts actual bytes', byteLimitBlocked);
 check('quick tunnel URL parser', parseQuickTunnelUrl('INF route https://quiet-tree.trycloudflare.com ready') === 'https://quiet-tree.trycloudflare.com');
+check('named tunnel readiness parser', namedTunnelReady('INF Registered tunnel connection connIndex=0'));
+check('named tunnel hostname normalizer', normalizeNamedTunnelHostname('https://PC1.Example.com/') === 'pc1.example.com');
+let unsafeNamedHostBlocked = false;
+try { normalizeNamedTunnelHostname('https://user:pass@example.com/private'); } catch { unsafeNamedHostBlocked = true; }
+check('named tunnel rejects credential and path injection', unsafeNamedHostBlocked);
+let privateNamedHostBlocked = false;
+try { normalizeNamedTunnelHostname('https://127.0.0.1'); } catch { privateNamedHostBlocked = true; }
+check('named tunnel verification cannot target an IP literal', privateNamedHostBlocked);
+let internalNamedHostBlocked = false;
+try { normalizeNamedTunnelHostname('https://metadata.service.internal'); } catch { internalNamedHostBlocked = true; }
+check('named tunnel verification rejects internal DNS suffixes', internalNamedHostBlocked);
+const diagnosticSecret = `eyJ${'A'.repeat(120)}`;
+check('remote diagnostics redact tunnel credentials', !redactRemoteLinkDiagnostics(`token=${diagnosticSecret}`).includes(diagnosticSecret));
 check('remote link only accepts loopback', normalizeRemoteLinkLocalUrl('http://127.0.0.1:8787') === 'http://127.0.0.1:8787');
 let arbitraryLocalServiceBlocked = false;
 try { normalizeRemoteLinkLocalUrl('http://192.168.10.20:8787'); } catch { arbitraryLocalServiceBlocked = true; }
@@ -118,6 +131,49 @@ const stopB = Promise.resolve(remoteCommands.get('remote-link.stop')({}));
 tunnelB.close();
 await stopB;
 await racePlugin.deactivate(fakePluginContext);
+
+const namedToken = `eyJ${'B'.repeat(160)}`;
+const namedChild = new FakeTunnelProcess(103);
+const namedCommands = new Map();
+const namedStorage = new Map();
+let spawnedArgs = [];
+let spawnedToken = '';
+const namedPlugin = createRemoteLinkPlugin({
+  findExecutable: () => 'fake-cloudflared',
+  protectSecret: (value) => `protected:${value}`,
+  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  spawnProcess: (_executable, args, options) => {
+    spawnedArgs = [...args];
+    spawnedToken = options.env?.TUNNEL_TOKEN ?? '';
+    return namedChild;
+  },
+  fetchUrl: async () => new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } }),
+});
+const namedContext = {
+  ...fakePluginContext,
+  storage: { get: (key) => namedStorage.get(key), set: (key, value) => namedStorage.set(key, value) },
+  registerCommand: (name, handler) => namedCommands.set(name, handler),
+};
+namedPlugin.activate(namedContext);
+const savedNamed = await namedCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.example.com', tunnelToken: namedToken, autoStart: true,
+});
+const persistedNamed = namedStorage.get('config');
+check('named tunnel token is protected at rest and omitted from config responses', persistedNamed.tunnelTokenProtected === `protected:${namedToken}` && !JSON.stringify(savedNamed).includes(namedToken) && savedNamed.hasTunnelToken === true);
+const namedStart = namedCommands.get('remote-link.start')({});
+namedChild.stderr.write(`INF Registered tunnel connection connIndex=0 token=${namedToken}`);
+const namedStatus = await namedStart;
+check('named tunnel uses environment credential instead of process arguments', spawnedToken === namedToken && !spawnedArgs.join(' ').includes(namedToken));
+check('named tunnel exposes only the validated stable origin', namedStatus.publicUrl === 'https://pc1.example.com' && namedStatus.temporary === false);
+check('named tunnel status diagnostics never return the connector token', !String(namedStatus.diagnostics).includes(namedToken));
+const verifiedNamed = await namedCommands.get('remote-link.verify')({});
+check('named tunnel verifies the public endpoint before pairing', verifiedNamed.ok === true && verifiedNamed.url === 'https://pc1.example.com');
+const namedStop = Promise.resolve(namedCommands.get('remote-link.stop')({}));
+namedChild.close();
+await namedStop;
+const clearedNamed = await namedCommands.get('remote-link.config.set')({ ...savedNamed, clearTunnelToken: true });
+check('saved tunnel credential can be explicitly cleared', clearedNamed.hasTunnelToken === false && !namedStorage.get('config').tunnelTokenProtected);
+await namedPlugin.deactivate(namedContext);
 const confineBase = mkdtempSync(join(tmpdir(), 'mr-robot-confine-'));
 const confineRoot = join(confineBase, 'root');
 const confineOutside = join(confineBase, 'outside');
@@ -202,6 +258,9 @@ server.plugins.setEnabled('orca', false);
 
 const ping = await (await fetch(`${base}/api/ping`)).json();
 check('GET /api/ping', ping.ok === true);
+const pingHeaders = await fetch(`${base}/api/ping`);
+check('public responses suppress framework identity and add browser hardening', !pingHeaders.headers.has('x-powered-by') && /frame-ancestors 'none'/.test(pingHeaders.headers.get('content-security-policy') ?? '') && pingHeaders.headers.get('x-frame-options') === 'DENY');
+check('API responses are never cached and advertise HTTPS persistence through a tunnel', /no-store/.test(pingHeaders.headers.get('cache-control') ?? '') && /max-age=31536000/.test(pingHeaders.headers.get('strict-transport-security') ?? ''));
 
 const foreignOrigin = await fetch(`${base}/api/ping`, { headers: { origin: 'https://evil.example' } });
 check('foreign browser Origin rejected', foreignOrigin.status === 403);

@@ -55,6 +55,7 @@ export function PluginsView() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteLinkStatus | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<RemoteLinkConfig>(DEFAULT_REMOTE_CONFIG);
+  const [remoteTunnelToken, setRemoteTunnelToken] = useState('');
   const [cloudflared, setCloudflared] = useState<DependencyInfo | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteStage, setRemoteStage] = useState('');
@@ -247,12 +248,51 @@ export function PluginsView() {
   const saveRemoteLink = async (): Promise<void> => {
     setRemoteBusy(true); setError('');
     try {
-      const saved = await client.call('plugins.call', { name: 'remote-link.config.set', params: remoteConfig }) as RemoteLinkConfig;
+      const saved = await client.call('plugins.call', {
+        name: 'remote-link.config.set',
+        params: { ...remoteConfig, tunnelToken: remoteTunnelToken.trim() || undefined },
+      }) as RemoteLinkConfig;
       setRemoteConfig(saved);
-      setCallResult('Cloudflare Quick Link 설정을 저장했습니다.');
+      setRemoteTunnelToken('');
+      setCallResult(saved.provider === 'cloudflare-named'
+        ? 'Cloudflare 고정 Tunnel 설정과 암호화된 자격증명을 저장했습니다.'
+        : 'Cloudflare Quick Link 설정을 저장했습니다.');
       await refreshRemoteLink();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const clearRemoteTunnelToken = async (): Promise<void> => {
+    if (remoteBusy || remoteStatus?.running) return;
+    setRemoteBusy(true); setError('');
+    try {
+      const saved = await client.call('plugins.call', {
+        name: 'remote-link.config.set',
+        params: { ...remoteConfig, clearTunnelToken: true, tunnelToken: undefined },
+      }) as RemoteLinkConfig;
+      setRemoteConfig(saved);
+      setRemoteTunnelToken('');
+      setCallResult('이 PC에 저장된 Cloudflare Tunnel 토큰을 삭제했습니다. Cloudflare 대시보드에서 기존 토큰도 회전하거나 폐기하세요.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const verifyRemoteLink = async (): Promise<void> => {
+    if (remoteBusy || !remoteStatus?.running) return;
+    setRemoteBusy(true); setError('');
+    try {
+      const result = await client.call('plugins.call', { name: 'remote-link.verify', params: {} }) as { message?: string };
+      setCallResult(result.message || '외부 연결을 확인했습니다.');
+      await refreshRemoteLink();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await refreshRemoteLink();
     } finally {
       setRemoteBusy(false);
     }
@@ -289,7 +329,7 @@ export function PluginsView() {
           setRemoteConfig(initialStatus.config);
         }
         await refreshRemotePairing(initialStatus);
-        if (mountedRef.current) setCallResult(`Quick Link가 이미 실행 중입니다: ${initialStatus.publicUrl}`);
+        if (mountedRef.current) setCallResult(`원격 링크가 이미 실행 중입니다: ${initialStatus.publicUrl}`);
         return;
       }
 
@@ -313,7 +353,11 @@ export function PluginsView() {
 
       advance(3, '원격 설정 저장');
       configChanged = true;
-      await client.call('plugins.call', { name: 'remote-link.config.set', params: remoteConfig });
+      await client.call('plugins.call', {
+        name: 'remote-link.config.set',
+        params: { ...remoteConfig, tunnelToken: remoteTunnelToken.trim() || undefined },
+      });
+      if (mountedRef.current) setRemoteTunnelToken('');
 
       advance(4, '암호화 터널 시작');
       const status = await client.call('plugins.call', { name: 'remote-link.start', params: {} }) as RemoteLinkStatus;
@@ -324,8 +368,10 @@ export function PluginsView() {
       }
       advance(5, '모바일 QR 생성');
       await refreshRemotePairing(status);
+      advance(6, '외부 주소 확인');
+      await client.call('plugins.call', { name: 'remote-link.verify', params: {} });
       if (mountedRef.current) {
-        setCallResult(`Quick Link 연결 완료: ${status.publicUrl}`);
+        setCallResult(`${status.temporary ? 'Quick Link' : '고정 Tunnel'} 연결 완료: ${status.publicUrl}`);
         setError('');
       }
       await refresh();
@@ -347,21 +393,23 @@ export function PluginsView() {
           setRemoteStatus(confirmedStatus);
           setRemoteConfig(confirmedStatus.config);
           setCallResult(`터널 실행 상태 보존: ${confirmedStatus.publicUrl}`);
-          setError(`Quick Link ${stage} 실패: ${message} 터널은 이미 실행 중이므로 안전하게 유지했습니다.`);
+          setError(`원격 링크 ${stage} 실패: ${message} 터널은 이미 실행 중이므로 안전하게 유지했습니다.`);
         }
         try { await refreshRemotePairing(confirmedStatus); } catch { /* preserve the original stage error */ }
       } else if (statusCheckFailed) {
         if (mountedRef.current) {
-          setError(`Quick Link ${stage} 실패: ${message} 터널 상태를 다시 확인할 수 없어 설치·활성화·설정을 그대로 보존했습니다. ‘상태 확인’ 후 필요하면 링크를 중지하세요.`);
+          setError(`원격 링크 ${stage} 실패: ${message} 터널 상태를 다시 확인할 수 없어 설치·활성화·설정을 그대로 보존했습니다. ‘상태 확인’ 후 필요하면 링크를 중지하세요.`);
         }
       } else {
-        if (configChanged && originalConfig) {
+        if (configChanged && originalConfig && remoteConfig.provider !== 'cloudflare-named') {
           try {
             await client.call('plugins.call', { name: 'remote-link.config.set', params: originalConfig });
             recovery.push('기존 원격 설정을 복원했습니다.');
           } catch {
             recovery.push('기존 원격 설정 복원에는 실패했습니다.');
           }
+        } else if (configChanged && remoteConfig.provider === 'cloudflare-named') {
+          recovery.push('입력한 고정 Tunnel 설정은 수정할 수 있도록 보존했습니다.');
         }
         if (enabledByAction) {
           try {
@@ -372,7 +420,7 @@ export function PluginsView() {
           }
         }
         if (installedByAction) recovery.push('설치된 cloudflared는 다음 연결에서 재사용하도록 유지했습니다.');
-        if (mountedRef.current) setError(`Quick Link ${stage} 실패: ${message}${recovery.length ? ` ${recovery.join(' ')}` : ''}`);
+        if (mountedRef.current) setError(`원격 링크 ${stage} 실패: ${message}${recovery.length ? ` ${recovery.join(' ')}` : ''}`);
       }
       await refresh();
     } finally {
@@ -390,7 +438,7 @@ export function PluginsView() {
       const status = await client.call('plugins.call', { name: 'remote-link.stop', params: {} }) as RemoteLinkStatus;
       setRemoteStatus(status);
       setRemotePairing(null);
-      setCallResult('임시 원격 링크를 닫았습니다.');
+      setCallResult('원격 링크를 닫았습니다. 저장된 고정 주소와 암호화 토큰은 유지됩니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -518,22 +566,39 @@ export function PluginsView() {
             {p.id === 'remote-link' && <div className="provider-add">
               <div className="provider-top">
                 <Badge tone={p.enabled ? 'ok' : 'warn'}>{p.enabled ? '플러그인 켜짐' : '기본 OFF'}</Badge>
-                <Badge tone={remoteStatus?.running ? 'ok' : 'warn'}>{remoteStatus?.running ? '임시 링크 실행 중' : '링크 닫힘'}</Badge>
+                <Badge tone={remoteStatus?.running ? 'ok' : 'warn'}>{remoteStatus?.running ? `${remoteStatus.temporary ? '임시' : '고정'} 링크 실행 중` : '링크 닫힘'}</Badge>
                 <Badge tone={cloudflared?.installed ? 'ok' : 'warn'}>{cloudflared?.installed ? 'cloudflared 설치됨' : 'cloudflared 필요'}</Badge>
-                <Badge tone="warn">베타 · 임시 주소</Badge>
+                <Badge tone={remoteConfig.provider === 'cloudflare-named' ? 'ok' : 'warn'}>{remoteConfig.provider === 'cloudflare-named' ? '고정 주소' : '베타 · 임시 주소'}</Badge>
+                {remoteStatus?.running && <Badge tone={remoteStatus.reachable ? 'ok' : 'warn'}>{remoteStatus.reachable ? '외부 확인됨' : '외부 확인 필요'}</Badge>}
               </div>
-              <div className="dependency-warning">
-                Cloudflare Quick Tunnel은 테스트·개발용 임시 기능입니다. 주소는 다시 시작할 때 바뀌고 누구나 인터넷에서 해당 주소에 도달할 수 있으므로, 필요한 동안만 켜고 페어링 PIN·기기 토큰을 외부에 공유하지 마세요.
+              <div className={remoteConfig.provider === 'cloudflare-named' ? 'remote-link-notice' : 'dependency-warning'}>
+                {remoteConfig.provider === 'cloudflare-named'
+                  ? '고정 Tunnel은 Cloudflare 계정에 등록한 도메인을 계속 사용합니다. Agent는 loopback에만 남고 cloudflared가 outbound 연결하며, 모든 요청은 Mr.Robot 기기 토큰과 권한 상한을 다시 검사합니다.'
+                  : 'Cloudflare Quick Tunnel은 테스트·개발용 임시 기능입니다. 주소는 다시 시작할 때 바뀌므로 필요한 동안만 켜고 페어링 PIN·기기 토큰을 외부에 공유하지 마세요.'}
               </div>
               <div className="form-grid">
-                <label className="field"><span>원격 전송 provider</span><Select value={remoteConfig.provider} onChange={(event) => setRemoteConfig({ ...remoteConfig, provider: event.target.value as RemoteLinkConfig['provider'] })}><option value="cloudflare-quick">Cloudflare Quick Tunnel (임시)</option><option value="google-relay" disabled>Google 계정 Relay (외부 구성 필요)</option></Select></label>
+                <label className="field"><span>원격 연결 방식</span><Select value={remoteConfig.provider} onChange={(event) => setRemoteConfig({ ...remoteConfig, provider: event.target.value as RemoteLinkConfig['provider'], autoStart: event.target.value === 'cloudflare-named' ? remoteConfig.autoStart : false })}><option value="cloudflare-quick">Cloudflare Quick Tunnel (임시·계정 불필요)</option><option value="cloudflare-named">Cloudflare 고정 Tunnel (권장)</option><option value="google-relay" disabled>Google 계정 Relay (외부 구성 필요)</option></Select></label>
                 <label className="field"><span>현재 Agent 주소 (자동)</span><Input value={remoteConfig.localUrl} readOnly aria-readonly="true" /></label>
+                {remoteConfig.provider === 'cloudflare-named' && <>
+                  <label className="field"><span>고정 공개 호스트명</span><Input value={remoteConfig.hostname ?? ''} onChange={(event) => setRemoteConfig({ ...remoteConfig, hostname: event.target.value })} placeholder="예: pc1.v3s9er.com" autoCapitalize="none" spellCheck={false} /></label>
+                  <label className="field"><span>Cloudflare Tunnel 토큰</span><Input type="password" value={remoteTunnelToken} onChange={(event) => setRemoteTunnelToken(event.target.value)} placeholder={remoteConfig.hasTunnelToken ? '저장됨 · 변경할 때만 새 토큰 입력' : 'eyJ… Connector 토큰 전체'} autoComplete="off" /></label>
+                </>}
               </div>
+              {remoteConfig.provider === 'cloudflare-named' && <div className="named-tunnel-setup">
+                <b>Cloudflare에서 한 번만 준비</b>
+                <ol><li>Networking → Tunnels에서 Tunnel을 만듭니다.</li><li>Public Hostname을 위 주소로 만들고 Service를 <code>{remoteConfig.localUrl}</code>로 지정합니다.</li><li>Add a replica에 표시되는 <code>cloudflared … --token eyJ…</code>의 토큰 부분만 붙여넣습니다.</li></ol>
+                <p>토큰은 Windows DPAPI로 암호화되어 현재 Windows 사용자만 복호화할 수 있고, 상태 화면·QR·로그·명령줄에는 반환하지 않습니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
+              </div>}
               <p className="panel-hint">이 방식은 시스템 VPN을 만들지 않고 cloudflared 프로세스 하나가 loopback Agent로 outbound 연결합니다. 일반적으로 금융 앱의 VPN 감지에는 영향을 주지 않지만, 기기·앱별 보안 정책은 다를 수 있습니다.</p>
               {!cloudflared?.installed && <div className="dependency-warning">첫 연결 승인 후 Windows winget으로 Cloudflare cloudflared를 자동 설치합니다. 설치 결과는 다음 연결에서도 재사용합니다.</div>}
+              {remoteConfig.provider === 'cloudflare-named' && <div className="type-row remote-link-options">
+                <label><input type="checkbox" checked={remoteConfig.autoStart} onChange={(event) => setRemoteConfig({ ...remoteConfig, autoStart: event.target.checked })} /> Mr.Robot 시작 시 고정 Tunnel 자동 연결</label>
+                {remoteConfig.hasTunnelToken && <Button variant="danger" onClick={() => void clearRemoteTunnelToken()} disabled={remoteBusy || remoteStatus?.running}>저장 토큰 삭제</Button>}
+              </div>}
               <div className="type-row">
                 <Button variant="ghost" onClick={() => void saveRemoteLink()} disabled={remoteBusy || remoteStatus?.running}>설정 저장</Button>
-                <Button variant="accent" onClick={() => setQuickLinkConfirm(p)} disabled={remoteBusy || remoteStatus?.running}>{remoteBusy ? `${remoteStage || '연결 준비 중'}…` : 'Quick Link 빠른 연결'}</Button>
+                <Button variant="accent" onClick={() => setQuickLinkConfirm(p)} disabled={remoteBusy || remoteStatus?.running || (remoteConfig.provider === 'cloudflare-named' && (!remoteConfig.hostname?.trim() || (!remoteConfig.hasTunnelToken && !remoteTunnelToken.trim())))}>{remoteBusy ? `${remoteStage || '연결 준비 중'}…` : remoteConfig.provider === 'cloudflare-named' ? '고정 Tunnel 연결' : 'Quick Link 빠른 연결'}</Button>
+                <Button variant="ghost" onClick={() => void verifyRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>외부 연결 검사</Button>
                 <Button variant="danger" onClick={() => void stopRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>링크 중지</Button>
               </div>
               {remoteStatus?.publicUrl && <div className="pairing-routes">
@@ -541,7 +606,7 @@ export function PluginsView() {
                 {remoteStatus.websocketUrl && <span>WSS <b>{remoteStatus.websocketUrl}</b> <Button variant="ghost" onClick={() => void copyRemoteAddress(remoteStatus.websocketUrl as string)}>복사</Button></span>}
               </div>}
               {remoteStatus?.publicUrl && remotePairing && <div className="pairing-grid quick-link-pairing">
-                <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Quick Link 모바일 연결 QR" width={220} height={220} /></div>
+                <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Cloudflare 모바일 연결 QR" width={220} height={220} /></div>
                 <div className="pairing-info">
                   <b>모바일 원탭 연결</b>
                   <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. HTTPS 주소와 1회용 PIN이 함께 들어 있습니다.</p>
@@ -551,7 +616,7 @@ export function PluginsView() {
               </div>}
               {remoteStatus?.publicUrl && !remotePairing && <p className="panel-hint">모바일 연결 QR을 준비하는 중입니다. 준비되지 않으면 설정 → 모바일 연결에서 PIN 재생성을 누른 뒤 다시 시도하세요.</p>}
               {remoteStatus?.lastError && <div className="gate-error">{remoteStatus.lastError}</div>}
-              <p className="panel-hint">Google 계정 기반 상시 Relay는 Firebase OAuth, 기기 공개키 승인, signaling 및 E2EE relay 서버가 있어야 안전합니다. 자격증명이 없는 현재 빌드에서는 선택할 수 없습니다.</p>
+              <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 Mr.Robot이 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
             </div>}
             {details[p.id] !== undefined && <pre className="shell-out">{JSON.stringify(details[p.id], null, 2)}</pre>}
             {p.id === 'orca' && orcaConfig && <div className="provider-add">
@@ -579,12 +644,12 @@ export function PluginsView() {
         ))}</div>
       )}
 
-      <Modal open={quickLinkConfirm !== null} onClose={() => { if (!remoteBusy) setQuickLinkConfirm(null); }} title="Quick Link 공개 연결 승인">
+      <Modal open={quickLinkConfirm !== null} onClose={() => { if (!remoteBusy) setQuickLinkConfirm(null); }} title={`${remoteConfig.provider === 'cloudflare-named' ? '고정 Tunnel' : 'Quick Link'} 공개 연결 승인`}>
         {quickLinkConfirm && <div className="delete-dialog">
           <div className="delete-dialog-icon">!</div>
           <div>
-            <b>이 PC의 Agent 로그인·페어링 화면을 임시 공개 HTTPS 주소로 엽니다.</b>
-            <p>계속하면 필요한 경우 winget으로 Cloudflare cloudflared를 설치하고, Remote Link 플러그인을 켠 뒤 임시 터널과 5분·1회용 PIN QR을 만듭니다. 주소를 아는 사람은 인터넷에서 연결 화면에 도달할 수 있으므로 QR과 PIN을 공유하지 말고 사용 후 반드시 링크를 중지하세요.</p>
+            <b>이 PC의 Agent 로그인·페어링 화면을 {remoteConfig.provider === 'cloudflare-named' ? '사용자 도메인의 고정' : '임시'} HTTPS 주소로 엽니다.</b>
+            <p>계속하면 필요한 경우 cloudflared를 설치하고 암호화 Tunnel과 5분·1회용 PIN QR을 만듭니다. 공개 주소에서는 PIN 시도 제한과 기기별 폐기 가능 토큰이 적용됩니다. {remoteConfig.provider === 'cloudflare-named' ? '고정 주소는 자동 시작을 켜면 앱 재실행 때 다시 연결되므로 Cloudflare 토큰과 등록 기기를 주기적으로 검토하세요.' : '임시 주소는 사용 후 반드시 링크를 중지하세요.'}</p>
           </div>
           <div className="modal-actions">
             <Button variant="ghost" disabled={remoteBusy} onClick={() => setQuickLinkConfirm(null)}>취소</Button>

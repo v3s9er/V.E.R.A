@@ -75,7 +75,7 @@ function isTailnetHost(host: string): boolean {
 export function assertSecureRemoteOrigin(value: string): string {
   const parsed = parsePcAddress(value);
   if (parsed.protocol !== 'https' && !isTailnetHost(parsed.host)) {
-    throw new Error('평문 Wi-Fi/LAN 연결은 보안을 위해 차단됩니다. PC에서 Cloudflare Quick Link(HTTPS)를 시작하거나 Tailscale 주소를 사용하세요.');
+    throw new Error('평문 Wi-Fi/LAN 연결은 보안을 위해 차단됩니다. PC에서 Cloudflare HTTPS 원격 링크를 시작하거나 Tailscale 주소를 사용하세요.');
   }
   return parsed.origin;
 }

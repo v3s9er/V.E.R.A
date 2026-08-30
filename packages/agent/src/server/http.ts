@@ -287,6 +287,7 @@ function remoteOf(req: Request): string {
 
 export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfers?: Set<AbortController>): Express {
   const app = express();
+  app.disable('x-powered-by');
   // Authentication and transport policy are path-sensitive. Reject
   // case-variant route aliases instead of relying on Express's permissive
   // default, then keep the normalized middleware check below as defence in
@@ -344,6 +345,31 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "connect-src 'self' https: wss: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
+    ].join('; '));
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=(), usb=(), microphone=(self)');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    // Browsers only honor HSTS on HTTPS responses. Cloudflare forwards this
+    // header to the public HTTPS client while loopback/Tailscale HTTP clients
+    // safely ignore it.
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    if (req.path.toLowerCase().startsWith('/api/')) {
+      // Pairing responses and authenticated data must not land in a browser,
+      // proxy, or service-worker cache.
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+    }
     if (req.header('access-control-request-private-network') === 'true') {
       res.setHeader('Access-Control-Allow-Private-Network', 'true');
       res.vary('Access-Control-Request-Private-Network');
@@ -363,7 +389,7 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     const remote = remoteOf(req);
     if (isLoopback(remote) || isTailnetAddress(remote)) { next(); return; }
     res.status(426).json({
-      error: '보안 전송이 필요합니다. Cloudflare Quick Link(HTTPS) 또는 Tailscale 연결을 사용하세요.',
+      error: '보안 전송이 필요합니다. Cloudflare HTTPS 원격 링크 또는 Tailscale 연결을 사용하세요.',
     });
   });
   app.use(express.json({ limit: MAX_JSON_BYTES, strict: true }));
