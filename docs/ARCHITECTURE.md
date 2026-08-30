@@ -99,7 +99,7 @@ additional commands are consumed at the next safe stage/tool boundary.
 
 ## Plugin boundary
 
-Calendar, Tailscale transport, voice wake, MCP host, CTF analysis, Docker sandbox,
+Calendar, Cloudflare Quick Link, optional Tailscale transport, voice wake, MCP host, CTF analysis, Docker sandbox,
 and Orca are built-in plugins—not privileges hidden in the core. Every manifest
 declares kind, capabilities, permissions, dependencies, and enabled state. The host
 can disable a plugin persistently, hides its AI tool schemas while disabled, and
@@ -107,13 +107,16 @@ still allows its bounded status/config commands. MCP server descriptions and CTF
 commands are treated as untrusted input and pass through the normal approval gate.
 
 Workspace and shared-file transfer is ordinary authenticated byte streaming; it
-does not call a model and consumes zero model tokens. Tailscale supplies encrypted
-reachability only. Mr.Robot keeps pairing, device revocation, and per-device
-permission caps at the application layer.
+does not call a model and consumes zero model tokens. A source PC issues a
+90-second, single-use capability scoped to one file or one state snapshot, so the
+destination PC never receives the source device's long-lived credential. Cloudflare
+Quick Link supplies an optional VPN-free HTTPS/WSS path and Tailscale remains an
+optional encrypted transport. Mr.Robot keeps pairing, device revocation, and
+per-device permission caps at the application layer.
 
 ## CTF sandbox
 
-`mr-robot/ctf-toolbox:0.2.0` is an Ubuntu 24.04 image containing reusable reversing,
+`mr-robot/ctf-toolbox:0.3.0` is an Ubuntu 24.04 image containing reusable reversing,
 pwn, crypto, forensics, and network-analysis tools. Default execution uses a
 read-only root, non-root user, `--cap-drop=ALL`, `no-new-privileges`, no network,
 bounded memory/CPU/PIDs, an in-memory `/tmp`, a read-only challenge mount, and a
@@ -130,11 +133,13 @@ an updated Docker/WSL host.
   other destructive actions still ask.
 - `full`: executes all in-scope tools without confirmation.
 
-The default is `ask`. Each PIN exchange creates a random per-device token; only
-its SHA-256 hash is stored. A link has its own permission cap and can be renamed,
-reduced, elevated by a local administrator, or revoked independently. QR v2 holds
-only host, port, and PIN—not the master credential. A non-admin device token
-cannot raise global permissions or edit providers.
+The default is `ask`. Each 5-minute, single-use PIN exchange creates a random
+per-device token; only its SHA-256 hash is stored and the displayed PIN rotates
+immediately after enrollment. A link has its own permission cap and an independent
+`work-sync` capability, and can be renamed, reduced, elevated by a local
+administrator, or revoked independently. QR v3 holds only connection routes,
+transport metadata, and the short PIN—not the master credential. A non-admin
+device token cannot raise global permissions or edit providers.
 
 Provider API keys are encrypted with Windows DPAPI `CurrentUser` scope and fixed
 application entropy. Plaintext configurations are migrated atomically at load.
@@ -154,15 +159,15 @@ The Codex adapter likewise expects an already authenticated official `codex`
 command. Availability, plan limits, and supported models remain the vendor's
 responsibility and are checked through the module connection test.
 
-## Remaining production work
+## Further production hardening
 
-Before a public installer is shipped:
+The public beta is usable now. A fully managed commercial release should additionally:
 
-1. Add a publisher certificate, branded `.ico`, signed auto-update, and release
-   channel. An unsigned NSIS x64 installer is generated today.
+1. Add a publisher certificate, signed auto-update, and release channel. The
+   current branded NSIS x64 installer is unsigned.
 2. Add learned routing thresholds and quality evaluation labels on top of the
    existing local telemetry; enable critic escalation only when measured ROI wins.
 3. Add a document-search node with metadata filters, bounded top-k retrieval, and
    optional reranking when RAG is introduced.
-4. Add end-to-end Android device tests and a relay/Tailscale setup flow for use
-   outside the LAN.
+4. Add hardware-farm Android end-to-end tests and, when an owned backend and OAuth
+   credentials exist, a persistent Google/Firebase device registry plus E2EE relay.

@@ -692,7 +692,7 @@ export function createVoicePlugin(): MrRobotPlugin {
     manifest: {
       id: 'voice-wake', name: 'Voice Wake', version: '0.7.0', kind: 'input', enabledByDefault: true,
       description: '한국어 전용 고정확도 인식으로 호출어 뒤의 명령을 실행하고 로컬 TTS 음성으로 응답합니다.',
-      capabilities: ['voice.dictation', 'voice.wake-phrase', 'voice.always-listening', 'voice.command', 'voice.custom-reply', 'voice.pc-priority-claim'],
+      capabilities: ['voice.dictation', 'voice.wake-phrase', 'voice.always-listening', 'voice.command', 'voice.custom-reply'],
       permissions: ['microphone'], dependencies: [{ id: 'speech-ko', name: '로컬 한국어 음성 엔진', required: true }],
     },
     activate(ctx) {
@@ -755,12 +755,6 @@ export function createVoicePlugin(): MrRobotPlugin {
         lastError = message;
         emitStatus();
       }), { destructive: false, adminOnly: true });
-      ctx.registerCommand('voice.wake.detected', (raw) => {
-        const body = (raw ?? {}) as { device?: string; kind?: 'pc' | 'mobile'; text?: string; wakeId?: string };
-        const data = { wakeId: body.wakeId ?? `wake-${Math.floor(Date.now() / 5000)}`, device: String(body.device ?? body.kind ?? 'unknown'), kind: body.kind ?? 'mobile', text: String(body.text ?? ''), at: Date.now() };
-        ctx.emit('voice.wake', data);
-        return data;
-      }, { destructive: false });
       start(activeConfig);
     },
     deactivate() { activeConfig = { ...activeConfig, enabled: false }; stop(); ctxRef = null; },

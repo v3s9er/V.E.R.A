@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from '@mr-robot/shared';
-import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, Turn } from './provider.js';
+import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, ProviderUsage, Turn } from './provider.js';
 import { toAnthropicTools } from './tools.js';
 import { readErrorBody, readSse } from './sse.js';
 
@@ -64,6 +64,7 @@ export class AnthropicProvider implements AiProvider {
       max_tokens: req.maxTokens ?? 4096,
       messages: toAnthropicMessages(req.turns),
       stream: true,
+      ...(req.promptCacheKey ? { cache_control: { type: 'ephemeral' } } : {}),
       ...(req.system ? { system: req.system } : {}),
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     };
@@ -86,7 +87,7 @@ export class AnthropicProvider implements AiProvider {
     let text = '';
     const toolCalls: ProviderToolCall[] = [];
     const byIndex = new Map<number, ProviderToolCall>();
-    let usage = { promptTokens: 0, completionTokens: 0 };
+    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
 
     for await (const { event, data } of readSse(res)) {
       let json: any;
@@ -97,7 +98,15 @@ export class AnthropicProvider implements AiProvider {
       }
       switch (event) {
         case 'message_start':
-          if (json.message?.usage) usage.promptTokens = json.message.usage.input_tokens ?? 0;
+          if (json.message?.usage) {
+            const raw = json.message.usage;
+            const uncached = Number(raw.input_tokens) || 0;
+            const cached = Number(raw.cache_read_input_tokens) || 0;
+            const cacheWrite = Number(raw.cache_creation_input_tokens) || 0;
+            usage.promptTokens = uncached + cached + cacheWrite;
+            usage.cachedPromptTokens = cached;
+            usage.cacheWritePromptTokens = cacheWrite;
+          }
           break;
         case 'content_block_start': {
           const block = json.content_block;

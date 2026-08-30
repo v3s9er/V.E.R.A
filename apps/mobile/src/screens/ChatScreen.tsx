@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -11,11 +12,14 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { MrRobotClient } from '../rpc';
-import type { ChatConfirmRequest, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
+import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
 import { colors, radius } from '../theme';
+import { httpBaseForPc } from '../pcs';
 
 interface UiTool {
   key: string;
@@ -45,9 +49,8 @@ function describe(input: unknown): string {
   }
 }
 
-const baseOf = (pc: SavedPc): string => `http://${pc.activeHost ?? pc.host}:${pc.port}`;
-
-export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc }) {
+export function ChatScreen({ client, pc, keyboardVisible = false }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean }) {
+  const insets = useSafeAreaInsets();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<UiMsg[]>([]);
@@ -56,7 +59,7 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [commandMode, setCommandMode] = useState<'pc' | 'scenario'>('pc');
   const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [runs, setRuns] = useState<Record<string, ChatRunState & { cancelling?: boolean }>>({});
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [showModels, setShowModels] = useState(false);
   const [showScenarios, setShowScenarios] = useState(false);
@@ -64,16 +67,59 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
   const [showAccess, setShowAccess] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [uploading, setUploading] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const uploadTaskRef = useRef<FileSystem.UploadTask | null>(null);
+  const uploadStopReason = useRef<'user' | 'timeout' | null>(null);
+  const mountedRef = useRef(true);
+  const listRef = useRef<FlatList<UiMsg>>(null);
   const toolCounter = useRef(0);
   const activeId = useRef<string | null>(null);
+  const loadGeneration = useRef(0);
+  const pendingDelta = useRef('');
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const stickToBottom = useRef(true);
+  const [unseenMessages, setUnseenMessages] = useState(false);
+
+  useEffect(() => {
+    // Keep async upload state usable when StrictMode performs its development
+    // setup/cleanup/setup cycle.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      uploadStopReason.current = 'user';
+      void uploadTaskRef.current?.cancelAsync().catch(() => undefined);
+    };
+  }, []);
+
+  const activeRun = conversation ? runs[conversation.id] : undefined;
+  const busy = Boolean(activeRun?.running);
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
-    const detail = await client.call('conversations.get', { id }) as ConversationDetail;
+    const generation = ++loadGeneration.current;
     activeId.current = id;
+    pendingDelta.current = '';
+    if (deltaTimer.current) clearTimeout(deltaTimer.current);
+    deltaTimer.current = null;
+    const [detail, runList] = await Promise.all([
+      client.call('conversations.get', { id }) as Promise<ConversationDetail>,
+      client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+    ]);
+    if (generation !== loadGeneration.current) return;
+    const active = runList.find((run) => run.conversationId === id);
+    const pendingConfirm = active
+      ? await client.call('chat.pendingConfirm', { conversationId: id }, 5000).catch(() => null) as ChatConfirmRequest | null
+      : null;
+    if (generation !== loadGeneration.current) return;
+    setRuns((current) => ({ ...current, ...Object.fromEntries(runList.map((run) => [run.conversationId, run])) }));
+    if (pendingConfirm) setConfirm(pendingConfirm);
     setConversation(detail);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
-    setMessages(detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true })));
+    const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
+    setMessages(active?.running
+      ? [...restored, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }]
+      : restored);
+    stickToBottom.current = true;
+    setUnseenMessages(false);
   }, [client]);
 
   const refreshConversations = useCallback(async (): Promise<void> => {
@@ -104,123 +150,179 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
     setProviderModels(Object.fromEntries(entries));
   }, [client]);
 
+  const refreshRuns = useCallback(async (): Promise<void> => {
+    try {
+      const list = await client.call('chat.runs', {}, 5000) as ChatRunState[];
+      const confirmations = await Promise.all(list.map((run) => (
+        client.call('chat.pendingConfirm', { conversationId: run.conversationId }, 5000)
+          .catch(() => null) as Promise<ChatConfirmRequest | null>
+      )));
+      setRuns(Object.fromEntries(list.map((run) => [run.conversationId, run])));
+      const restored = confirmations.find((item): item is ChatConfirmRequest => item !== null);
+      setConfirm((current) => restored ?? (current && list.some((run) => run.conversationId === current.conversationId) ? current : null));
+    } catch {
+      /* 연결 복구 중에는 다음 성공 시 다시 조정한다. */
+    }
+  }, [client]);
+
   useEffect(() => {
     void refreshConversations();
     void refreshProviders();
     void client.call('routing.presets.list', {}).then((value) => setRoutingPresets(value as RoutingPreset[])).catch(() => setRoutingPresets([]));
     void client.call('workspaces.list', {}).then((value) => setWorkspaces(value as WorkspaceInfo[])).catch(() => setWorkspaces([]));
-  }, [client, refreshConversations, refreshProviders]);
+    void refreshRuns();
+  }, [client, pc, refreshConversations, refreshProviders, refreshRuns]);
 
   useEffect(() => {
+    const scrollIfFollowing = (): void => {
+      if (!stickToBottom.current) { setUnseenMessages(true); return; }
+      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+    };
+    const flushDelta = (): void => {
+      if (deltaTimer.current) clearTimeout(deltaTimer.current);
+      deltaTimer.current = null;
+      const text = pendingDelta.current;
+      pendingDelta.current = '';
+      if (!text) return;
+      setMessages((items) => {
+        const last = items[items.length - 1];
+        if (!last || last.role !== 'assistant' || last.done) return [...items, { id: nextId(), role: 'assistant', content: text, tools: [], done: false }];
+        return [...items.slice(0, -1), { ...last, content: last.content + text }];
+      });
+      scrollIfFollowing();
+    };
+    const setRunFinished = (conversationId: string): void => {
+      const cancelTimer = cancelTimers.current.get(conversationId);
+      if (cancelTimer) clearTimeout(cancelTimer);
+      cancelTimers.current.delete(conversationId);
+      setRuns((current) => ({
+        ...current,
+        [conversationId]: { ...(current[conversationId] ?? { conversationId, steeringQueued: 0 }), running: false, cancelling: false, status: '' },
+      }));
+    };
     const offs = [
       client.on('chat.delta', (data) => {
         if ((data as { conversationId?: string }).conversationId !== activeId.current) return;
-        const text = (data as { text: string }).text ?? '';
-        setMessages((msgs) => {
-          const copy = [...msgs];
-          const last = copy[copy.length - 1];
-          if (last && last.role === 'assistant') last.content += text;
-          return copy;
-        });
+        pendingDelta.current += (data as { text: string }).text ?? '';
+        if (!deltaTimer.current) deltaTimer.current = setTimeout(flushDelta, 50);
       }),
       client.on('chat.tool', (data) => {
         if ((data as { conversationId?: string }).conversationId !== activeId.current) return;
         const info = data as ToolEvent;
-        setMessages((msgs) => {
-          const copy = [...msgs];
-          const last = copy[copy.length - 1];
-          if (!last || last.role !== 'assistant') return copy;
+        flushDelta();
+        setMessages((items) => {
+          const last = items[items.length - 1];
+          if (!last || last.role !== 'assistant') return items;
+          let tools = last.tools;
           if (info.status === 'start') {
             toolCounter.current += 1;
-            last.tools = [...last.tools, { key: `${info.name}#${toolCounter.current}`, name: info.name, summary: describe(info.input), status: 'start' }];
+            tools = [...tools, { key: `${info.name}#${toolCounter.current}`, name: info.name, summary: describe(info.input), status: 'start' }];
           } else {
-            const idx = [...last.tools].reverse().findIndex((t) => t.name === info.name && t.status === 'start');
+            const idx = [...tools].reverse().findIndex((tool) => tool.name === info.name && tool.status === 'start');
             if (idx >= 0) {
-              const realIdx = last.tools.length - 1 - idx;
-              last.tools[realIdx] = { ...last.tools[realIdx], status: info.status };
+              const realIdx = tools.length - 1 - idx;
+              tools = tools.map((tool, index) => index === realIdx ? { ...tool, status: info.status } : tool);
             }
           }
-          return copy;
+          return [...items.slice(0, -1), { ...last, tools }];
         });
+        scrollIfFollowing();
+      }),
+      client.on('chat.status', (data) => {
+        const event = data as { conversationId?: string; status?: string };
+        if (!event.conversationId) return;
+        setRuns((current) => ({
+          ...current,
+          [event.conversationId!]: { ...(current[event.conversationId!] ?? { conversationId: event.conversationId!, steeringQueued: 0 }), running: true, status: event.status ?? '' },
+        }));
       }),
       client.on('chat.done', (data) => {
-        if ((data as { conversationId?: string }).conversationId !== activeId.current) return;
-        const d = data as { text: string; conversation?: ConversationDetail };
-        setMessages((msgs) => {
-          const copy = [...msgs];
-          const last = copy[copy.length - 1];
-          if (last && last.role === 'assistant') {
-            if (!last.content && d.text) last.content = d.text;
-            last.done = true;
-          }
-          return copy;
-        });
-        setBusy(false);
-        if (d.conversation) setConversation(d.conversation);
+        const d = data as { conversationId?: string; text: string; conversation?: ConversationDetail };
+        if (d.conversationId) setRunFinished(d.conversationId);
+        if (d.conversationId !== activeId.current) { void refreshConversations(); return; }
+        flushDelta();
+        if (d.conversation) {
+          setConversation(d.conversation);
+          const restored = d.conversation.messages.filter((message) => message.role === 'user' || message.role === 'assistant').map((message) => ({ id: nextId(), role: message.role as 'user' | 'assistant', content: message.content, tools: [], done: true }));
+          setMessages(restored.length ? restored : [{ id: nextId(), role: 'assistant', content: d.text || '', tools: [], done: true }]);
+        } else {
+          setMessages((items) => {
+            const last = items[items.length - 1];
+            if (!last || last.role !== 'assistant' || last.done) return [...items, { id: nextId(), role: 'assistant', content: d.text || '', tools: [], done: true }];
+            return [...items.slice(0, -1), { ...last, content: last.content || d.text || '', done: true }];
+          });
+        }
         void refreshConversations();
+        scrollIfFollowing();
       }),
       client.on('chat.error', (data) => {
-        if ((data as { conversationId?: string }).conversationId !== activeId.current) return;
-        const d = data as { message: string };
-        setMessages((msgs) => {
-          const copy = [...msgs];
-          const last = copy[copy.length - 1];
-          if (last && last.role === 'assistant') {
-            last.done = true;
-            last.error = d.message;
-          }
-          return copy;
+        const d = data as { conversationId?: string; message: string };
+        if (d.conversationId) setRunFinished(d.conversationId);
+        if (d.conversationId !== activeId.current) return;
+        flushDelta();
+        setMessages((items) => {
+          const last = items[items.length - 1];
+          if (!last || last.role !== 'assistant') return items;
+          return [...items.slice(0, -1), { ...last, done: true, error: d.message }];
         });
-        setBusy(false);
       }),
       client.on('chat.confirm', (data) => setConfirm(data as ChatConfirmRequest)),
       client.on('providers.changed', () => { void refreshProviders(); }),
     ];
-    return () => offs.forEach((off) => off());
+    return () => {
+      offs.forEach((off) => off());
+      if (deltaTimer.current) clearTimeout(deltaTimer.current);
+      deltaTimer.current = null;
+      pendingDelta.current = '';
+      for (const timer of cancelTimers.current.values()) clearTimeout(timer);
+      cancelTimers.current.clear();
+    };
   }, [client, refreshConversations, refreshProviders]);
-
-  useEffect(() => {
-    const t = setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
-    return () => clearTimeout(t);
-  }, [messages]);
 
   const send = async (): Promise<void> => {
     const text = input.trim();
     if (!text || !conversation) return;
     if (busy) {
-      await client.call('chat.steer', { conversationId: conversation.id, text });
-      setInput('');
+      try {
+        const result = await client.call('chat.steer', { conversationId: conversation.id, text }) as { queued?: number };
+        setRuns((current) => ({ ...current, [conversation.id]: { ...current[conversation.id], conversationId: conversation.id, running: true, steeringQueued: result.queued ?? current[conversation.id]?.steeringQueued ?? 0, status: '추가 명령 전달됨' } }));
+        setInput('');
+      } catch (error) {
+        setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: error instanceof Error ? error.message : String(error) }]);
+      }
       return;
     }
     setInput('');
-    setBusy(true);
+    setRuns((current) => ({ ...current, [conversation.id]: { conversationId: conversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
+    stickToBottom.current = true;
+    setUnseenMessages(false);
     setMessages((msgs) => [
       ...msgs,
       { id: nextId(), role: 'user', content: text, tools: [], done: true },
       { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
     ]);
     try {
-      await client.call('chat.start', { text, conversationId: conversation.id, reasoningEffort: conversation.reasoningEffort, providerId: conversation.providerId, providerModel: conversation.providerModel, routingPresetId: commandMode === 'scenario' ? conversation.routingPresetId : undefined, workspaceId: conversation.workspaceId }, 10 * 60_000);
+      await client.call('chat.start', { text, conversationId: conversation.id, reasoningEffort: conversation.reasoningEffort, providerId: conversation.providerId, providerModel: conversation.providerModel, routingPresetId: commandMode === 'scenario' ? conversation.routingPresetId : undefined, workspaceId: conversation.workspaceId, permissionMode: conversation.permissionMode }, 10 * 60_000);
     } catch (err) {
       setMessages((msgs) => {
-        const copy = [...msgs];
-        const last = copy[copy.length - 1];
+        const last = msgs[msgs.length - 1];
         if (last && last.role === 'assistant') {
-          last.done = true;
-          last.error = err instanceof Error ? err.message : String(err);
+          return [...msgs.slice(0, -1), { ...last, done: true, error: err instanceof Error ? err.message : String(err) }];
         }
-        return copy;
+        return msgs;
       });
-      setBusy(false);
+      setRuns((current) => ({ ...current, [conversation.id]: { ...current[conversation.id], conversationId: conversation.id, running: false, cancelling: false, steeringQueued: 0, status: '' } }));
+    } finally {
+      void refreshRuns();
     }
   };
 
   const respondConfirm = async (approve: boolean): Promise<void> => {
     if (!confirm) return;
-    const requestId = confirm.requestId;
+    const { requestId, conversationId } = confirm;
     setConfirm(null);
     try {
-      await client.call('chat.confirmResponse', { requestId, approve });
+      await client.call('chat.confirmResponse', { requestId, conversationId, approve });
     } catch {
       /* ignore */
     }
@@ -299,14 +401,37 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
     if (picked.canceled) return;
     const file = picked.assets[0]; const relativePath = `.mr-robot-uploads/${Date.now()}-${file.name.replace(/[\\/:*?"<>|]/g, '_')}`;
     setUploading(true);
+    uploadStopReason.current = null;
+    const task = FileSystem.createUploadTask(`${httpBaseForPc(pc)}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, file.uri, {
+      httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: { 'content-type': file.mimeType ?? 'application/octet-stream', 'x-mr-robot-token': pc.secret },
+    });
+    uploadTaskRef.current = task;
+    const timeout = setTimeout(() => {
+      if (uploadTaskRef.current !== task) return;
+      uploadStopReason.current = 'timeout';
+      void task.cancelAsync().catch(() => undefined);
+    }, 120_000);
     try {
-      const result = await FileSystem.uploadAsync(`${baseOf(pc)}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, file.uri, {
-        httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: { 'content-type': file.mimeType ?? 'application/octet-stream', 'x-mr-robot-token': pc.secret },
-      });
+      const result = await task.uploadAsync();
+      if (!result) throw new Error(uploadStopReason.current === 'timeout' ? '파일 업로드 시간이 초과되었습니다.' : '파일 업로드를 중지했습니다.');
       if (result.status < 200 || result.status >= 300) throw new Error(`업로드 실패 (HTTP ${result.status})`);
-      setInput((value) => `${value}${value ? '\n' : ''}[첨부 파일: ${workspace.path}\\${relativePath.replaceAll('/', '\\')}]`);
-    } finally { setUploading(false); }
+      if (mountedRef.current) setInput((value) => `${value}${value ? '\n' : ''}[첨부 파일: ${workspace.path}\\${relativePath.replaceAll('/', '\\')}]`);
+    } catch (error) {
+      if (mountedRef.current) setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: uploadStopReason.current === 'user' ? '파일 업로드를 중지했습니다.' : uploadStopReason.current === 'timeout' ? '파일 업로드 시간이 초과되었습니다.' : error instanceof Error ? error.message : String(error) }]);
+    } finally {
+      clearTimeout(timeout);
+      if (uploadTaskRef.current === task) uploadTaskRef.current = null;
+      uploadStopReason.current = null;
+      if (mountedRef.current) setUploading(false);
+    }
+  };
+
+  const cancelAttachment = async (): Promise<void> => {
+    const task = uploadTaskRef.current;
+    if (!task) return;
+    uploadStopReason.current = 'user';
+    await task.cancelAsync().catch(() => undefined);
   };
 
   const archiveConversation = async (): Promise<void> => {
@@ -316,21 +441,64 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
     await refreshConversations();
   };
 
+  const cancelRun = async (): Promise<void> => {
+    if (!conversation || !busy || activeRun?.cancelling) return;
+    const conversationId = conversation.id;
+    setRuns((current) => ({ ...current, [conversationId]: { ...current[conversationId], conversationId, running: true, cancelling: true, steeringQueued: current[conversationId]?.steeringQueued ?? 0, status: '중지 요청 중…' } }));
+    try {
+      await client.call('chat.cancel', { conversationId }, 8000);
+      const previous = cancelTimers.current.get(conversationId);
+      if (previous) clearTimeout(previous);
+      cancelTimers.current.set(conversationId, setTimeout(() => {
+        cancelTimers.current.delete(conversationId);
+        void client.call('chat.runs', {}, 5000).then((value) => {
+          const currentRuns = value as ChatRunState[];
+          const stillRunning = currentRuns.find((run) => run.conversationId === conversationId);
+          setRuns((current) => ({
+            ...Object.fromEntries(currentRuns.map((run) => [run.conversationId, run])),
+            ...(!stillRunning ? { [conversationId]: { ...current[conversationId], conversationId, running: false, cancelling: false, steeringQueued: 0, status: '중지됨' } } : {}),
+          }));
+          if (!stillRunning && activeId.current === conversationId) {
+            setMessages((items) => {
+              const last = items[items.length - 1];
+              if (!last || last.role !== 'assistant' || last.done) return items;
+              return [...items.slice(0, -1), { ...last, done: true, error: '사용자가 작업을 중지했습니다.' }];
+            });
+          }
+        }).catch(() => refreshRuns());
+      }, 2500));
+    } catch (error) {
+      setRuns((current) => ({ ...current, [conversationId]: { ...current[conversationId], conversationId, running: true, cancelling: false, steeringQueued: current[conversationId]?.steeringQueued ?? 0, status: '중지 요청 실패' } }));
+      setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: error instanceof Error ? error.message : String(error) }]);
+    }
+  };
+
+  const onMessageScroll = (event: NativeSyntheticEvent<NativeScrollEvent>): void => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const following = contentSize.height - contentOffset.y - layoutMeasurement.height < 96;
+    stickToBottom.current = following;
+    if (following && unseenMessages) setUnseenMessages(false);
+  };
+
+  const jumpToLatest = (): void => {
+    stickToBottom.current = true;
+    setUnseenMessages(false);
+    listRef.current?.scrollToEnd({ animated: true });
+  };
+
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
       <View style={styles.modeBar}>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn]} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn]} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
       </View>
-      <View style={styles.conversationBar}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationChips}>
+      <ScrollView horizontal style={styles.conversationBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationBarContent} keyboardShouldPersistTaps="handled">
           <TouchableOpacity style={styles.newChat} onPress={() => void createConversation()}><Text style={styles.newChatText}>＋</Text></TouchableOpacity>
           {conversations.map((c) => (
             <TouchableOpacity key={c.id} style={[styles.conversationChip, conversation?.id === c.id && styles.conversationChipOn]} onPress={() => void loadConversation(c.id)} onLongPress={() => void togglePin(c)}>
               <Text style={styles.conversationChipText} numberOfLines={1}>{c.pinned ? '📌 ' : ''}{c.title}</Text>
             </TouchableOpacity>
           ))}
-        </ScrollView>
         <TouchableOpacity style={styles.effortBtn} onPress={() => setShowModels(true)} disabled={busy}>
           <Text style={styles.effortText} numberOfLines={1}>
             {conversation?.providerId
@@ -344,16 +512,29 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
         <TouchableOpacity style={styles.effortBtn} onPress={() => void cycleEffort()}><Text style={styles.effortText}>추론 {conversation?.reasoningEffort ?? 'auto'}</Text></TouchableOpacity>
         <TouchableOpacity style={styles.effortBtn} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
         <TouchableOpacity style={styles.effortBtn} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
-      </View>
-      <ScrollView ref={scrollRef} style={styles.scroll} contentContainerStyle={styles.scrollContent}>
-        {messages.length === 0 && (
+      </ScrollView>
+      <FlatList
+        ref={listRef}
+        style={styles.scroll}
+        contentContainerStyle={[styles.scrollContent, messages.length === 0 && styles.emptyContent]}
+        data={messages}
+        keyExtractor={(message) => message.id}
+        initialNumToRender={18}
+        maxToRenderPerBatch={12}
+        windowSize={9}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        onScroll={onMessageScroll}
+        scrollEventThrottle={80}
+        onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false }); }}
+        ListEmptyComponent={(
           <View style={styles.empty}>
             <Text style={styles.emptyIcon}>✦</Text>
             <Text style={styles.emptyTitle}>무엇을 도와드릴까요?</Text>
             <Text style={styles.emptyText}>모바일 요청을 PC 에이전트에 위임합니다.{`\n`}파일 찾기·앱 실행·작업 수행까지.</Text>
           </View>
         )}
-        {messages.map((m) => (
+        renderItem={({ item: m }) => (
           <View key={m.id} style={[styles.row, m.role === 'user' && styles.rowUser]}>
             <View style={[styles.bubble, m.role === 'user' && styles.bubbleUser]}>
               {m.content ? <Text style={styles.bubbleText}>{m.content}</Text> : !m.done ? <ActivityIndicator color={colors.accent2} size="small" /> : null}
@@ -372,11 +553,13 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
               </View>
             )}
           </View>
-        ))}
-      </ScrollView>
+        )}
+      />
 
-      <View style={styles.inputBar}>
-        <TouchableOpacity style={styles.toolBtn} onPress={() => void attachFile()} disabled={uploading}><Text style={styles.toolBtnText}>{uploading ? '…' : '＋'}</Text></TouchableOpacity>
+      {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
+      {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
+      <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? Math.max(12, insets.bottom) : 10 }]}>
+        <TouchableOpacity accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
         <TextInput
           style={styles.input}
           value={input}
@@ -386,7 +569,7 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
           multiline
         />
         {busy ? (
-          <View style={styles.busyActions}><TouchableOpacity style={styles.sendBtn} onPress={() => void send()} disabled={!input.trim()}><Text style={styles.sendText}>끼워넣기</Text></TouchableOpacity><TouchableOpacity style={[styles.sendBtn, styles.cancelBtn]} onPress={() => void client.call('chat.cancel', { conversationId: conversation?.id }).catch(() => undefined)}><Text style={styles.sendText}>중지</Text></TouchableOpacity></View>
+          <View style={styles.busyActions}><TouchableOpacity style={styles.sendBtn} onPress={() => void send()} disabled={!input.trim()}><Text style={styles.sendText}>끼워넣기</Text></TouchableOpacity><TouchableOpacity style={[styles.sendBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '중지'}</Text></TouchableOpacity></View>
         ) : (
           <TouchableOpacity style={[styles.sendBtn, !input.trim() && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim()}>
             <Text style={styles.sendText}>보내기</Text>
@@ -395,7 +578,7 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
       </View>
 
       <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)}>
-        <View style={styles.modalBackdrop}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
             <ScrollView style={styles.modelList}>
@@ -416,7 +599,7 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
       </Modal>
 
       <Modal visible={showScenarios} transparent animationType="fade" onRequestClose={() => setShowScenarios(false)}>
-        <View style={styles.modalBackdrop}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>모바일 실행 방식</Text>
             <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
@@ -436,11 +619,11 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
       </Modal>
 
       <Modal visible={showWorkspaces} transparent animationType="fade" onRequestClose={() => setShowWorkspaces(false)}>
-        <View style={styles.modalBackdrop}><View style={styles.modal}><Text style={styles.modalTitle}>작업 폴더</Text><Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text><ScrollView style={styles.modelList}><TouchableOpacity style={styles.modelChoice} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={styles.modelChoice} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}</ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>작업 폴더</Text><Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text><ScrollView style={styles.modelList}><TouchableOpacity style={styles.modelChoice} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={styles.modelChoice} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}</ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
       </Modal>
 
       <Modal visible={showAccess} transparent animationType="fade" onRequestClose={() => setShowAccess(false)}>
-        <View style={styles.modalBackdrop}><View style={styles.modal}><Text style={styles.modalTitle}>이 대화의 액세스</Text><Text style={styles.modalText}>Codex처럼 대화마다 저장됩니다. PC에 등록된 이 기기의 권한 상한은 넘을 수 없습니다.</Text><ScrollView style={styles.modelList}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>이 대화의 액세스</Text><Text style={styles.modalText}>Codex처럼 대화마다 저장됩니다. PC에 등록된 이 기기의 권한 상한은 넘을 수 없습니다.</Text><ScrollView style={styles.modelList}>
           {([
             ['read-only', '읽기 전용', '파일과 상태만 읽고 변경은 모두 차단'],
             ['ask', '변경 전 확인', '파일·명령 변경 직전에 모바일에서 승인'],
@@ -451,10 +634,10 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
       </Modal>
 
       <Modal visible={confirm !== null} transparent animationType="fade" onRequestClose={() => void respondConfirm(false)}>
-        <View style={styles.modalBackdrop}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>작업 승인 필요</Text>
-            <Text style={styles.modalText}>AI가 다음 작업을 실행하려고 합니다.</Text>
+            <Text style={styles.modalText}>{confirm?.conversationId === activeId.current ? `현재 대화 ‘${confirm?.conversationTitle}’의 요청입니다.` : `백그라운드 대화 ‘${confirm?.conversationTitle ?? '알 수 없는 대화'}’의 요청입니다. 현재 보고 있는 대화와 다릅니다.`}</Text>
             {confirm && (
               <View style={styles.confirmCmd}>
                 <Text style={styles.confirmTool}>🔧 {confirm.tool}</Text>
@@ -466,7 +649,7 @@ export function ChatScreen({ client, pc }: { client: MrRobotClient; pc: SavedPc 
                 <Text style={styles.bigBtnText}>거부</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.bigBtn} onPress={() => void respondConfirm(true)}>
-                <Text style={styles.bigBtnText}>허용</Text>
+                <Text style={styles.bigBtnText}>이 대화 허용</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -482,8 +665,8 @@ const styles = StyleSheet.create({
   modeBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.2)' },
   modeText: { color: colors.faint, fontSize: 11.5, fontWeight: '700' },
   modeTextOn: { color: colors.text },
-  conversationBar: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
-  conversationChips: { gap: 6, alignItems: 'center' },
+  conversationBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.border },
+  conversationBarContent: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 8 },
   newChat: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   newChatText: { color: '#fff', fontWeight: '800', fontSize: 18 },
   conversationChip: { maxWidth: 130, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: colors.inputBg },
@@ -493,6 +676,7 @@ const styles = StyleSheet.create({
   effortText: { color: colors.dim, fontSize: 10.5, fontWeight: '700' },
   scroll: { flex: 1 },
   scrollContent: { padding: 16, gap: 14 },
+  emptyContent: { flexGrow: 1 },
   empty: { alignItems: 'center', marginTop: 70 },
   emptyIcon: { fontSize: 42, color: colors.accent, textShadowColor: 'rgba(124,92,255,0.8)', textShadowRadius: 20 },
   emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '700', marginTop: 10 },
@@ -527,8 +711,13 @@ const styles = StyleSheet.create({
   toolErr: { borderColor: 'rgba(248,113,113,0.4)' },
   toolText: { color: colors.dim, fontSize: 12, flexShrink: 1 },
   toolStatus: { color: colors.ok, fontSize: 12, fontWeight: '700' },
-  inputBar: { flexDirection: 'row', gap: 8, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingBottom: 20 },
+  latestBtn: { alignSelf: 'center', marginVertical: 6, borderWidth: 1, borderColor: 'rgba(34,211,238,.45)', backgroundColor: 'rgba(34,211,238,.12)', borderRadius: 999, paddingHorizontal: 14, paddingVertical: 7 },
+  latestText: { color: colors.accent2, fontSize: 11.5, fontWeight: '800' },
+  runStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 7, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: 'rgba(34,211,238,.05)' },
+  runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
+  inputBar: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 12, borderTopWidth: 1, borderTopColor: colors.border },
   toolBtn: { width: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
+  toolBtnCancel: { borderColor: 'rgba(248,113,113,.5)', backgroundColor: 'rgba(248,113,113,.16)' },
   toolBtnText: { color: colors.text, fontSize: 17, fontWeight: '800' },
   input: {
     flex: 1,
@@ -547,10 +736,10 @@ const styles = StyleSheet.create({
   busyActions: { flexDirection: 'row', gap: 5 },
   sendText: { color: '#fff', fontWeight: '700' },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', padding: 24 },
-  modal: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 22, gap: 12 },
+  modal: { width: '100%', maxHeight: '92%', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 22, gap: 12 },
   modalTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
   modalText: { color: colors.dim, fontSize: 14 },
-  modelList: { maxHeight: 420 },
+  modelList: { maxHeight: 420, flexShrink: 1 },
   modelChoice: { backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, marginBottom: 8 },
   modelProvider: { color: colors.text, fontWeight: '700', fontSize: 13 },
   modelName: { color: colors.accent2, fontSize: 12.5, marginTop: 3 },

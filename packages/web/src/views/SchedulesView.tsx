@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { CalendarEvent, ScheduledJobView, ScheduleJobType } from '@mr-robot/shared';
+import type { AppSettings, CalendarEvent, PermissionMode, ScheduledJobView, ScheduleJobType } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Select, Toggle } from '../components/ui';
 
@@ -33,6 +33,7 @@ function fmtNext(ts: number | null): string {
 
 export function SchedulesView() {
   const { client } = useMrRobot();
+  const canManageJobs = client.isAdmin;
   const [jobs, setJobs] = useState<ScheduledJobView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [openResult, setOpenResult] = useState<string | null>(null);
@@ -56,16 +57,24 @@ export function SchedulesView() {
   const [calendarTitle, setCalendarTitle] = useState('');
   const [calendarStart, setCalendarStart] = useState('');
   const [calendarEnd, setCalendarEnd] = useState('');
+  const [globalPermission, setGlobalPermission] = useState<PermissionMode>('read-only');
+  const canWriteCalendar = canManageJobs || (client.permissionCap === 'full' && globalPermission === 'full');
 
   const refresh = useCallback(async (): Promise<void> => {
-    try {
-      setJobs((await client.call('scheduler.list', {})) as ScheduledJobView[]);
-      setCalendarEvents(await client.call('plugins.call', { name: 'calendar.events.list', params: {} }) as CalendarEvent[]);
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-  }, [client]);
+    const [calendarResult, settingsResult, jobsResult] = await Promise.allSettled([
+      client.call('plugins.call', { name: 'calendar.events.list', params: {} }) as Promise<CalendarEvent[]>,
+      client.call('settings.get', {}) as Promise<AppSettings>,
+      canManageJobs ? client.call('scheduler.list', {}) as Promise<ScheduledJobView[]> : Promise.resolve([]),
+    ]);
+    if (calendarResult.status === 'fulfilled') setCalendarEvents(calendarResult.value);
+    else setError(calendarResult.reason instanceof Error ? calendarResult.reason.message : String(calendarResult.reason));
+    if (settingsResult.status === 'fulfilled') setGlobalPermission(settingsResult.value.safety.mode);
+    if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value);
+    else if (canManageJobs) setError(jobsResult.reason instanceof Error ? jobsResult.reason.message : String(jobsResult.reason));
+  }, [canManageJobs, client]);
 
   const addCalendarEvent = async (): Promise<void> => {
-    if (!calendarTitle.trim() || !calendarStart) return;
+    if (!canWriteCalendar || !calendarTitle.trim() || !calendarStart) return;
     setBusy(true); setError('');
     try {
       if (calendarEnd && new Date(calendarEnd).getTime() < new Date(calendarStart).getTime()) throw new Error('종료 시각은 시작 시각보다 빠를 수 없습니다.');
@@ -76,24 +85,27 @@ export function SchedulesView() {
   };
 
   const removeCalendarEvent = async (id: string): Promise<void> => {
+    if (!canWriteCalendar) return;
     try { await client.call('plugins.call', { name: 'calendar.events.remove', params: { id } }); await refresh(); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
   useEffect(() => {
     void refresh();
-    const off1 = client.on('scheduler.changed', (d) => setJobs(d as ScheduledJobView[]));
-    const off2 = client.on('scheduler.ran', (d) => setJobs(d as ScheduledJobView[]));
+    const off1 = canManageJobs ? client.on('scheduler.changed', (d) => setJobs(d as ScheduledJobView[])) : () => undefined;
+    const off2 = canManageJobs ? client.on('scheduler.ran', (d) => setJobs(d as ScheduledJobView[])) : () => undefined;
+    const off3 = client.on('settings.changed', (data) => setGlobalPermission((data as AppSettings).safety.mode));
     const tick = setInterval(() => setJobs((j) => [...j]), 30000); // refresh relative times
     return () => {
       off1();
       off2();
+      off3();
       clearInterval(tick);
     };
-  }, [client, refresh]);
+  }, [canManageJobs, client, refresh]);
 
   const add = async (): Promise<void> => {
-    if (busy) return;
+    if (!canManageJobs || busy) return;
     setBusy(true);
     setError('');
     try {
@@ -126,12 +138,14 @@ export function SchedulesView() {
   };
 
   const remove = async (id: string): Promise<void> => {
+    if (!canManageJobs) return;
     try {
       await client.call('scheduler.remove', { id });
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
   const setEnabled = async (id: string, enabled: boolean): Promise<void> => {
+    if (!canManageJobs) return;
     try {
       await client.call('scheduler.setEnabled', { id, enabled });
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -152,10 +166,11 @@ export function SchedulesView() {
       <Card className="panel calendar-panel">
         <div className="panel-head"><div><span className="eyebrow">CALENDAR PLUGIN</span><h3>일정</h3></div><Badge tone="ok">로컬 우선 · AI 토큰 0</Badge></div>
         <p className="panel-hint">일정은 PC에 저장되며 AI에게 “내일 오후 3시 약속 추가해줘”라고 말해도 같은 캘린더 플러그인을 사용합니다. Google OAuth는 별도 공급자로 연결할 수 있습니다.</p>
-        <div className="form-grid calendar-add"><Field label="일정 이름"><Input value={calendarTitle} onChange={(event) => setCalendarTitle(event.target.value)} placeholder="예: 프로젝트 회의" /></Field><Field label="시작"><Input type="datetime-local" value={calendarStart} onChange={(event) => setCalendarStart(event.target.value)} /></Field><Field label="종료"><Input type="datetime-local" value={calendarEnd} onChange={(event) => setCalendarEnd(event.target.value)} /></Field><Button onClick={() => void addCalendarEvent()} disabled={busy || !calendarTitle.trim() || !calendarStart}>일정 추가</Button></div>
-        <div className="calendar-list">{calendarEvents.length === 0 && <div className="muted">등록된 일정이 없습니다.</div>}{calendarEvents.map((event) => <article key={event.id} className="calendar-event"><div className="calendar-date"><b>{new Date(event.startAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })}</b><span>{new Date(event.startAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span></div><div><b>{event.title}</b><small>{new Date(event.startAt).toLocaleString('ko-KR')} – {new Date(event.endAt).toLocaleString('ko-KR')}</small></div><Button variant="danger" onClick={() => void removeCalendarEvent(event.id)}>삭제</Button></article>)}</div>
+        {!canWriteCalendar && <div className="access-inline"><b>일정 보기 모드</b><span>이 연결에서는 일정 조회만 가능합니다. 변경은 PC에서 하거나 대화에서 요청해 승인 절차를 진행하세요.</span></div>}
+        <fieldset className="form-grid calendar-add permission-fieldset" disabled={!canWriteCalendar}><Field label="일정 이름"><Input value={calendarTitle} onChange={(event) => setCalendarTitle(event.target.value)} placeholder="예: 프로젝트 회의" /></Field><Field label="시작"><Input type="datetime-local" value={calendarStart} onChange={(event) => setCalendarStart(event.target.value)} /></Field><Field label="종료"><Input type="datetime-local" value={calendarEnd} onChange={(event) => setCalendarEnd(event.target.value)} /></Field><Button onClick={() => void addCalendarEvent()} disabled={busy || !calendarTitle.trim() || !calendarStart}>일정 추가</Button></fieldset>
+        <div className="calendar-list">{calendarEvents.length === 0 && <div className="muted">등록된 일정이 없습니다.</div>}{calendarEvents.map((event) => <article key={event.id} className="calendar-event"><div className="calendar-date"><b>{new Date(event.startAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })}</b><span>{new Date(event.startAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span></div><div><b>{event.title}</b><small>{new Date(event.startAt).toLocaleString('ko-KR')} – {new Date(event.endAt).toLocaleString('ko-KR')}</small></div><Button variant="danger" disabled={!canWriteCalendar} onClick={() => void removeCalendarEvent(event.id)}>삭제</Button></article>)}</div>
       </Card>
-      <Card className="panel">
+      {canManageJobs ? <Card className="panel">
         <div className="panel-head">
           <h3>예약 작업</h3>
           <Button variant="accent" onClick={() => setShowAdd((s) => !s)}>
@@ -263,15 +278,15 @@ export function SchedulesView() {
             </div>
           </div>
         )}
-      </Card>
+      </Card> : <Card className="panel access-locked-card"><div className="access-lock-mark">🔒</div><div><h3>예약 에이전트 작업은 PC에서 관리합니다</h3><p>자동 실행은 PC의 파일·앱·셸 권한을 사용하므로 데스크톱 관리자 연결에서만 추가·중지·삭제할 수 있습니다. 위의 일반 일정 조회는 계속 사용할 수 있습니다.</p></div></Card>}
 
-      {jobs.length === 0 && (
+      {canManageJobs && jobs.length === 0 && (
         <Card className="panel empty">
           <p>예약된 작업이 없습니다.</p>
         </Card>
       )}
 
-      {jobs.map((job) => (
+      {canManageJobs && jobs.map((job) => (
         <Card key={job.id} className={`panel schedule-card ${!job.enabled ? 'off' : ''}`}>
           <div className="schedule-row">
             <div className="schedule-main">

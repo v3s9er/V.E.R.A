@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import type { AppSettings, MemoryItem, ProviderInfo, ProviderSource, ProviderType, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
+import type { AppSettings, DeviceCapability, MemoryItem, ProviderInfo, ProviderSource, ProviderType, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
@@ -12,11 +12,12 @@ interface PairingInfo {
   hosts: string[];
   port: number;
   pin: string;
+  pinExpiresAt?: number;
   maskedSecret: string;
   qrPayload: string;
 }
 
-interface DeviceLink { id: string; name: string; permissionCap: AppSettings['safety']['mode']; createdAt: number; revokedAt?: number }
+interface DeviceLink { id: string; name: string; permissionCap: AppSettings['safety']['mode']; capabilities: DeviceCapability[]; createdAt: number; revokedAt?: number }
 interface VoiceConfig {
   enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number;
   replyPreset: 'neon-runner' | 'system' | 'custom'; voiceName: string; replyText: string; replyRate: number; replyVolume: number;
@@ -95,7 +96,7 @@ const PRESETS: Array<{
   { id: 'custom', label: '직접 입력 (기타 제공사)', type: 'openai-compatible', baseUrl: '', model: '', source: 'api', costTier: 1 },
 ];
 
-interface TelemetrySummary { turns: number; promptTokens: number; completionTokens: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> }
+interface TelemetrySummary { turns: number; promptTokens: number; completionTokens: number; cachedPromptTokens: number; cacheWritePromptTokens: number; reasoningTokens: number; cacheHitRate: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> }
 
 interface RepairOffer { target: ProviderInfo; error: string; helpers: ProviderInfo[] }
 interface DangerConfirm { title: string; message: string; confirmLabel: string; action: () => Promise<void> }
@@ -103,6 +104,7 @@ const EXECUTION_LABEL = { single: '단일 선택', pipeline: '순차 검증', vo
 
 export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const { client } = useMrRobot();
+  const canManage = client.isAdmin;
   const [section, setSection] = useState<'models' | 'routing' | 'dependencies' | 'voice' | 'safety' | 'memory' | 'network' | 'pairing'>('models');
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -144,8 +146,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceMessage, setVoiceMessage] = useState('');
+  const canWriteContent = Boolean(settings && client.permissionCap !== 'read-only' && settings.safety.mode !== 'read-only');
 
   const refreshVoice = useCallback(async (): Promise<void> => {
+    if (!canManage) return;
     try {
       const [config, status] = await Promise.all([
         client.call('plugins.call', { name: 'voice.config.get', params: {} }) as Promise<VoiceConfig>,
@@ -156,14 +160,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     } catch (error) {
       setVoiceMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [client]);
+  }, [canManage, client]);
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
-      const [provs, sets, pair, route, presets, memory, stats] = await Promise.all([
+      const [provs, sets, route, presets, memory, stats] = await Promise.all([
         client.call('providers.list', {}) as Promise<ProviderInfo[]>,
         client.call('settings.get', {}) as Promise<AppSettings>,
-        client.call('pairing.info', {}) as Promise<PairingInfo>,
         client.call('routing.get', {}) as Promise<RoutingSettings>,
         client.call('routing.presets.list', {}) as Promise<RoutingPreset[]>,
         client.call('memory.list', {}) as Promise<MemoryItem[]>,
@@ -172,18 +175,25 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       setProviders(provs);
       setModelDrafts((current) => Object.fromEntries(provs.map((provider) => [provider.id, current[provider.id] ?? provider.model])));
       setSettings(sets);
-      setPairing(pair);
       setRouting(route);
       setRoutingPresets(presets);
       setSelectedRoutingPresetId(route.activePresetId ?? presets.find((item) => item.builtin && item.mode === route.mode)?.id ?? presets[0]?.id ?? '');
       setMemories(memory);
       setTelemetry(stats);
-      void refreshVoice();
-      void client.call('pairing.links', {}).then((links) => setDeviceLinks(links as DeviceLink[])).catch(() => setDeviceLinks([]));
+      if (canManage) {
+        void client.call('pairing.info', {}).then((value) => setPairing(value as PairingInfo)).catch(() => setPairing(null));
+        void refreshVoice();
+        void client.call('pairing.links', {}).then((links) => setDeviceLinks(links as DeviceLink[])).catch(() => setDeviceLinks([]));
+      } else {
+        setPairing(null);
+        setDeviceLinks([]);
+        setVoiceConfig(null);
+        setVoiceStatus(null);
+      }
     } catch {
       /* ignore */
     }
-  }, [client, refreshVoice]);
+  }, [canManage, client, refreshVoice]);
 
   useEffect(() => {
     void refresh();
@@ -204,6 +214,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       ...(current ?? { enabled: false, wakePhrase: '로봇', language: 'ko-KR', pcPriorityMs: 900, audibleReply: true, sensitivity: 0.68, replyPreset: 'neon-runner', voiceName: '', replyText: '응, 듣고 있어.', replyRate: -1, replyVolume: 88, engineAvailable: false, recognizers: [], voices: [], canInstall: true }),
       ...(d as Partial<VoiceStatus>),
     } as VoiceStatus)));
+    const offPairing = client.on('pairing.changed', () => {
+      if (canManage) void client.call('pairing.info', {}).then((value) => setPairing(value as PairingInfo)).catch(() => setPairing(null));
+    });
     return () => {
       offP();
       offS();
@@ -211,11 +224,12 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       offRP();
       offM();
       offV();
+      offPairing();
     };
   }, [client, refresh]);
 
   useEffect(() => {
-    if (section !== 'routing' || providers.length === 0) return;
+    if (!canManage || section !== 'routing' || providers.length === 0) return;
     let alive = true;
     void Promise.all(providers.map(async (provider): Promise<[string, string[]]> => {
       try {
@@ -226,7 +240,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       }
     })).then((entries) => { if (alive) setModelOptions((current) => ({ ...current, ...Object.fromEntries(entries) })); });
     return () => { alive = false; };
-  }, [client, providers, section]);
+  }, [canManage, client, providers, section]);
+
+  useEffect(() => {
+    if (!canManage && (section === 'voice' || section === 'safety' || section === 'network' || section === 'pairing')) {
+      setSection('models');
+    }
+  }, [canManage, section]);
 
   useEffect(() => {
     let alive = true;
@@ -257,7 +277,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const addProvider = async (): Promise<void> => {
-    if (!model.trim() || addBusy) return;
+    if (!canManage || !model.trim() || addBusy) return;
     setAddBusy(true);
     setAddError('');
     try {
@@ -285,6 +305,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const saveSettings = async (patch: Partial<AppSettings>): Promise<void> => {
+    if (!canManage) return;
     try {
       await client.call('settings.set', patch);
     } catch {
@@ -293,6 +314,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const saveVoice = async (next: VoiceConfig, message = '✓ 음성 호출 설정을 저장했습니다.'): Promise<void> => {
+    if (!canManage) return;
     setVoiceBusy(true);
     setVoiceMessage('');
     try {
@@ -311,6 +333,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const installSpeech = async (): Promise<boolean> => {
+    if (!canManage) return false;
     setVoiceBusy(true);
     setVoiceMessage('로컬 한국어 음성 엔진을 설치하는 중입니다. 약 250MB를 한 번 내려받습니다…');
     try {
@@ -349,6 +372,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const saveRouting = async (patch: Partial<RoutingSettings>): Promise<void> => {
+    if (!canManage) return;
     try {
       const updated = await client.call('routing.set', patch) as RoutingSettings;
       setRouting(updated);
@@ -358,6 +382,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const testProvider = async (id: string): Promise<void> => {
+    if (!canManage) return;
     setTestResult((t) => ({ ...t, [id]: '확인 중…' }));
     try {
       const res = (await client.call('providers.test', { id })) as { ok: boolean; error?: string };
@@ -407,6 +432,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const discoverModels = async (id: string): Promise<void> => {
+    if (!canManage) return;
     setTestResult((t) => ({ ...t, [id]: '모델 목록 가져오는 중…' }));
     try {
       const values = await client.call('providers.models', { id }) as string[];
@@ -418,6 +444,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const updateProviderModel = async (provider: ProviderInfo): Promise<void> => {
+    if (!canManage) return;
     const nextModel = (modelDrafts[provider.id] ?? provider.model).trim();
     if (!nextModel || nextModel === provider.model) return;
     setTestResult((current) => ({ ...current, [provider.id]: '모델 적용 중…' }));
@@ -431,7 +458,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const applyRoutingPreset = async (): Promise<void> => {
-    if (!selectedRoutingPresetId) return;
+    if (!canManage || !selectedRoutingPresetId) return;
     setRoutingPresetStatus('적용 중…');
     try {
       const updated = await client.call('routing.presets.apply', { id: selectedRoutingPresetId }) as RoutingSettings;
@@ -444,6 +471,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const saveRoutingPreset = async (overwrite = false): Promise<void> => {
+    if (!canManage) return;
     const selected = routingPresets.find((item) => item.id === selectedRoutingPresetId);
     const name = routingPresetName.trim() || (overwrite && selected && !selected.builtin ? selected.name : '내 의사결정 트리');
     setRoutingPresetStatus('저장 중…');
@@ -461,6 +489,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const deleteRoutingPreset = (): void => {
+    if (!canManage) return;
     const selected = routingPresets.find((item) => item.id === selectedRoutingPresetId);
     if (!selected || selected.builtin) return;
     setDangerConfirm({
@@ -502,21 +531,33 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const selectedRoutingPreset = routingPresets.find((item) => item.id === selectedRoutingPresetId);
+  const settingsSections = [
+    { id: 'models', title: '모델 및 연결', adminOnly: false },
+    { id: 'routing', title: '모델 라우팅', adminOnly: false },
+    { id: 'dependencies', title: '외부 도구', adminOnly: false },
+    { id: 'voice', title: '음성 호출', adminOnly: true },
+    { id: 'safety', title: '권한 및 안전', adminOnly: true },
+    { id: 'memory', title: '기억', adminOnly: false },
+    { id: 'network', title: '네트워크', adminOnly: true },
+    { id: 'pairing', title: '모바일 연결', adminOnly: true },
+  ] as const;
 
   return (
     <div className="settings-layout">
       <aside className="settings-nav">
         <div className="settings-nav-title">설정</div>
-        {([
-          ['models', '모델 및 연결'], ['routing', '모델 라우팅'], ['dependencies', '외부 도구'], ['voice', '음성 호출'], ['safety', '권한 및 안전'],
-          ['memory', '기억'], ['network', '네트워크'], ['pairing', '모바일 연결'],
-        ] as const).map(([id, title]) => <button key={id} className={`settings-nav-item ${section === id ? 'active' : ''}`} onClick={() => setSection(id)}>{title}<span>›</span></button>)}
+        {settingsSections.map(({ id, title, adminOnly }) => {
+          const locked = adminOnly && !canManage;
+          return <button key={id} type="button" className={`settings-nav-item ${section === id ? 'active' : ''} ${locked ? 'locked' : ''}`} disabled={locked} title={locked ? '이 PC의 데스크톱 관리자 연결에서만 변경할 수 있습니다.' : undefined} onClick={() => setSection(id)}>{title}<span>{locked ? '🔒' : '›'}</span></button>;
+        })}
       </aside>
       <div className="settings-content stack">
+      {!canManage && <div className="access-scope-banner" role="status"><span>🔒</span><div><b>연결된 기기 · 관리 설정은 읽기 전용</b><p>모델 상태·시나리오·도구 설치 여부는 확인할 수 있습니다. 공급자 키, 플러그인, 음성, PC 네트워크와 연결 기기는 해당 PC의 데스크톱 앱에서만 변경됩니다. 대화·파일·일정은 계속 사용할 수 있습니다.</p></div></div>}
       <div className={section === 'models' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head">
-          <h3>모델 모듈</h3>
+          <div><h3>모델 모듈</h3>{!canManage && <p className="panel-hint">이 기기에서는 연결된 모델을 확인하고 대화에서 선택할 수 있습니다.</p>}</div>
+          {!canManage && <Badge>읽기 전용</Badge>}
         </div>
         <div className="provider-grid">
           {providers.map((p) => (
@@ -533,6 +574,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 <Input
                   aria-label={`${p.label} 모델`}
                   value={modelDrafts[p.id] ?? p.model}
+                  disabled={!canManage}
                   onChange={(event) => setModelDrafts((current) => ({ ...current, [p.id]: event.target.value }))}
                   onKeyDown={(event) => { if (event.key === 'Enter') void updateProviderModel(p); }}
                   list={`provider-models-${p.id}`}
@@ -540,22 +582,22 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 <datalist id={`provider-models-${p.id}`}>
                   {(modelOptions[p.id] ?? []).map((value) => <option key={value} value={value} />)}
                 </datalist>
-                <Button variant="ghost" disabled={!(modelDrafts[p.id] ?? '').trim() || (modelDrafts[p.id] ?? p.model).trim() === p.model} onClick={() => void updateProviderModel(p)}>모델 적용</Button>
+                <Button variant="ghost" disabled={!canManage || !(modelDrafts[p.id] ?? '').trim() || (modelDrafts[p.id] ?? p.model).trim() === p.model} onClick={() => void updateProviderModel(p)}>모델 적용</Button>
               </div>
               <div className="provider-url" title={p.baseUrl}>{p.baseUrl}</div>
               <div className="provider-url">추론: {p.supportedReasoning.join(' · ')}</div>
               {testResult[p.id] && <div className="provider-test">{testResult[p.id]}</div>}
               <div className="plugin-actions">
-                <Button variant="ghost" onClick={() => void testProvider(p.id)}>
+                <Button variant="ghost" disabled={!canManage} onClick={() => void testProvider(p.id)}>
                   연결 확인
                 </Button>
-                <Button variant="ghost" onClick={() => void discoverModels(p.id)}>모델 가져오기</Button>
+                <Button variant="ghost" disabled={!canManage} onClick={() => void discoverModels(p.id)}>모델 가져오기</Button>
                 {!p.isDefault && (
-                  <Button variant="ghost" onClick={() => void client.call('providers.setDefault', { id: p.id }).catch(() => undefined)}>
+                  <Button variant="ghost" disabled={!canManage} onClick={() => void client.call('providers.setDefault', { id: p.id }).catch(() => undefined)}>
                     기본으로
                   </Button>
                 )}
-                <Button variant="danger" onClick={() => void client.call('providers.remove', { id: p.id }).catch(() => undefined)}>
+                <Button variant="danger" disabled={!canManage} onClick={() => void client.call('providers.remove', { id: p.id }).catch(() => undefined)}>
                   삭제
                 </Button>
               </div>
@@ -564,7 +606,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           {providers.length === 0 && <p className="panel-hint">제공자가 없습니다. 아래에서 추가하세요 — 키는 이 PC의 설정 파일에만 저장됩니다.</p>}
         </div>
 
-        <div className="provider-add">
+        <fieldset className="provider-add permission-fieldset" disabled={!canManage}>
           <div className="panel-head">
             <h3>제공자 추가</h3>
           </div>
@@ -631,43 +673,45 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           <Button onClick={() => void addProvider()} disabled={addBusy || !model.trim()}>
             {addBusy ? '추가 중…' : '추가'}
           </Button>
-        </div>
+        </fieldset>
       </Card></div>
 
       <div className={section === 'routing' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head">
           <div><h3>비용 최적화 모델 파이프라인</h3><p className="panel-hint">요청 복잡도와 작업 종류에 따라 가장 싼 적합 모델을 고르고, 지정한 순서대로 장애 조치합니다.</p></div>
-          {routing && <Select value={routing.mode} onChange={(e) => void saveRouting({ mode: e.target.value as RoutingSettings['mode'] })}>
+          {routing && <Select disabled={!canManage} value={routing.mode} onChange={(e) => void saveRouting({ mode: e.target.value as RoutingSettings['mode'] })}>
             <option value="economy">절약 우선</option><option value="balanced">균형 (권장)</option><option value="quality">품질 우선</option><option value="manual">수동 지정</option>
           </Select>}
         </div>
+        {!canManage && <div className="access-inline"><b>시나리오 미리보기</b><span>현재 구성과 토큰 통계는 볼 수 있습니다. 기본 라우팅과 프리셋 편집은 PC 데스크톱 관리자에서 진행하세요.</span></div>}
         <div className="routing-preset-panel">
           <Field label="모델 시나리오 프리셋" hint="목록에서 클릭하면 노드 구조를 미리보고 적용할 수 있습니다">
             <Button className="preset-browser-trigger" variant="ghost" onClick={() => setPresetBrowserOpen(true)}><span>{selectedRoutingPreset?.builtin ? '기본 프리셋' : '내 프리셋'}</span><b>{selectedRoutingPreset?.name ?? '프리셋 선택'}</b><span>목록·그래프 보기 ›</span></Button>
           </Field>
           <div className="type-row routing-preset-actions">
-            <Button onClick={() => void applyRoutingPreset()} disabled={!selectedRoutingPresetId}>선택 프리셋 적용</Button>
-            <Input value={routingPresetName} onChange={(event) => setRoutingPresetName(event.target.value)} placeholder="새 프리셋 이름" />
-            <Button variant="ghost" onClick={() => void saveRoutingPreset(false)}>현재 트리 새로 저장</Button>
+            <Button onClick={() => void applyRoutingPreset()} disabled={!canManage || !selectedRoutingPresetId}>선택 프리셋 적용</Button>
+            <Input disabled={!canManage} value={routingPresetName} onChange={(event) => setRoutingPresetName(event.target.value)} placeholder="새 프리셋 이름" />
+            <Button variant="ghost" disabled={!canManage} onClick={() => void saveRoutingPreset(false)}>현재 트리 새로 저장</Button>
             {routingPresets.some((item) => item.id === selectedRoutingPresetId && !item.builtin) && <>
-              <Button variant="ghost" onClick={() => void saveRoutingPreset(true)}>선택 프리셋 덮어쓰기</Button>
-              <Button variant="danger" onClick={deleteRoutingPreset}>삭제</Button>
+              <Button variant="ghost" disabled={!canManage} onClick={() => void saveRoutingPreset(true)}>선택 프리셋 덮어쓰기</Button>
+              <Button variant="danger" disabled={!canManage} onClick={deleteRoutingPreset}>삭제</Button>
             </>}
           </div>
           {routingPresets.find((item) => item.id === selectedRoutingPresetId)?.description && <p className="panel-hint">{routingPresets.find((item) => item.id === selectedRoutingPresetId)?.description}</p>}
           {routingPresetStatus && <div className="provider-test">{routingPresetStatus}</div>}
         </div>
         {telemetry && <div className="telemetry-strip">
-          <div><span>최근 실행</span><b>{telemetry.turns.toLocaleString()}회</b></div>
-          <div><span>입력 토큰</span><b>{telemetry.promptTokens.toLocaleString()}</b></div>
-          <div><span>출력 토큰</span><b>{telemetry.completionTokens.toLocaleString()}</b></div>
-          <div><span>도구 호출</span><b>{telemetry.toolCalls.toLocaleString()}회</b></div>
-          <div><span>실패</span><b>{telemetry.failures.toLocaleString()}회</b></div>
-          <div><span>예상 비용</span><b>${telemetry.estimatedCost.toFixed(4)}</b></div>
+          <div><span>최근 실행</span><b>{Number(telemetry.turns ?? 0).toLocaleString()}회</b></div>
+          <div><span>입력 토큰</span><b>{Number(telemetry.promptTokens ?? 0).toLocaleString()}</b></div>
+          <div><span>캐시 재사용</span><b>{Number(telemetry.cachedPromptTokens ?? 0).toLocaleString()} · {(Number(telemetry.cacheHitRate ?? 0) * 100).toFixed(1)}%</b></div>
+          <div><span>출력 토큰</span><b>{Number(telemetry.completionTokens ?? 0).toLocaleString()}</b></div>
+          <div><span>도구 호출</span><b>{Number(telemetry.toolCalls ?? 0).toLocaleString()}회</b></div>
+          <div><span>실패</span><b>{Number(telemetry.failures ?? 0).toLocaleString()}회</b></div>
+          <div><span>예상 비용</span><b>${Number(telemetry.estimatedCost ?? 0).toFixed(4)}</b></div>
         </div>}
-        {routing?.graph && <RoutingGraphEditor graph={routing.graph} providers={providers} providerModels={modelOptions} onSave={(graph) => void saveRouting({ graph })} />}
-        {routing && <div className="form-grid routing-options">
+        {routing?.graph && <RoutingGraphEditor graph={routing.graph} providers={providers} providerModels={modelOptions} onSave={canManage ? (graph) => void saveRouting({ graph }) : undefined} readOnly={!canManage} />}
+        {routing && <fieldset className="form-grid routing-options permission-fieldset" disabled={!canManage}>
           <Field label="시나리오 실행 방식" hint="순차·투표는 노드 수만큼 모델 호출이 늘어납니다"><Select value={routing.executionMode ?? 'single'} onChange={(e) => void saveRouting({ executionMode: e.target.value as RoutingSettings['executionMode'] })}>
             <option value="single">단일 선택 · 한 모델만 호출</option><option value="pipeline">순차 파이프라인 · 노드별 전달</option><option value="vote">회의·투표 · 그룹별 상호 토론</option><option value="hybrid">혼합 · 분류＋그룹 회의＋검증</option><option value="swarm">경쟁 스웜 · 병렬 풀이＋공유＋성공 검증까지 재시도</option>
           </Select></Field>
@@ -678,7 +722,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           {routing.executionMode === 'swarm' && <Field label="최대 경쟁 반복" hint="검증 성공 시 즉시 종료하며, 실패가 계속될 때만 이 상한까지 재도전합니다"><Input type="number" min={1} max={12} value={routing.maxIterations ?? 6} onChange={(e) => void saveRouting({ maxIterations: Number(e.target.value) })} /></Field>}
           <Field label="턴당 고비용 호출 상한"><Input type="number" min={0} max={8} value={routing.maxPremiumCalls} onChange={(e) => void saveRouting({ maxPremiumCalls: Number(e.target.value) })} /></Field>
           <Field label="어려운 요청 자동 상향"><Toggle checked={routing.escalationEnabled} onChange={(v) => void saveRouting({ escalationEnabled: v })} /></Field>
-        </div>}
+        </fieldset>}
       </Card></div>
 
       <div className={section === 'dependencies' ? '' : 'settings-section-hidden'}>
@@ -712,11 +756,6 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
             <Field label="호출 감도" hint="잘 안 들리면 높음, 주변 대화에 자주 반응하면 엄격을 선택하세요">
               <Select value={String(voiceConfig.sensitivity ?? 0.68)} onChange={(event) => setVoiceConfig({ ...voiceConfig, sensitivity: Number(event.target.value) })}>
                 <option value="0.55">높음</option><option value="0.68">균형 (권장)</option><option value="0.8">엄격</option>
-              </Select>
-            </Field>
-            <Field label="PC 우선 대기" hint="PC와 휴대폰이 동시에 들었을 때 휴대폰이 양보하는 시간">
-              <Select value={String(voiceConfig.pcPriorityMs)} onChange={(event) => setVoiceConfig({ ...voiceConfig, pcPriorityMs: Number(event.target.value) })}>
-                <option value="600">0.6초</option><option value="900">0.9초 (권장)</option><option value="1500">1.5초</option><option value="2500">2.5초</option>
               </Select>
             </Field>
             <Field label="호출 확인 음성" hint="호출을 들으면 ‘네, 듣고 있어요’라고 답합니다">
@@ -809,24 +848,29 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       <div className={section === 'memory' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head"><div><h3>장기 기억</h3><p className="panel-hint">대화를 넘어 유지할 선호·환경·프로젝트 사실만 직접 저장합니다.</p></div></div>
-        <div className="type-row"><Input value={memoryText} onChange={(e) => setMemoryText(e.target.value)} placeholder="예: 기본 프로젝트 폴더는 C:\\Work 입니다" onKeyDown={(e) => { if (e.key === 'Enter' && memoryText.trim()) void client.call('memory.add', { text: memoryText }).then(() => setMemoryText('')); }} /><Button disabled={!memoryText.trim()} onClick={() => void client.call('memory.add', { text: memoryText }).then(() => setMemoryText(''))}>기억 추가</Button></div>
-        <div className="memory-list">{memories.map((item) => <div className="memory-item" key={item.id}><span>{item.text}</span><Button variant="danger" onClick={() => void client.call('memory.remove', { id: item.id })}>삭제</Button></div>)}{memories.length === 0 && <p className="panel-hint">저장된 장기 기억이 없습니다.</p>}</div>
+        {!canWriteContent && <div className="access-inline"><b>읽기 전용 연결</b><span>저장된 기억은 볼 수 있지만 이 기기에서는 추가·삭제할 수 없습니다.</span></div>}
+        <div className="type-row"><Input disabled={!canWriteContent} value={memoryText} onChange={(e) => setMemoryText(e.target.value)} placeholder="예: 기본 프로젝트 폴더는 C:\\Work 입니다" onKeyDown={(e) => { if (canWriteContent && e.key === 'Enter' && memoryText.trim()) void client.call('memory.add', { text: memoryText }).then(() => setMemoryText('')); }} /><Button disabled={!canWriteContent || !memoryText.trim()} onClick={() => void client.call('memory.add', { text: memoryText }).then(() => setMemoryText(''))}>기억 추가</Button></div>
+        <div className="memory-list">{memories.map((item) => <div className="memory-item" key={item.id}><span>{item.text}</span><Button variant="danger" disabled={!canWriteContent} onClick={() => void client.call('memory.remove', { id: item.id })}>삭제</Button></div>)}{memories.length === 0 && <p className="panel-hint">저장된 장기 기억이 없습니다.</p>}</div>
       </Card></div>
 
       <div className={section === 'network' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head">
-          <h3>네트워크</h3>
+          <div><h3>네트워크 경계</h3><p className="panel-hint">로컬 단독 사용이 기본입니다. 다른 기기 연결은 필요한 범위만 직접 열어 주세요.</p></div>
+          <Badge tone="accent">인증 토큰 필수</Badge>
         </div>
         {settings && (
           <div className="form-grid">
-            <Field label="접속 범위" hint="LAN이면 같은 Wi-Fi의 폰에서 접속 가능">
+            <Field label="사설 Mesh 수신" hint="Tailscale 주소에서 받을 때만 사용합니다. Agent를 다시 시작한 뒤 적용됩니다.">
               <Select
-                value={settings.network.host}
-                onChange={(e) => void saveSettings({ network: { ...settings.network, host: e.target.value as '0.0.0.0' | '127.0.0.1' } })}
+                value={settings.network.host === '0.0.0.0' && settings.network.externalAccess ? 'lan' : 'local'}
+                onChange={(e) => {
+                  const lan = e.target.value === 'lan';
+                  void saveSettings({ network: { ...settings.network, host: lan ? '0.0.0.0' : '127.0.0.1', externalAccess: lan } });
+                }}
               >
-                <option value="0.0.0.0">같은 네트워크 (LAN)</option>
-                <option value="127.0.0.1">이 PC에서만</option>
+                <option value="local">이 PC에서만 (권장)</option>
+                <option value="lan">Tailscale 사설 Mesh 주소 수신</option>
               </Select>
             </Field>
             <Field label="포트">
@@ -837,17 +881,22 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 onBlur={(e) => void saveSettings({ network: { ...settings.network, port: Number(e.target.value) } })}
               />
             </Field>
-            <Field label="외부 접속 허용 표시">
-              <Toggle
-                checked={settings.network.externalAccess}
-                onChange={(v) => void saveSettings({ network: { ...settings.network, externalAccess: v } })}
-              />
-            </Field>
           </div>
         )}
-        <p className="panel-hint">
-          외부 네트워크 연결은 필요한 경우 플러그인 화면에서 별도의 연결 모듈을 활성화하세요. 인증 토큰은 항상 필요합니다.
-        </p>
+        {settings?.network.host === '0.0.0.0' && settings.network.externalAccess
+          ? <div className="access-inline"><b>평문 LAN 차단</b><span>일반 Wi-Fi/LAN 인증은 받지 않고 Tailscale 암호화 주소만 허용합니다. VPN 없이 쓰려면 Quick Link를 켜세요.</span></div>
+          : <p className="panel-hint">127.0.0.1은 같은 PC에서만 접근할 수 있어 단독 사용에 가장 안전합니다.</p>}
+        <p className="panel-hint">외부망 연결이 필요하면 플러그인에서 Cloudflare Quick Link를 필요한 동안만 켤 수 있습니다. 시스템 VPN을 만들지 않아 일반적으로 금융 앱에는 영향을 주지 않지만, 임시 베타 주소이므로 상시 운영용은 아닙니다.</p>
+      </Card>
+      <Card className="panel">
+        <div className="panel-head"><div><h3>연결 provider 로드맵</h3><p className="panel-hint">연결 기술을 앱 핵심과 분리해 필요한 방식만 교체할 수 있습니다.</p></div></div>
+        <div className="plugin-detail-facts">
+          <span><b>1 · 로컬</b>loopback 기본 · 서버 불필요</span>
+          <span><b>2 · 사설 Mesh</b>Tailscale 암호화 주소 · 선택 사항</span>
+          <span><b>3 · 임시 원격</b>Cloudflare Quick Link · 기본 OFF</span>
+          <span><b>4 · 계정 Mesh</b>Google Relay · 구성 전 비활성</span>
+        </div>
+        <div className="dependency-warning">Google 계정 Relay는 로그인만 붙인다고 완성되지 않습니다. Firebase 기기 directory, 공개키 기반 1회 승인, signaling, 종단간 암호화 relay가 배포된 뒤에만 활성화됩니다.</div>
       </Card></div>
 
       <div className={section === 'pairing' ? '' : 'settings-section-hidden'}>
@@ -865,18 +914,18 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 📡 <b>{pairing.host}:{pairing.port}</b>
               </div>
               <div className="pairing-routes">
-                <span>내부망 <b>{pairing.host}:{pairing.port}</b></span>
+                <span>보안 접속 주소 <b>{pairing.host}:{pairing.port}</b></span>
                 {pairing.hosts.filter((host) => host !== pairing.host).map((host) => <span key={host}>보조 접속 주소 <b>{host}:{pairing.port}</b></span>)}
-                {pairing.hosts.length === 1 && <span className="warn">외부망 주소 없음 · 필요하면 플러그인 화면에서 연결 모듈을 활성화하세요.</span>}
+                {pairing.host === '127.0.0.1' && <span className="warn">원격 보안 주소 없음 · VPN 없이 연결하려면 플러그인에서 Quick Link를 시작하세요.</span>}
               </div>
               <div className="pairing-pin">
-                PIN <b>{pairing.pin}</b>
+                PIN <b>{pairing.pin}</b> <span>· 5분 / 1회용</span>
               </div>
               <div className="pairing-secret">
                 시크릿 {pairing.maskedSecret}
               </div>
               <p className="panel-hint">
-                폰의 Mr.Robot 앱에서 이 QR을 스캔하면 저장된 접속 주소를 순서대로 시도합니다. 수동 입력 시 위 내부망 주소 전체를 입력하세요.
+                폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다. 원격 주소가 없으면 플러그인에서 Quick Link를 먼저 시작하세요.
               </p>
               <div className="plugin-actions">
                 <Button variant="ghost" onClick={() => void client.call('pairing.regeneratePin', {}).then(() => void refresh())}>
@@ -893,9 +942,16 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 <h4>연결된 기기</h4>
                 {deviceLinks.filter((link) => !link.revokedAt).map((link) => <div className="linked-device" key={link.id}>
                   <div><b>{link.name}</b><span>{new Date(link.createdAt).toLocaleDateString()} 연결</span></div>
-                  <Select value={link.permissionCap} onChange={(e) => void client.call('pairing.link.update', { id: link.id, permissionCap: e.target.value }).then(() => void refresh())}>
-                    <option value="read-only">읽기 전용</option><option value="ask">매번 승인</option><option value="workspace">작업 폴더 자동</option><option value="full">전체 권한</option>
-                  </Select>
+                  <div className="linked-device-policy">
+                    <Select value={link.permissionCap} onChange={(e) => void client.call('pairing.link.update', { id: link.id, permissionCap: e.target.value }).then(() => void refresh())}>
+                      <option value="read-only">읽기 전용</option><option value="ask">매번 승인</option><option value="workspace">작업 폴더 자동</option><option value="full">전체 권한</option>
+                    </Select>
+                    <Toggle
+                      checked={link.capabilities?.includes('work-sync') === true}
+                      label="작업 동기화"
+                      onChange={(enabled) => void client.call('pairing.link.update', { id: link.id, capabilities: enabled ? ['work-sync'] : [] }).then(() => void refresh())}
+                    />
+                  </div>
                   <Button variant="danger" onClick={() => setDangerConfirm({ title: '기기 연결을 해제할까요?', message: `${link.name} 기기의 인증이 취소되며 다시 사용하려면 새 PIN 또는 QR로 연결해야 합니다.`, confirmLabel: '연결 해제', action: async () => { await client.call('pairing.link.revoke', { id: link.id }); await refresh(); } })}>연결 해제</Button>
                 </div>)}
                 {deviceLinks.filter((link) => !link.revokedAt).length === 0 && <p className="panel-hint">아직 별도로 연결된 기기가 없습니다.</p>}
@@ -918,7 +974,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
               <div className="preset-preview-head"><div><h4>{selectedRoutingPreset.name}</h4><p>{selectedRoutingPreset.description}</p></div><div className="preset-preview-badges"><Badge tone="accent">{EXECUTION_LABEL[selectedRoutingPreset.executionMode ?? 'single']}</Badge>{(selectedRoutingPreset.executionMode === 'vote' || selectedRoutingPreset.executionMode === 'hybrid' || selectedRoutingPreset.executionMode === 'swarm') && <Badge>{selectedRoutingPreset.meetingRounds ?? 2}라운드</Badge>}{selectedRoutingPreset.executionMode === 'swarm' && <Badge>최대 {selectedRoutingPreset.maxIterations ?? 6}회</Badge>}<Badge>고비용 상한 {selectedRoutingPreset.maxPremiumCalls}</Badge></div></div>
               {selectedRoutingPreset.graph && <RoutingGraphEditor key={selectedRoutingPreset.id} graph={selectedRoutingPreset.graph} providers={providers} providerModels={modelOptions} readOnly />}
             </> : <p className="panel-hint">왼쪽에서 프리셋을 선택하세요.</p>}
-            <div className="modal-actions"><Button variant="ghost" onClick={() => setPresetBrowserOpen(false)}>닫기</Button><Button variant="accent" disabled={!selectedRoutingPreset} onClick={() => void applyRoutingPreset()}>이 프리셋 적용</Button></div>
+            <div className="modal-actions"><Button variant="ghost" onClick={() => setPresetBrowserOpen(false)}>닫기</Button><Button variant="accent" disabled={!canManage || !selectedRoutingPreset} title={!canManage ? 'PC 데스크톱 관리자에서 적용할 수 있습니다.' : undefined} onClick={() => void applyRoutingPreset()}>이 프리셋 적용</Button></div>
           </section>
         </div>
       </Modal>

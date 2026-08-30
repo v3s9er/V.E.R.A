@@ -40,6 +40,75 @@ for (const [name, meta] of [...direct.entries()].sort()) {
 
 // 2. scan full tree for copyleft
 const COPYLEFT = /\b(GPL|AGPL|LGPL|SSPL|BUSL|BSL|Elastic License|CC BY-NC|CC-BY-NC)\b/i;
+const hasCopyleftAtom = (value) => COPYLEFT.test(String(value));
+
+// An SPDX OR grants a choice. Copyleft is unavoidable only when every branch
+// is copyleft. An AND requires every term, so one copyleft term is enough.
+const hasUnavoidableCopyleft = (expression) => {
+  if (typeof expression !== 'string' || !expression.trim()) return false;
+  const tokens = expression.match(/\(|\)|\bAND\b|\bOR\b|\bWITH\b|[^\s()]+/gi) ?? [];
+  let cursor = 0;
+
+  const parsePrimary = () => {
+    const token = tokens[cursor++];
+    if (!token) throw new Error('missing SPDX term');
+    let result;
+    if (token === '(') {
+      result = parseOr();
+      if (tokens[cursor++] !== ')') throw new Error('unclosed SPDX group');
+    } else if (token === ')') {
+      throw new Error('unexpected SPDX group close');
+    } else {
+      result = hasCopyleftAtom(token);
+    }
+    if (tokens[cursor]?.toUpperCase() === 'WITH') {
+      cursor += 1;
+      if (!tokens[cursor] || tokens[cursor] === '(' || tokens[cursor] === ')') throw new Error('missing SPDX exception');
+      cursor += 1;
+    }
+    return result;
+  };
+
+  const parseAnd = () => {
+    let result = parsePrimary();
+    while (tokens[cursor]?.toUpperCase() === 'AND') {
+      cursor += 1;
+      result = parsePrimary() || result;
+    }
+    return result;
+  };
+
+  const parseOr = () => {
+    let result = parseAnd();
+    while (tokens[cursor]?.toUpperCase() === 'OR') {
+      cursor += 1;
+      result = parseAnd() && result;
+    }
+    return result;
+  };
+
+  try {
+    const result = parseOr();
+    if (cursor !== tokens.length) throw new Error('unexpected SPDX token');
+    return result;
+  } catch {
+    // Custom/non-SPDX declarations remain conservatively classified, while a
+    // clearly expressed OR still receives the same selectable-license logic.
+    const alternatives = expression.split(/\s+OR\s+/i);
+    return alternatives.length > 1
+      ? alternatives.every((alternative) => hasCopyleftAtom(alternative))
+      : hasCopyleftAtom(expression);
+  }
+};
+
+for (const [expression, expected] of [
+  ['BSD-3-Clause OR GPL-3.0-only', false],
+  ['GPL-2.0-only OR AGPL-3.0-only', true],
+  ['MIT AND LGPL-3.0-only', true],
+  ['(GPL-3.0-only OR MIT) AND Apache-2.0', false],
+]) {
+  if (hasUnavoidableCopyleft(expression) !== expected) throw new Error(`SPDX classifier regression: ${expression}`);
+}
 const hits = new Map();
 let scanned = 0;
 const walk = (dir, depth) => {
@@ -60,7 +129,7 @@ const walk = (dir, depth) => {
           if (existsSync(pkg)) {
             scanned++;
             const lic = licenseOf(join(sub, s.name));
-            if (COPYLEFT.test(String(lic))) hits.set(`${e.name}/${s.name}`, lic);
+            if (hasUnavoidableCopyleft(String(lic))) hits.set(`${e.name}/${s.name}`, lic);
           }
         }
       }
@@ -69,7 +138,7 @@ const walk = (dir, depth) => {
       if (existsSync(pkg)) {
         scanned++;
         const lic = licenseOf(join(dir, e.name));
-        if (COPYLEFT.test(String(lic))) hits.set(e.name, lic);
+        if (hasUnavoidableCopyleft(String(lic))) hits.set(e.name, lic);
       }
     }
   }
@@ -80,7 +149,7 @@ walk(nm, 1);
 // also apps/mobile/node_modules (separate install)
 if (existsSync(join(root, 'apps/mobile/node_modules'))) walk(join(root, 'apps/mobile/node_modules'), 1);
 
-console.log(`\n=== COPYLEFT SCAN (${scanned} packages) ===`);
+console.log(`\n=== UNAVOIDABLE COPYLEFT SCAN (${scanned} packages) ===`);
 if (hits.size === 0) {
   console.log('None found — no GPL/AGPL/LGPL/SSPL/BSL-style copyleft licenses.');
 } else {

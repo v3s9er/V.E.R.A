@@ -3,7 +3,7 @@ import type { Computer } from '../computer/index.js';
 import type { Logger } from '../logger.js';
 import type { ProviderRegistry } from '../ai/registry.js';
 import type { PluginStorage } from './storage.js';
-import { PluginCommandRegistry, type RegisterCommandOptions } from './commands.js';
+import { PluginCommandRegistry, type PluginExecutionContext, type RegisterCommandOptions } from './commands.js';
 
 /**
  * Everything a plugin can hold on to, given out through this context.
@@ -28,7 +28,7 @@ export interface PluginContext {
   /** Register a command callable from any client via `plugin.call`. */
   registerCommand(
     name: string,
-    handler: (params: unknown) => unknown | Promise<unknown>,
+    handler: (params: unknown, execution?: PluginExecutionContext) => unknown | Promise<unknown>,
     opts?: RegisterCommandOptions,
   ): void;
 
@@ -116,7 +116,7 @@ export class PluginContextImpl implements PluginContext {
     this.timers.delete(t);
   }
 
-  registerCommand(name: string, handler: (params: unknown) => unknown | Promise<unknown>, opts?: RegisterCommandOptions): void {
+  registerCommand(name: string, handler: (params: unknown, execution?: PluginExecutionContext) => unknown | Promise<unknown>, opts?: RegisterCommandOptions): void {
     this.commands.register(this.pluginId, name, handler, opts);
   }
 

@@ -16,6 +16,12 @@ export interface WsClientState {
   stream: ScreenStreamController | null;
 }
 
+/** A socket is only a view/controller; an active run survives reconnect. */
+export function cleanupDisconnectedClientState(state: Pick<WsClientState, 'chat' | 'stream'>): void {
+  state.stream?.stop();
+  if (state.chat.busy === false) state.chat.reset();
+}
+
 export class WsClient {
   readonly id = randomUUID();
   readonly remoteAddress: string;
@@ -53,7 +59,7 @@ export type RpcHandler = (params: unknown, client: WsClient) => unknown | Promis
 /**
  * WebSocket RPC hub. Every request is answered exactly once (ok/error), and
  * server pushes use id 0 events. Clients must authenticate first (`auth` with
- * the pairing secret, or a `?token=` query param); everything else is
+ * the pairing/device secret); everything else is
  * rejected with ERROR_UNAUTHORIZED until then.
  */
 export class WsHub {
@@ -66,7 +72,8 @@ export class WsHub {
     private readonly authenticate: (secret: string) => AuthContext | null,
     private readonly logger: Logger,
   ) {
-    this.wss = new WebSocketServer({ server, path: '/ws', maxPayload: 96 * 1024 * 1024 });
+    // File payloads use streaming HTTP endpoints; RPC never needs huge frames.
+    this.wss = new WebSocketServer({ server, path: '/ws', maxPayload: 2 * 1024 * 1024 });
     this.wss.on('connection', (socket, req) => this.onConnection(socket, req));
   }
 
@@ -74,6 +81,23 @@ export class WsHub {
     for (const client of this.clients) {
       if (client.state.authed) client.sendEvent(event, data);
     }
+  }
+
+  /** Control-plane/log/voice events are visible only to the local administrator. */
+  broadcastAdmin(event: string, data: unknown): void {
+    for (const client of this.clients) {
+      if (client.state.authed && client.state.auth?.isAdmin === true) client.sendEvent(event, data);
+    }
+  }
+
+  /** Immediately invalidate every live socket authenticated as one device link. */
+  disconnectLink(linkId: string, reason = 'device authorization changed'): number {
+    return this.disconnectMatching((client) => client.state.auth?.linkId === linkId, reason);
+  }
+
+  /** Immediately invalidate all authenticated sockets after global credential rotation. */
+  disconnectAuthenticated(reason = 'credentials rotated'): number {
+    return this.disconnectMatching((client) => client.state.authed, reason);
   }
 
   close(): void {
@@ -86,28 +110,45 @@ export class WsHub {
     this.wss.close();
   }
 
+  private disconnectMatching(predicate: (client: WsClient) => boolean, reason: string): number {
+    let disconnected = 0;
+    for (const client of this.clients) {
+      if (!predicate(client)) continue;
+      disconnected++;
+      // Revoke the in-memory authorization before beginning the WebSocket
+      // close handshake so messages racing with close fail closed.
+      client.state.authed = false;
+      client.state.auth = null;
+      cleanupDisconnectedClientState(client.state);
+      try { client.socket.close(4003, reason.slice(0, 120)); }
+      catch { try { client.socket.terminate(); } catch { /* already gone */ } }
+    }
+    return disconnected;
+  }
+
   private onConnection(socket: WebSocket, req: import('node:http').IncomingMessage): void {
     const remote = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
+    const octets = remote.split('.').map(Number);
+    const tailnet = octets.length === 4
+      && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+      && octets[0] === 100
+      && octets[1] >= 64
+      && octets[1] <= 127;
+    const loopback = remote === '127.0.0.1' || remote === '::1' || remote === 'localhost';
+    if (loopback === false && tailnet === false) {
+      this.logger.warn(`ws rejected unencrypted LAN peer: ${remote}`);
+      socket.close(1008, 'secure transport required');
+      return;
+    }
     const client = new WsClient(socket, remote);
     this.clients.add(client);
     this.logger.info(`ws connected: ${remote} (${this.clients.size} clients)`);
-
-    // Allow token via query string (used by the desktop shell and simple clients).
-    try {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      const token = url.searchParams.get('token');
-      const auth = token ? this.authenticate(token) : null;
-      if (auth) { client.state.authed = true; client.state.auth = auth; }
-    } catch {
-      /* malformed url — fall through to auth message */
-    }
 
     socket.on('message', (raw: Buffer | string) => {
       void this.onMessage(client, raw.toString());
     });
     socket.on('close', () => {
-      client.state.stream?.stop();
-      client.state.chat.reset();
+      cleanupDisconnectedClientState(client.state);
       this.clients.delete(client);
       this.logger.info(`ws disconnected: ${remote} (${this.clients.size} clients)`);
     });
@@ -133,7 +174,15 @@ export class WsHub {
       const p = (params ?? {}) as { secret?: string };
       client.state.auth = typeof p.secret === 'string' ? this.authenticate(p.secret) : null;
       client.state.authed = client.state.auth !== null;
-      client.send({ id, ok: true, result: { ok: client.state.authed } });
+      client.send({
+        id,
+        ok: true,
+        result: {
+          ok: client.state.authed,
+          isAdmin: client.state.auth?.isAdmin === true,
+          permissionCap: client.state.auth?.permissionCap ?? 'read-only',
+        },
+      });
       if (client.state.authed) this.logger.info(`ws authenticated: ${client.remoteAddress}`);
       return;
     }

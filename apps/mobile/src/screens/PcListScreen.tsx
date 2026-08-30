@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
   Modal,
-  Pressable,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,11 +12,12 @@ import {
   View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { MrRobotClient } from '../rpc';
-import { wsUrl } from '../rpc';
+import { pairingOrigins, wsUrl } from '../rpc';
 import type { SavedPc } from '../types';
 import { parsePairingPayload } from '../rpc';
-import { exchangePin, loadPcs, removePc, savePcs, setLastPcId, upsertPc } from '../pcs';
+import { connectionOrigins, exchangePin, exchangePinAcrossOrigins, getLastPcId, loadPcs, parsePcAddress, removePc, savePcs, setLastPcId, upsertPc } from '../pcs';
 import { colors, radius, shadow } from '../theme';
 
 export function PcListScreen({
@@ -25,6 +27,7 @@ export function PcListScreen({
   client: MrRobotClient;
   onConnected: (pc: SavedPc) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const [pcs, setPcs] = useState<SavedPc[]>([]);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -38,29 +41,51 @@ export function PcListScreen({
   const [scanHandled, setScanHandled] = useState(false);
   const [scanReady, setScanReady] = useState(false);
   const [scanError, setScanError] = useState('');
+  const [scannerKey, setScannerKey] = useState(0);
+  const connectGeneration = useRef(0);
+  const deletedIds = useRef(new Set<string>());
 
   useEffect(() => {
     void loadPcs().then(setPcs);
   }, []);
 
   const connect = async (pc: SavedPc): Promise<boolean> => {
+    const generation = ++connectGeneration.current;
+    deletedIds.current.delete(pc.id);
+    const isCurrent = (): boolean => generation === connectGeneration.current && !deletedIds.current.has(pc.id);
     setConnectingId(pc.id);
     setError('');
-    const candidates = [...new Set([pc.activeHost, pc.host, ...(pc.hosts ?? [])].filter((value): value is string => Boolean(value)))];
-    let lastError = '연결할 주소가 없습니다.';
+    if (!pc.secret) {
+      setError(`${pc.name}: 저장된 자격증명을 읽지 못했습니다. PIN 또는 QR로 다시 등록해 주세요.`);
+      setConnectingId(null);
+      return false;
+    }
+    const candidates = connectionOrigins(pc);
+    let lastError = '보안 접속 주소가 없습니다. PC에서 Quick Link를 시작하거나 Tailscale 주소로 다시 등록하세요.';
     for (let index = 0; index < candidates.length; index++) {
-      const candidate = candidates[index];
+      if (!isCurrent()) return false;
+      const candidateOrigin = candidates[index];
       try {
-        await client.connect(wsUrl(`${candidate}:${pc.port}`), pc.secret, index < candidates.length - 1 ? 2500 : 8000);
-        let refreshedHosts = pc.hosts ?? [pc.host];
+        await client.connect(wsUrl(candidateOrigin), pc.secret, index < candidates.length - 1 ? 2500 : 8000);
+        if (!isCurrent()) { client.close(); return false; }
+        const candidate = parsePcAddress(candidateOrigin, pc.port, pc.protocol ?? 'http');
+        let refreshedHosts = pc.hosts ?? [];
+        let refreshedPort = pc.port;
         try {
-          const info = await client.call('pairing.info', {}) as { host?: string; hosts?: string[] };
+          const info = await client.call('pairing.info', {}) as { host?: string; hosts?: string[]; port?: number };
           refreshedHosts = [...new Set([info.host, ...(info.hosts ?? []), ...refreshedHosts].filter((value): value is string => Boolean(value)))];
+          if (Number.isInteger(info.port) && Number(info.port) > 0 && Number(info.port) <= 65535) refreshedPort = Number(info.port);
         } catch { /* 연결 자체는 유효하므로 주소 새로고침 실패는 무시 */ }
-        const connectedPc = { ...pc, hosts: refreshedHosts, activeHost: candidate };
-        const saved = (await loadPcs()).map((item) => item.id === pc.id ? connectedPc : item);
+        if (!isCurrent()) { client.close(); return false; }
+        const refreshedOrigins = [...new Set([candidate.origin, ...connectionOrigins(pc), ...refreshedHosts.map((host) => parsePcAddress(host, refreshedPort, 'http').origin)])];
+        const connectedPc = { ...pc, hosts: refreshedHosts, origins: refreshedOrigins, activeHost: candidate.host, activeOrigin: candidate.origin };
+        const currentPcs = await loadPcs();
+        if (!isCurrent() || !currentPcs.some((item) => item.id === pc.id)) { client.close(); return false; }
+        const saved = currentPcs.map((item) => item.id === pc.id ? connectedPc : item);
         await savePcs(saved);
+        if (!isCurrent()) { client.close(); return false; }
         await setLastPcId(pc.id);
+        if (!isCurrent()) { client.close(); return false; }
         setConnectingId(null);
         onConnected(connectedPc);
         return true;
@@ -68,8 +93,10 @@ export function PcListScreen({
         lastError = err instanceof Error ? err.message : String(err);
       }
     }
-    setError(`${pc.name} 연결 실패: ${lastError}\nPC 주소와 네트워크 연결 상태를 확인하세요.`);
-    setConnectingId(null);
+    if (isCurrent()) {
+      setError(`${pc.name} 연결 실패: ${lastError}\nPC 주소와 네트워크 연결 상태를 확인하세요.`);
+      setConnectingId(null);
+    }
     return false;
   };
 
@@ -78,11 +105,15 @@ export function PcListScreen({
     setBusy(true);
     setError('');
     try {
-      const secret = await exchangePin(hostPort, pin, name.trim() || '모바일');
+      const parsed = parsePcAddress(hostPort);
+      const secret = await exchangePin(parsed.origin, pin, name.trim() || '모바일');
       const pc: Omit<SavedPc, 'id' | 'addedAt'> = {
         name: name.trim() || hostPort.trim(),
-        host: hostPort.split(':')[0] || hostPort.trim(),
-        port: Number(hostPort.split(':')[1] ?? 8787),
+        host: parsed.host,
+        port: parsed.port,
+        protocol: parsed.protocol,
+        origins: [parsed.origin],
+        activeOrigin: parsed.origin,
         secret,
       };
       const next = await upsertPc(await loadPcs(), pc);
@@ -92,7 +123,9 @@ export function PcListScreen({
       setName('');
       setHostPort('');
       setPin('');
-      await connect(next[next.length - 1]);
+      const savedPc = next.find((item) => connectionOrigins(item).includes(parsed.origin));
+      if (!savedPc) throw new Error('저장된 PC를 찾지 못했습니다.');
+      await connect(savedPc);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -112,21 +145,27 @@ export function PcListScreen({
     setScanError('PC 연결 정보를 확인하는 중…');
     setError('');
     try {
-      const hosts = [...new Set([payload.host, ...(payload.hosts ?? [])])];
-      const secret = payload.pin
-        ? await exchangePin(`${payload.host}:${payload.port}`, payload.pin, `모바일 (${payload.host})`)
-        : payload.secret;
-      if (!secret) throw new Error('QR에 연결 정보가 없습니다.');
+      const primary = parsePcAddress(payload.host, payload.port, payload.protocol ?? 'http');
+      const origins = pairingOrigins(payload);
+      const hosts = [...new Set(origins.map((origin) => parsePcAddress(origin).host))];
+      const paired = await exchangePinAcrossOrigins(origins, payload.pin, `모바일 (${payload.host})`);
+      const secret = paired.secret;
       const next = await upsertPc(await loadPcs(), {
         name: `PC (${payload.host})`,
-        host: payload.host,
+        host: primary.host,
         hosts,
-        port: payload.port,
+        activeHost: parsePcAddress(paired.origin).host,
+        protocol: primary.protocol,
+        origins,
+        activeOrigin: paired.origin,
+        port: primary.port,
         secret,
       });
       await savePcs(next);
       setPcs(next);
-      const connected = await connect(next[next.length - 1]);
+      const savedPc = next.find((item) => connectionOrigins(item).some((origin) => origins.includes(origin)));
+      if (!savedPc) throw new Error('저장된 PC를 찾지 못했습니다.');
+      const connected = await connect(savedPc);
       if (connected) setShowScan(false);
       else {
         setScanError('주소는 저장했지만 지금 연결되지 않습니다. PC 주소와 네트워크 상태를 확인하세요.');
@@ -139,8 +178,15 @@ export function PcListScreen({
   };
 
   const deletePc = async (id: string): Promise<void> => {
+    deletedIds.current.add(id);
+    connectGeneration.current += 1;
+    if (connectingId === id) {
+      client.close();
+      setConnectingId(null);
+    }
     const next = await removePc(await loadPcs(), id);
     await savePcs(next);
+    if (await getLastPcId() === id) await setLastPcId(null);
     setPcs(next);
   };
 
@@ -161,7 +207,7 @@ export function PcListScreen({
 
   return (
     <View style={styles.root}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top + 18, 38) }]}>
         <Text style={styles.logo}>Mr.Robot</Text>
         <Text style={styles.sub}>{pcs.length ? '연결할 PC를 선택하세요' : '모바일 연결 마법사'}</Text>
       </View>
@@ -184,9 +230,9 @@ export function PcListScreen({
               <View style={{ flex: 1 }}>
                 <Text style={styles.pcName}>{pc.name}</Text>
                 <Text style={styles.pcAddr}>
-                  {pc.activeHost ?? pc.host}:{pc.port}
+                  {connectionOrigins(pc)[0] ?? '보안 접속 주소 없음 · 다시 등록 필요'}
                 </Text>
-                <Text style={styles.pcRoute}>저장된 접속 주소 {(pc.hosts?.length ?? 1).toLocaleString()}개</Text>
+                <Text style={styles.pcRoute}>{pc.secret ? `저장된 접속 주소 ${connectionOrigins(pc).length.toLocaleString()}개` : '자격증명 복구/재등록 필요'}</Text>
               </View>
             </View>
             <View style={styles.pcActions}>
@@ -197,7 +243,7 @@ export function PcListScreen({
               >
                 {connectingId === pc.id ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.connectText}>연결</Text>}
               </TouchableOpacity>
-              <TouchableOpacity style={styles.deleteBtn} onPress={() => void deletePc(pc.id)}>
+              <TouchableOpacity style={[styles.deleteBtn, connectingId !== null && styles.btnDisabled]} onPress={() => void deletePc(pc.id)} disabled={connectingId !== null}>
                 <Text style={styles.deleteText}>✕</Text>
               </TouchableOpacity>
             </View>
@@ -217,7 +263,9 @@ export function PcListScreen({
       </ScrollView>
 
       <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
-        <View style={styles.modalBackdrop}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled">
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>PC 추가</Text>
             <Text style={styles.label}>PC 이름 (선택)</Text>
@@ -229,12 +277,12 @@ export function PcListScreen({
               placeholderTextColor={colors.faint}
             />
             <Text style={styles.label}>PC 주소</Text>
-            <Text style={styles.addressHelp}>PC 앱의 설정 → 모바일 연결에 표시된 주소를 그대로 입력하세요. 예: 192.168.0.10:8787</Text>
+            <Text style={styles.addressHelp}>PC 플러그인의 Quick Link HTTPS 주소를 입력하세요. Tailscale을 쓰는 경우에만 100.64/10 주소를 사용할 수 있습니다. 일반 HTTP LAN 주소는 차단됩니다.</Text>
             <TextInput
               style={styles.input}
               value={hostPort}
               onChangeText={setHostPort}
-              placeholder="192.168.0.10:8787"
+              placeholder="https://…trycloudflare.com"
               placeholderTextColor={colors.faint}
               autoCapitalize="none"
               autoCorrect={false}
@@ -261,22 +309,25 @@ export function PcListScreen({
               </TouchableOpacity>
             </View>
           </View>
+          </ScrollView>
         </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={showScan} animationType="slide" onRequestClose={() => setShowScan(false)}>
         <View style={{ flex: 1, backgroundColor: '#000' }}>
-          <CameraView
+          {showScan && <CameraView
+            key={scannerKey}
             style={{ flex: 1 }}
             onCameraReady={() => setScanReady(true)}
-            onMountError={(event) => setScanError(`카메라를 열지 못했습니다: ${event.message}`)}
+            onMountError={(event) => { setScanReady(false); setScanHandled(true); setScanError(`카메라를 열지 못했습니다: ${event.message}`); }}
             onBarcodeScanned={scanReady && !scanHandled ? (res) => void onScan(res.data) : undefined}
             barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-          />
-          <View style={styles.scanBar}>
+          />}
+          <View style={[styles.scanBar, { paddingBottom: Math.max(20, insets.bottom) }]}>
             {!scanReady ? <ActivityIndicator color={colors.accent2} /> : null}
             <Text style={styles.scanHint}>{scanError || 'PC 앱의 설정 → 모바일 연결에 있는 QR만 비추세요.'}</Text>
-            {scanHandled && scanError && !scanError.includes('확인하는 중') ? <TouchableOpacity style={[styles.bigBtn, styles.bigBtnAlt]} onPress={() => { setScanError(''); setScanHandled(false); }}><Text style={styles.bigBtnText}>다시 스캔</Text></TouchableOpacity> : null}
+            {scanHandled && scanError && !scanError.includes('확인하는 중') ? <TouchableOpacity style={[styles.bigBtn, styles.bigBtnAlt]} onPress={() => { setScanError(''); setScanHandled(false); setScanReady(false); setScannerKey((value) => value + 1); }}><Text style={styles.bigBtnText}>다시 스캔</Text></TouchableOpacity> : null}
             <TouchableOpacity style={styles.bigBtn} onPress={() => setShowScan(false)}>
               <Text style={styles.bigBtnText}>닫기</Text>
             </TouchableOpacity>
@@ -289,7 +340,7 @@ export function PcListScreen({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  header: { paddingTop: 70, paddingHorizontal: 24, paddingBottom: 16 },
+  header: { paddingHorizontal: 24, paddingBottom: 16 },
   logo: {
     fontSize: 34,
     fontWeight: '800',
@@ -365,6 +416,8 @@ const styles = StyleSheet.create({
     padding: 22,
     gap: 8,
   },
+  modalScroll: { width: '100%' },
+  modalScrollContent: { flexGrow: 1, justifyContent: 'center' },
   modalTitle: { color: colors.text, fontSize: 18, fontWeight: '700', marginBottom: 8 },
   label: { color: colors.dim, fontSize: 13, fontWeight: '600', marginTop: 6 },
   addressHelp: { color: colors.accent2, fontSize: 11.5, lineHeight: 17 },

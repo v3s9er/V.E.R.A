@@ -8,6 +8,7 @@ process.env.MR_ROBOT_HOME = mkdtempSync(join(tmpdir(), 'mr-robot-sched-'));
 const { AgentServer } = await import(pathToFileURL('./packages/agent/dist/server/server.js').href);
 
 const server = new AgentServer();
+server.config.updateSettings({ safety: { ...server.config.settings.safety, mode: 'full' } });
 await server.start({ port: 8798, host: '127.0.0.1' });
 
 const soon = new Date(Date.now() + 2000);
@@ -21,6 +22,8 @@ const job = server.scheduler.add({
   shellKind: 'cmd',
   when: { kind: 'once', at },
   allowDestructive: false,
+  permissionMode: 'full',
+  createdByAdmin: true,
 });
 console.log('added, nextRun in', Math.round((job.nextRun - Date.now()) / 1000), 's');
 

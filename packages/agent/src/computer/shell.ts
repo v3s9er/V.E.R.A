@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import type { ShellResult } from '@mr-robot/shared';
 
 export interface ShellOptions {
@@ -8,6 +9,33 @@ export interface ShellOptions {
   env?: Record<string, string>;
   /** Truncate captured output to this many bytes (prevents memory blow-ups). */
   maxBytes?: number;
+  signal?: AbortSignal;
+}
+
+/** Kill the full subprocess tree so PowerShell/cmd grandchildren cannot outlive a cancelled task. */
+export function terminateProcessTree(child: ChildProcess, isolatedProcessGroup = false, force = false): void {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform !== 'win32') {
+    const signal = force ? 'SIGKILL' : 'SIGTERM';
+    if (isolatedProcessGroup) {
+      try { process.kill(-child.pid, signal); return; } catch { /* fall back to the direct child */ }
+    }
+    try { child.kill(signal); } catch { /* already dead */ }
+    return;
+  }
+  try {
+    const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    killer.once('error', () => {
+      try { child.kill(); } catch { /* already dead */ }
+    });
+    killer.unref();
+  } catch {
+    try { child.kill(); } catch { /* already dead */ }
+  }
 }
 
 function appendLimited(current: string, chunk: string, maxBytes: number): string {
@@ -58,20 +86,25 @@ export function runShell(command: string, opts: ShellOptions = {}): Promise<Shel
     let stderr = '';
     let timedOut = false;
     let settled = false;
+    let aborted = false;
 
     const finish = (result: ShellResult): void => {
       if (settled) return;
       settled = true;
+      opts.signal?.removeEventListener('abort', abort);
       resolve(result);
     };
 
+    const abort = (): void => {
+      aborted = true;
+      terminateProcessTree(child);
+    };
+    if (opts.signal?.aborted) abort();
+    else opts.signal?.addEventListener('abort', abort, { once: true });
+
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill();
-      } catch {
-        /* already dead */
-      }
+      terminateProcessTree(child);
     }, timeoutMs);
     // Keep the event loop alive-safe: unref only the timer, not the child.
     timer.unref?.();
@@ -88,7 +121,7 @@ export function runShell(command: string, opts: ShellOptions = {}): Promise<Shel
       finish({
         ok: false,
         stdout,
-        stderr: err.message,
+        stderr: aborted ? '작업이 중지되었습니다.' : err.message,
         exitCode: null,
         durationMs: Date.now() - started,
         timedOut,
@@ -98,9 +131,9 @@ export function runShell(command: string, opts: ShellOptions = {}): Promise<Shel
     child.on('close', (code) => {
       clearTimeout(timer);
       finish({
-        ok: code === 0,
+        ok: code === 0 && !aborted,
         stdout,
-        stderr,
+        stderr: aborted && !stderr ? '작업이 중지되었습니다.' : stderr,
         exitCode: code,
         durationMs: Date.now() - started,
         timedOut,

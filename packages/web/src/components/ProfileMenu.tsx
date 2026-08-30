@@ -43,15 +43,15 @@ export function ProfileMenu({
       <div className="profile-popover-title">Mr.Robot</div>
       {(Object.keys(LABELS) as ViewKey[]).map((key) => key === view ? null :
         <button key={key} className="profile-action" onClick={() => { onChange(key); setOpen(false); }}>{LABELS[key]}</button>)}
-      {!standalone && pcs.length > 1 && <div className="profile-section">
+      {pcs.length > 1 && <div className="profile-section">
         <div className="profile-section-label">연결된 PC</div>
         {pcs.map((pc) => <button key={pc.id} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}</button>)}
       </div>}
-      {!standalone && <button className="profile-action danger" onClick={() => { onDisconnect(); setOpen(false); }}>연결 관리</button>}
+      <button className="profile-action danger" onClick={() => { onDisconnect(); setOpen(false); }}>연결 관리</button>
     </div>}
     <button className="profile-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
       <span className="profile-avatar">N</span>
-      <span className="profile-copy"><b>{deviceName || 'Mr.Robot'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{standalone ? '로컬 실행' : connected ? '연결됨' : '연결 끊김'}</small></span>
+      <span className="profile-copy"><b>{deviceName || 'Mr.Robot'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (standalone ? '데스크톱 앱 · 연결됨' : '연결됨') : '연결 끊김'}</small></span>
       <span className="profile-more">•••</span>
     </button>
   </div>;

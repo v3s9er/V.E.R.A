@@ -98,6 +98,11 @@ export function RoutingGraphEditor({ graph, providers, providerModels, onSave, r
   const [editingEdgeId, setEditingEdgeId] = useState<string | null>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const [canvasWidth, setCanvasWidth] = useState(0);
+  const previewColumns = useMemo(() => [...new Set(draft.nodes.map((node) => node.x))].sort((a, b) => a - b), [draft.nodes]);
+  const previewColumnStep = previewColumns.length > 1
+    ? Math.max(NODE_WIDTH + 16, (Math.max(0, canvasWidth - NODE_WIDTH - 48)) / (previewColumns.length - 1))
+    : 0;
+  const previewContentWidth = Math.max(canvasWidth, 48 + NODE_WIDTH + previewColumnStep * Math.max(0, previewColumns.length - 1));
   const svgId = useRef(uid().replace(/[^a-z0-9]/gi, '')).current;
 
   const replaceDraft = (next: RoutingGraph, save = true): void => {
@@ -126,9 +131,8 @@ export function RoutingGraphEditor({ graph, providers, providerModels, onSave, r
 
   const displayPosition = (node: RoutingNode): { x: number; y: number } => {
     if (!readOnly || canvasWidth <= 0 || draft.nodes.length < 2) return { x: node.x, y: node.y };
-    const xs = draft.nodes.map((item) => item.x), minX = Math.min(...xs), maxX = Math.max(...xs), range = maxX - minX;
-    const usable = Math.max(0, canvasWidth - NODE_WIDTH - 48);
-    return { x: range > 0 ? 24 + ((node.x - minX) / range) * usable : Math.max(24, (canvasWidth - NODE_WIDTH) / 2), y: node.y };
+    const column = previewColumns.indexOf(node.x);
+    return { x: previewColumns.length > 1 ? 24 + Math.max(0, column) * previewColumnStep : Math.max(24, (canvasWidth - NODE_WIDTH) / 2), y: node.y };
   };
 
   const updateNode = (id: string, patch: Partial<RoutingNode>, save = true): void => replaceDraft({ ...draftRef.current, nodes: draftRef.current.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) }, save);
@@ -342,6 +346,7 @@ export function RoutingGraphEditor({ graph, providers, providerModels, onSave, r
       if (event.key === 'Escape') { setConnectFrom(null); setConnectPointer(null); setSelectedEdgeId(null); }
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedEdgeId) removeEdge(selectedEdgeId);
     }}>
+      {readOnly && <div className="graph-content-sizer" style={{ width: previewContentWidth }} aria-hidden="true" />}
       <div className="routing-group-layer">{groups.map((group) => {
         const bounds = groupBounds(group), members = draft.nodes.filter((node) => node.groupId === group.id).length;
         const interacting = groupInteraction?.id === group.id ? groupInteraction.mode : null;

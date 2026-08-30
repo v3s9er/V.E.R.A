@@ -92,6 +92,15 @@ const DEFINITIONS: Definition[] = [
     candidates: () => [join(localAppData(), 'Programs', 'Ollama', 'ollama.exe')],
   },
   {
+    id: 'cloudflared', name: 'Cloudflare cloudflared', command: 'cloudflared', versionArgs: ['--version'], required: false, requiresLogin: false,
+    description: 'VPN 없이 선택형 임시 HTTPS/WSS 원격 링크를 만들 때만 사용합니다. 기본 설치·실행은 꺼져 있습니다.',
+    wingetId: 'Cloudflare.cloudflared',
+    candidates: () => [
+      join(localAppData(), 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),
+      join(programFiles(), 'cloudflared', 'cloudflared.exe'),
+    ],
+  },
+  {
     id: 'tailscale', name: 'Tailscale', command: 'tailscale', versionArgs: ['version'], required: false, requiresLogin: true,
     description: '같은 Google 계정의 휴대폰·노트북을 외부망에서도 암호화 연결합니다.', wingetId: 'Tailscale.Tailscale',
     candidates: () => [join(programFiles(), 'Tailscale', 'tailscale.exe')],

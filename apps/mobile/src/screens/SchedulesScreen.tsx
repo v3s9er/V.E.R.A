@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -9,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { MrRobotClient } from '../rpc';
 import type { CalendarEvent, ScheduledJobView } from '../types';
 import { colors, radius } from '../theme';
@@ -32,6 +35,7 @@ function fmtNext(ts: number | null): string {
 }
 
 export function SchedulesScreen({ client }: { client: MrRobotClient }) {
+  const insets = useSafeAreaInsets();
   const [jobs, setJobs] = useState<ScheduledJobView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [openResult, setOpenResult] = useState<string | null>(null);
@@ -172,11 +176,12 @@ export function SchedulesScreen({ client }: { client: MrRobotClient }) {
         ))}
       </ScrollView>
 
-      <Modal visible={showCalendarAdd} animationType="slide" transparent onRequestClose={() => setShowCalendarAdd(false)}><View style={styles.modalBackdrop}><View style={styles.modal}><Text style={styles.modalTitle}>일정 추가</Text><Text style={styles.label}>이름</Text><TextInput style={styles.input} value={calendarTitle} onChangeText={setCalendarTitle} placeholder="예: 프로젝트 회의" placeholderTextColor={colors.faint} /><Text style={styles.label}>시작 (YYYY-MM-DD HH:MM)</Text><TextInput style={styles.input} value={calendarStart} onChangeText={setCalendarStart} placeholder="2026-08-24 15:00" placeholderTextColor={colors.faint} /><Text style={styles.label}>종료</Text><TextInput style={styles.input} value={calendarEnd} onChangeText={setCalendarEnd} placeholder="2026-08-24 16:00" placeholderTextColor={colors.faint} />{error ? <Text style={styles.errorText}>{error}</Text> : null}<View style={styles.modalActions}><TouchableOpacity style={[styles.addBtn, { flex: 1, backgroundColor: colors.inputBg }]} onPress={() => setShowCalendarAdd(false)}><Text style={styles.addText}>취소</Text></TouchableOpacity><TouchableOpacity style={[styles.addBtn, { flex: 1 }]} onPress={() => void addCalendar()}><Text style={styles.addText}>추가</Text></TouchableOpacity></View></View></View></Modal>
+      <Modal visible={showCalendarAdd} animationType="slide" transparent onRequestClose={() => setShowCalendarAdd(false)}><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}><View style={[styles.modalBackdrop, { paddingBottom: Math.max(insets.bottom, 8) }]}><View style={styles.modal}><Text style={styles.modalTitle}>일정 추가</Text><Text style={styles.label}>이름</Text><TextInput style={styles.input} value={calendarTitle} onChangeText={setCalendarTitle} placeholder="예: 프로젝트 회의" placeholderTextColor={colors.faint} /><Text style={styles.label}>시작 (YYYY-MM-DD HH:MM)</Text><TextInput style={styles.input} value={calendarStart} onChangeText={setCalendarStart} placeholder="2026-08-24 15:00" placeholderTextColor={colors.faint} /><Text style={styles.label}>종료</Text><TextInput style={styles.input} value={calendarEnd} onChangeText={setCalendarEnd} placeholder="2026-08-24 16:00" placeholderTextColor={colors.faint} />{error ? <Text style={styles.errorText}>{error}</Text> : null}<View style={styles.modalActions}><TouchableOpacity style={[styles.addBtn, { flex: 1, backgroundColor: colors.inputBg }]} onPress={() => setShowCalendarAdd(false)}><Text style={styles.addText}>취소</Text></TouchableOpacity><TouchableOpacity style={[styles.addBtn, { flex: 1 }]} onPress={() => void addCalendar()}><Text style={styles.addText}>추가</Text></TouchableOpacity></View></View></View></KeyboardAvoidingView></Modal>
 
       <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
-        <View style={styles.modalBackdrop}>
-          <ScrollView style={styles.modal} contentContainerStyle={{ gap: 8 }}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={[styles.modalBackdrop, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+          <ScrollView style={styles.modal} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>예약 추가</Text>
 
             <View style={styles.chipRow}>
@@ -269,6 +274,7 @@ export function SchedulesScreen({ client }: { client: MrRobotClient }) {
             </View>
           </ScrollView>
         </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );

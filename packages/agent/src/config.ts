@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import type { AppSettings, PermissionMode, ProviderConfig, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
+import { randomInt, randomUUID } from 'node:crypto';
+import type { AppSettings, DeviceCapability, PermissionMode, ProviderConfig, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
 import { hashToken } from './auth.js';
 import { SecretVault } from './secrets.js';
 
@@ -12,6 +12,22 @@ export interface PairingConfig {
   /** Short 6-digit code exchanged for the secret (rate-limited). */
   pin: string;
   createdAt: number;
+  /** When the current short pairing PIN was minted. Used for expiry. */
+  pinCreatedAt: number;
+}
+
+export interface ConfigRecoveryDiagnostic {
+  code: 'config-corrupt-quarantined' | 'config-backup-recovered' | 'config-fresh-recovery' | 'provider-secret-unavailable' | 'config-persistence-blocked';
+  message: string;
+  at: number;
+  path?: string;
+  providerId?: string;
+}
+
+export interface ConfigRecoveryState {
+  degraded: boolean;
+  writesBlocked: boolean;
+  diagnostics: ConfigRecoveryDiagnostic[];
 }
 
 export interface DeviceLinkConfig {
@@ -19,6 +35,8 @@ export interface DeviceLinkConfig {
   name: string;
   tokenHash: string;
   permissionCap: PermissionMode;
+  /** Privileges that do not imply shell, file, or control-plane access. */
+  capabilities: DeviceCapability[];
   createdAt: number;
   revokedAt?: number;
 }
@@ -63,6 +81,172 @@ export function defaultRouting(): RoutingSettings {
 function clone<T>(value: T): T {
   if (value === undefined) return value;
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+const supportedDeviceCapabilities = new Set<DeviceCapability>(['work-sync']);
+const supportedDevicePermissions = new Set<PermissionMode>(['read-only', 'ask', 'workspace', 'full']);
+
+function normalizeDevicePermission(value: unknown): PermissionMode {
+  return typeof value === 'string' && supportedDevicePermissions.has(value as PermissionMode) ? value as PermissionMode : 'read-only';
+}
+
+function normalizeDeviceCapabilities(value: unknown, permissionCap: PermissionMode): DeviceCapability[] {
+  // Existing ask/workspace/full links previously had no capability field. Give
+  // those links the same product feature without restoring broad `full` access.
+  if (value === undefined) return permissionCap === 'read-only' ? [] : ['work-sync'];
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is DeviceCapability => typeof item === 'string' && supportedDeviceCapabilities.has(item as DeviceCapability)))];
+}
+
+const routingModes = new Set(['economy', 'balanced', 'quality', 'manual']);
+const executionModes = new Set(['single', 'pipeline', 'vote', 'hybrid', 'swarm']);
+const modelRoles = new Set(['router', 'fast', 'general', 'reasoning', 'coding', 'vision', 'critic', 'summarizer']);
+// The current execution engine treats every visual node as a model role.
+// Legacy decorative node kinds are normalized by the editor, but must not be
+// accepted from remote sync because their edges cannot be executed safely.
+const nodeKinds = new Set(['model']);
+const discussionModes = new Set(['collaborative', 'competitive', 'review']);
+const MAX_SYNC_ROUTING_PRESETS = 500;
+const MAX_SYNC_ROUTING_PRESET_BYTES = 8 * 1024 * 1024;
+
+function syncString(value: unknown, label: string, max: number, optional = false): string | undefined {
+  if (value === undefined && optional) return undefined;
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > max) throw new Error(`${label}이(가) 올바르지 않습니다.`);
+  return value;
+}
+
+function syncNumber(value: unknown, label: string, min: number, max: number, fallback?: number): number {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new Error(`${label}이(가) 올바르지 않습니다.`);
+  return value;
+}
+
+function normalizeRoutingPresetSnapshot(value: unknown): RoutingPreset[] {
+  if (!Array.isArray(value)) throw new Error('프리셋 동기화 데이터가 올바르지 않습니다.');
+  assertRoutingPresetSnapshotBudget(value);
+  const nowLimit = Date.now() + 5 * 60_000;
+  const result = value.map((raw, index): RoutingPreset => {
+    if (!raw || typeof raw !== 'object') throw new Error(`프리셋 ${index + 1} 데이터가 올바르지 않습니다.`);
+    const source = raw as Partial<RoutingPreset>;
+    const id = syncString(source.id, '프리셋 ID', 160) as string;
+    if (id.startsWith('builtin:') || !/^[A-Za-z0-9:_-]+$/.test(id)) throw new Error('프리셋 ID 형식이 올바르지 않습니다.');
+    if (!routingModes.has(String(source.mode))) throw new Error('프리셋 라우팅 모드가 올바르지 않습니다.');
+    const executionMode = source.executionMode ?? 'single';
+    if (!executionModes.has(String(executionMode))) throw new Error('프리셋 실행 모드가 올바르지 않습니다.');
+    const roles: RoutingPreset['roles'] = {};
+    if (!source.roles || typeof source.roles !== 'object' || Array.isArray(source.roles)) throw new Error('프리셋 역할 구성이 올바르지 않습니다.');
+    for (const [role, providers] of Object.entries(source.roles)) {
+      if (!modelRoles.has(role) || !Array.isArray(providers) || providers.length > 16) throw new Error('프리셋 역할 공급자 목록이 올바르지 않습니다.');
+      roles[role as keyof RoutingPreset['roles']] = providers.map((provider) => syncString(provider, '공급자 ID', 256) as string);
+    }
+    let graph: RoutingPreset['graph'];
+    if (source.graph !== undefined) {
+      const rawGraph = source.graph as RoutingPreset['graph'];
+      if (!rawGraph || !Array.isArray(rawGraph.nodes) || !Array.isArray(rawGraph.edges) || rawGraph.nodes.length > 64 || rawGraph.edges.length > 256) {
+        throw new Error('프리셋 그래프 크기나 형식이 올바르지 않습니다.');
+      }
+      const groups = rawGraph.groups === undefined ? [] : rawGraph.groups;
+      if (!Array.isArray(groups) || groups.length > 32) throw new Error('프리셋 회의 그룹 구성이 올바르지 않습니다.');
+      const normalizedGroups = groups.map((group) => {
+        if (!group || typeof group !== 'object') throw new Error('프리셋 회의 그룹이 올바르지 않습니다.');
+        const discussionMode = group.discussionMode ?? 'collaborative';
+        if (!discussionModes.has(String(discussionMode))) throw new Error('회의 그룹 방식이 올바르지 않습니다.');
+        const color = syncString(group.color, '회의 그룹 색상', 32, true);
+        if (color && !/^#[0-9a-fA-F]{3,8}$/.test(color)) throw new Error('회의 그룹 색상이 올바르지 않습니다.');
+        return {
+          id: syncString(group.id, '회의 그룹 ID', 160) as string,
+          name: (syncString(group.name, '회의 그룹 이름', 256) as string).trim().slice(0, 80) || '회의 그룹',
+          ...(color ? { color } : {}),
+          discussionMode: discussionMode as NonNullable<typeof group.discussionMode>,
+          x: syncNumber(group.x, '회의 그룹 X', -100_000, 100_000, 0),
+          y: syncNumber(group.y, '회의 그룹 Y', -100_000, 100_000, 0),
+          width: syncNumber(group.width, '회의 그룹 너비', 80, 100_000, 320),
+          height: syncNumber(group.height, '회의 그룹 높이', 60, 100_000, 220),
+        };
+      });
+      const groupIds = new Set(normalizedGroups.map((group) => group.id));
+      if (groupIds.size !== normalizedGroups.length) throw new Error('중복된 회의 그룹 ID가 있습니다.');
+      const nodes = rawGraph.nodes.map((node) => {
+        if (!node || typeof node !== 'object' || !nodeKinds.has(String(node.kind))) throw new Error('프리셋 노드가 올바르지 않습니다.');
+        const role = node.role === undefined ? undefined : String(node.role);
+        if (role && !modelRoles.has(role)) throw new Error('프리셋 노드 역할이 올바르지 않습니다.');
+        const groupId = syncString(node.groupId, '회의 그룹 참조', 160, true);
+        if (groupId && !groupIds.has(groupId)) throw new Error('존재하지 않는 회의 그룹을 참조하는 노드가 있습니다.');
+        return {
+          id: syncString(node.id, '노드 ID', 160) as string,
+          kind: node.kind,
+          label: (syncString(node.label, '노드 이름', 512) as string).trim().slice(0, 120) || '모델 노드',
+          x: syncNumber(node.x, '노드 X', -100_000, 100_000),
+          y: syncNumber(node.y, '노드 Y', -100_000, 100_000),
+          ...(role ? { role: role as NonNullable<typeof node.role> } : {}),
+          ...(syncString(node.providerId, '노드 공급자 ID', 256, true) ? { providerId: node.providerId } : {}),
+          ...(syncString(node.providerModel, '노드 모델 ID', 512, true) ? { providerModel: node.providerModel } : {}),
+          ...(groupId ? { groupId } : {}),
+          ...(syncString(node.integrationId, '노드 통합 ID', 256, true) ? { integrationId: node.integrationId } : {}),
+        };
+      });
+      const nodeIds = new Set(nodes.map((node) => node.id));
+      if (nodeIds.size !== nodes.length) throw new Error('중복된 프리셋 노드 ID가 있습니다.');
+      const edges = rawGraph.edges.map((edge) => {
+        if (!edge || typeof edge !== 'object') throw new Error('프리셋 연결선이 올바르지 않습니다.');
+        const from = syncString(edge.from, '연결 시작 노드', 160) as string;
+        const to = syncString(edge.to, '연결 대상 노드', 160) as string;
+        if (from === to || !nodeIds.has(from) || !nodeIds.has(to)) throw new Error('존재하지 않거나 자기 자신을 잇는 연결선이 있습니다.');
+        return {
+          id: syncString(edge.id, '연결선 ID', 160) as string,
+          from,
+          to,
+          ...(syncString(edge.label, '연결선 이름', 256, true) ? { label: edge.label } : {}),
+        };
+      });
+      if (new Set(edges.map((edge) => edge.id)).size !== edges.length) throw new Error('중복된 연결선 ID가 있습니다.');
+      const indegree = new Map(nodes.map((node) => [node.id, 0]));
+      const outgoing = new Map(nodes.map((node) => [node.id, [] as string[]]));
+      for (const edge of edges) {
+        indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+        outgoing.get(edge.from)?.push(edge.to);
+      }
+      const queue = nodes.filter((node) => (indegree.get(node.id) ?? 0) === 0).map((node) => node.id);
+      let visited = 0;
+      while (queue.length) {
+        const id = queue.shift() as string;
+        visited++;
+        for (const next of outgoing.get(id) ?? []) {
+          const degree = (indegree.get(next) ?? 1) - 1;
+          indegree.set(next, degree);
+          if (degree === 0) queue.push(next);
+        }
+      }
+      if (visited !== nodes.length) throw new Error('순환 연결이 있는 프리셋 그래프는 실행할 수 없습니다.');
+      graph = { nodes, edges, ...(normalizedGroups.length ? { groups: normalizedGroups } : {}) };
+    }
+    const updatedAt = Math.min(syncNumber(source.updatedAt, '프리셋 수정 시각', 0, 9_007_199_254_740_991), nowLimit);
+    const createdAt = Math.min(syncNumber(source.createdAt, '프리셋 생성 시각', 0, 9_007_199_254_740_991), updatedAt);
+    return {
+      id,
+      name: (syncString(source.name, '프리셋 이름', 512) as string).trim().slice(0, 80) || '동기화 프리셋',
+      description: syncString(source.description, '프리셋 설명', 2048, true)?.trim().slice(0, 240) || undefined,
+      builtin: false,
+      createdAt,
+      updatedAt,
+      mode: source.mode as RoutingPreset['mode'],
+      executionMode: executionMode as RoutingPreset['executionMode'],
+      meetingRounds: Math.floor(syncNumber(source.meetingRounds, '회의 라운드', 1, 3, 2)),
+      crossGroupRounds: Math.floor(syncNumber(source.crossGroupRounds, '그룹 교환 라운드', 0, 3, 1)),
+      maxIterations: Math.floor(syncNumber(source.maxIterations, '최대 반복', 1, 12, 6)),
+      roles,
+      maxPremiumCalls: Math.floor(syncNumber(source.maxPremiumCalls, '프리미엄 호출 제한', 0, 64)),
+      escalationEnabled: source.escalationEnabled === true,
+      ...(graph ? { graph } : {}),
+    };
+  });
+  if (new Set(result.map((preset) => preset.id)).size !== result.length) throw new Error('중복된 프리셋 ID가 있습니다.');
+  return result;
+}
+
+function assertRoutingPresetSnapshotBudget(value: unknown[]): void {
+  if (value.length > MAX_SYNC_ROUTING_PRESETS) throw new Error('동기화할 프리셋 수가 500개를 초과했습니다.');
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_SYNC_ROUTING_PRESET_BYTES) throw new Error('프리셋 동기화 데이터가 8MB를 초과했습니다.');
 }
 
 function efficientModel(provider: ProviderConfig, role: string): string {
@@ -247,7 +431,7 @@ export function builtInRoutingPresets(): RoutingPreset[] {
 export function defaultSettings(): AppSettings {
   return {
     network: {
-      host: '0.0.0.0',
+      host: '127.0.0.1',
       port: 8787,
       externalAccess: false,
     },
@@ -292,12 +476,90 @@ export function generateSecret(): string {
 }
 
 export function generatePin(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  // A pairing PIN is a remote enrollment credential. Math.random() is not a
+  // cryptographic generator and must never be used here.
+  return String(randomInt(100000, 1_000_000));
+}
+
+/** Mint a fresh PIN while guaranteeing that the just-consumed code is not reissued. */
+export function nextPairingPin(previous: string, generator: () => string = generatePin): string {
+  let next = generator();
+  for (let attempt = 0; attempt < 8 && next === previous; attempt++) next = generator();
+  if (next === previous) {
+    const previousNumber = Number(previous);
+    next = String(Number.isInteger(previousNumber) && previousNumber >= 100000 && previousNumber < 999999 ? previousNumber + 1 : 100000);
+  }
+  return next;
+}
+
+function freshPairing(now = Date.now()): PairingConfig {
+  return { secret: generateSecret(), pin: generatePin(), createdAt: now, pinCreatedAt: now };
+}
+
+function normalizePairing(value: Partial<PairingConfig> | undefined): { pairing: PairingConfig; migrated: boolean } {
+  if (!value) return { pairing: freshPairing(), migrated: true };
+  const now = Date.now();
+  const createdAt = typeof value.createdAt === 'number' && Number.isFinite(value.createdAt) ? value.createdAt : now;
+  const pinCreatedAt = typeof value.pinCreatedAt === 'number' && Number.isFinite(value.pinCreatedAt) ? value.pinCreatedAt : createdAt;
+  return {
+    pairing: {
+      secret: typeof value.secret === 'string' && value.secret ? value.secret : generateSecret(),
+      pin: typeof value.pin === 'string' && /^\d{6}$/.test(value.pin) ? value.pin : generatePin(),
+      createdAt,
+      pinCreatedAt,
+    },
+    migrated: value.pinCreatedAt === undefined,
+  };
+}
+
+function recoveryTimestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function atomicWriteUtf8(file: string, value: string): void {
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(tmp, 'wx', 0o600);
+    writeFileSync(descriptor, value, { encoding: 'utf8' });
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(tmp, file);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* best effort */ }
+    }
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+function isConfigJson(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as Partial<MrRobotConfigData>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    if (parsed.settings != null && (typeof parsed.settings !== 'object' || Array.isArray(parsed.settings))) return false;
+    if (parsed.pairing != null && (typeof parsed.pairing !== 'object' || Array.isArray(parsed.pairing))) return false;
+    return [parsed.providers, parsed.routingPresets, parsed.workspaces, parsed.deviceLinks]
+      .every((field) => field == null || (Array.isArray(field) && field.every((item) => Boolean(item && typeof item === 'object' && !Array.isArray(item)))));
+  } catch {
+    return false;
+  }
+}
+
+function containsPlaintextProviderSecret(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as { providers?: Array<{ apiKey?: unknown }> };
+    return Array.isArray(parsed.providers) && parsed.providers.some((provider) => typeof provider?.apiKey === 'string' && provider.apiKey.length > 0);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * JSON-backed config store at ~/.mr-robot/config.json. Written atomically
- * (write temp then rename) so a crash never corrupts it.
+ * (write/fsync temp then rename) and keeps a last-known-good backup.
  *
  * Note on API keys: they are stored on the local machine only, in
  * `~/.mr-robot/config.json`. Treat that file like a password vault.
@@ -305,83 +567,241 @@ export function generatePin(): string {
 export class ConfigStore {
   readonly dir: string;
   readonly file: string;
+  readonly backupFile: string;
   private data: MrRobotConfigData;
   private readonly vault = new SecretVault();
+  private readonly unavailableProviderSecrets = new Map<string, string>();
+  private recoveryDiagnostics: ConfigRecoveryDiagnostic[] = [];
+  private writesBlocked = false;
 
   constructor(home = mrRobotHome()) {
     this.dir = home;
     this.file = join(home, 'config.json');
+    this.backupFile = `${this.file}.bak`;
     this.data = this.load();
   }
 
-  private load(): MrRobotConfigData {
-    try {
-      if (existsSync(this.file)) {
-        const raw = readFileSync(this.file, 'utf8');
-        const parsed = JSON.parse(raw) as Partial<MrRobotConfigData>;
-        const defaults = defaultSettings();
-        const rawSettings = parsed.settings ?? {};
-        const rawSafety = (rawSettings as Partial<AppSettings>).safety as Partial<AppSettings['safety']> | undefined;
-        const rawMode = (rawSafety as { mode?: string } | undefined)?.mode;
-        const legacyMode = rawMode === 'confirm' ? 'ask' : rawMode;
-        const storedProviders = (parsed.providers ?? []) as Array<ProviderConfig & { apiKeyProtected?: string }>;
-        const providers = storedProviders.map((provider) => {
-          const protectedValue = provider.apiKeyProtected;
-          const apiKey = protectedValue ? this.vault.unprotect(protectedValue) : provider.apiKey ?? '';
-          const { apiKeyProtected: _protected, ...rest } = provider;
-          return { ...rest, apiKey };
-        });
-        const loaded: MrRobotConfigData = {
-          settings: {
-            ...defaults,
-            ...rawSettings,
-            network: { ...defaults.network, ...((rawSettings as Partial<AppSettings>).network ?? {}) },
-            safety: {
-              ...defaults.safety,
-              ...(rawSafety ?? {}),
-              mode: (legacyMode ?? defaults.safety.mode) as AppSettings['safety']['mode'],
-            },
-            setup: { ...defaults.setup, ...((rawSettings as Partial<AppSettings>).setup ?? {}) },
-            voice: { ...defaults.voice!, ...((rawSettings as Partial<AppSettings>).voice ?? {}) },
-          },
-          providers,
-          routing: { ...defaultRouting(), ...(parsed.routing ?? {}), roles: { ...(parsed.routing?.roles ?? {}) }, graph: parsed.routing?.graph ?? defaultRouting().graph },
-          routingPresets: parsed.routingPresets ?? [],
-          workspaces: parsed.workspaces ?? [],
-          pairing: parsed.pairing ?? { secret: generateSecret(), pin: generatePin(), createdAt: Date.now() },
-          deviceLinks: parsed.deviceLinks ?? [],
-        };
-        if (storedProviders.some((provider) => Boolean(provider.apiKey) && !provider.apiKeyProtected)) this.save(loaded);
-        return loaded;
+  private decode(raw: string): { data: MrRobotConfigData; needsRewrite: boolean } {
+    const parsed = JSON.parse(raw) as Partial<MrRobotConfigData>;
+    if (!isConfigJson(raw)) throw new Error('config structure is invalid');
+    const defaults = defaultSettings();
+    const rawSettings = parsed.settings ?? {};
+    const rawSafety = (rawSettings as Partial<AppSettings>).safety as Partial<AppSettings['safety']> | undefined;
+    const rawMode = (rawSafety as { mode?: string } | undefined)?.mode;
+    const legacyMode = rawMode === 'confirm' ? 'ask' : rawMode;
+    const storedProviders = (parsed.providers ?? []) as Array<ProviderConfig & { apiKeyProtected?: string }>;
+    const unavailableSecrets = new Map<string, string>();
+    const providers = storedProviders.map((provider) => {
+      const protectedValue = provider.apiKeyProtected;
+      let apiKey = provider.apiKey ?? '';
+      if (protectedValue) {
+        try {
+          apiKey = this.vault.unprotect(protectedValue);
+        } catch {
+          apiKey = '';
+          if (typeof provider.id === 'string' && provider.id) {
+            unavailableSecrets.set(provider.id, protectedValue);
+          }
+        }
       }
-    } catch (err) {
-      console.error('[config] failed to read config, starting fresh:', err);
+      const { apiKeyProtected: _protected, ...rest } = provider;
+      return { ...rest, apiKey };
+    });
+    const normalizedPairing = normalizePairing(parsed.pairing);
+    const data: MrRobotConfigData = {
+      settings: {
+        ...defaults,
+        ...rawSettings,
+        network: { ...defaults.network, ...((rawSettings as Partial<AppSettings>).network ?? {}) },
+        safety: {
+          ...defaults.safety,
+          ...(rawSafety ?? {}),
+          mode: (legacyMode ?? defaults.safety.mode) as AppSettings['safety']['mode'],
+        },
+        setup: { ...defaults.setup, ...((rawSettings as Partial<AppSettings>).setup ?? {}) },
+        voice: { ...defaults.voice!, ...((rawSettings as Partial<AppSettings>).voice ?? {}) },
+      },
+      providers,
+      routing: { ...defaultRouting(), ...(parsed.routing ?? {}), roles: { ...(parsed.routing?.roles ?? {}) }, graph: parsed.routing?.graph ?? defaultRouting().graph },
+      routingPresets: parsed.routingPresets ?? [],
+      workspaces: parsed.workspaces ?? [],
+      pairing: normalizedPairing.pairing,
+      deviceLinks: (parsed.deviceLinks ?? []).map((link) => {
+        const permissionCap = normalizeDevicePermission(link.permissionCap);
+        return { ...link, permissionCap, capabilities: normalizeDeviceCapabilities(link.capabilities, permissionCap) };
+      }),
+    };
+    this.unavailableProviderSecrets.clear();
+    this.recoveryDiagnostics = this.recoveryDiagnostics.filter((item) => item.code !== 'provider-secret-unavailable');
+    for (const [providerId, protectedValue] of unavailableSecrets) {
+      this.unavailableProviderSecrets.set(providerId, protectedValue);
+      this.recordDiagnostic({
+        code: 'provider-secret-unavailable',
+        message: `공급자 ${providerId}의 저장된 API 키를 현재 Windows 계정에서 복호화할 수 없습니다.`,
+        providerId,
+      });
     }
-    const fresh: MrRobotConfigData = {
+    return {
+      data,
+      needsRewrite: normalizedPairing.migrated || storedProviders.some((provider) => Boolean(provider.apiKey) && !provider.apiKeyProtected),
+    };
+  }
+
+  private fresh(): MrRobotConfigData {
+    return {
       settings: defaultSettings(),
       providers: [],
       routing: defaultRouting(),
       routingPresets: [],
       workspaces: [],
-      pairing: { secret: generateSecret(), pin: generatePin(), createdAt: Date.now() },
+      pairing: freshPairing(),
       deviceLinks: [],
     };
-    this.save(fresh);
+  }
+
+  private load(): MrRobotConfigData {
+    if (!existsSync(this.file)) {
+      const fresh = this.fresh();
+      this.save(fresh);
+      return fresh;
+    }
+
+    try {
+      const decoded = this.decode(readFileSync(this.file, 'utf8'));
+      if (decoded.needsRewrite) {
+        try { this.save(decoded.data); }
+        catch (error) { console.error('[config] loaded config but could not persist its safe migration:', error); }
+      }
+      return decoded.data;
+    } catch (error) {
+      console.error('[config] config is unreadable; preserving it for recovery:', error);
+    }
+
+    const quarantine = this.quarantine(this.file);
+    if (quarantine) {
+      this.recordDiagnostic({
+        code: 'config-corrupt-quarantined',
+        message: '손상되거나 읽을 수 없는 설정 원본을 격리했습니다.',
+        path: quarantine,
+      });
+    }
+
+    if (existsSync(this.backupFile)) {
+      let backupRaw: string | undefined;
+      let decoded: { data: MrRobotConfigData; needsRewrite: boolean } | undefined;
+      try {
+        backupRaw = readFileSync(this.backupFile, 'utf8');
+        decoded = this.decode(backupRaw);
+      } catch (error) {
+        console.error('[config] last-known-good backup is also unreadable:', error);
+        const backupQuarantine = this.quarantine(this.backupFile);
+        if (backupQuarantine) {
+          this.recordDiagnostic({
+            code: 'config-corrupt-quarantined',
+            message: '읽을 수 없는 설정 백업을 별도로 격리했습니다.',
+            path: backupQuarantine,
+          });
+        }
+      }
+      if (backupRaw !== undefined && decoded !== undefined) {
+        if (!this.writesBlocked) {
+          try {
+            atomicWriteUtf8(this.file, backupRaw);
+            if (decoded.needsRewrite) this.save(decoded.data);
+          } catch (error) {
+            this.writesBlocked = true;
+            this.recordDiagnostic({
+              code: 'config-persistence-blocked',
+              message: '정상 설정 백업은 읽었지만 복구본을 저장하지 못해 추가 저장을 차단했습니다.',
+              path: this.backupFile,
+            });
+            console.error('[config] backup loaded but could not be restored atomically:', error);
+          }
+        }
+        this.recordDiagnostic({
+          code: 'config-backup-recovered',
+          message: '마지막 정상 설정 백업으로 복구했습니다.',
+          path: this.backupFile,
+        });
+        return decoded.data;
+      }
+    }
+
+    const fresh = this.fresh();
+    this.recordDiagnostic({
+      code: 'config-fresh-recovery',
+      message: '정상 백업이 없어 새 설정으로 시작했습니다. 격리된 원본은 수동 복구할 수 있습니다.',
+      path: quarantine,
+    });
+    if (!this.writesBlocked) this.save(fresh);
     return fresh;
   }
 
+  private recordDiagnostic(diagnostic: Omit<ConfigRecoveryDiagnostic, 'at'>): void {
+    if (diagnostic.code === 'provider-secret-unavailable' && this.recoveryDiagnostics.some((item) => item.code === diagnostic.code && item.providerId === diagnostic.providerId)) return;
+    this.recoveryDiagnostics.push({ ...diagnostic, at: Date.now() });
+  }
+
+  private quarantine(file: string): string | undefined {
+    if (!existsSync(file)) return undefined;
+    const target = `${file}.corrupt-${recoveryTimestamp()}-${randomUUID().slice(0, 8)}`;
+    try {
+      renameSync(file, target);
+      return target;
+    } catch {
+      this.writesBlocked = true;
+      this.recordDiagnostic({
+        code: 'config-persistence-blocked',
+        message: '손상된 설정 원본을 안전하게 격리하지 못해 추가 저장을 차단했습니다.',
+        path: file,
+      });
+      return undefined;
+    }
+  }
+
   private save(data: MrRobotConfigData = this.data): void {
+    if (this.writesBlocked) throw new Error('설정 복구 원본을 보존하기 위해 저장이 차단되었습니다.');
     mkdirSync(this.dir, { recursive: true });
-    const tmp = this.file + '.tmp';
     const persisted = {
       ...data,
       providers: data.providers.map((provider) => {
         const { apiKey, ...rest } = provider;
-        return { ...rest, ...(apiKey ? { apiKeyProtected: this.vault.protect(apiKey) } : {}) };
+        const retainedProtected = this.unavailableProviderSecrets.get(provider.id);
+        return {
+          ...rest,
+          ...(apiKey
+            ? { apiKeyProtected: this.vault.protect(apiKey) }
+            : retainedProtected
+              ? { apiKeyProtected: retainedProtected }
+              : {}),
+        };
       }),
     };
-    writeFileSync(tmp, JSON.stringify(persisted, null, 2), 'utf8');
-    renameSync(tmp, this.file);
+    const serialized = JSON.stringify(persisted, null, 2);
+    let backupRaw = serialized;
+    if (existsSync(this.file)) {
+      const currentRaw = readFileSync(this.file, 'utf8');
+      if (!isConfigJson(currentRaw)) {
+        const quarantined = this.quarantine(this.file);
+        if (!quarantined) throw new Error('손상된 현재 설정을 격리하지 못했습니다.');
+        this.recordDiagnostic({
+          code: 'config-corrupt-quarantined',
+          message: '저장 직전 감지한 손상 설정을 격리했습니다.',
+          path: quarantined,
+        });
+      } else if (!containsPlaintextProviderSecret(currentRaw)) {
+        backupRaw = currentRaw;
+      }
+    }
+    if (existsSync(this.backupFile)) {
+      const currentBackup = readFileSync(this.backupFile, 'utf8');
+      if (!isConfigJson(currentBackup)) {
+        const quarantined = this.quarantine(this.backupFile);
+        if (!quarantined) throw new Error('손상된 설정 백업을 격리하지 못했습니다.');
+      }
+    }
+    atomicWriteUtf8(this.backupFile, backupRaw);
+    atomicWriteUtf8(this.file, serialized);
   }
 
   get settings(): AppSettings {
@@ -394,6 +814,18 @@ export class ConfigStore {
 
   get pairing(): PairingConfig {
     return this.data.pairing;
+  }
+
+  get recovery(): ConfigRecoveryState {
+    return {
+      degraded: this.recoveryDiagnostics.length > 0,
+      writesBlocked: this.writesBlocked,
+      diagnostics: clone(this.recoveryDiagnostics),
+    };
+  }
+
+  isProviderSecretUnavailable(id: string): boolean {
+    return this.unavailableProviderSecrets.has(id);
   }
 
   get routing(): RoutingSettings {
@@ -457,22 +889,50 @@ export class ConfigStore {
     return clone(this.data.routingPresets);
   }
 
+  validateRoutingPresets(value: unknown): void {
+    normalizeRoutingPresetSnapshot(value);
+  }
+
+  restoreUserRoutingPresets(value: unknown): void {
+    if (!Array.isArray(value)) throw new Error('복구할 프리셋 snapshot이 올바르지 않습니다.');
+    // This path is only for a same-process snapshot returned by
+    // exportUserRoutingPresets(). Rollback must remain possible even when an
+    // older local store predates (or exceeds) the remote-import ceilings.
+    const previous = this.data.routingPresets;
+    this.data.routingPresets = clone(value as RoutingPreset[]);
+    try {
+      this.save();
+    } catch (error) {
+      this.data.routingPresets = previous;
+      throw error;
+    }
+  }
+
   mergeRoutingPresets(value: unknown): { added: number; updated: number; unchanged: number } {
-    if (!Array.isArray(value)) throw new Error('프리셋 동기화 데이터가 올바르지 않습니다.');
+    const candidates = normalizeRoutingPresetSnapshot(value);
+    const next = clone(this.data.routingPresets);
     let added = 0; let updated = 0; let unchanged = 0;
-    for (const raw of value.slice(0, 1_000)) {
-      const candidate = raw as RoutingPreset;
-      if (!candidate || typeof candidate.id !== 'string' || candidate.id.startsWith('builtin:') || typeof candidate.name !== 'string' || typeof candidate.updatedAt !== 'number') continue;
-      const index = this.data.routingPresets.findIndex((item) => item.id === candidate.id);
+    for (const candidate of candidates) {
+      const index = next.findIndex((item) => item.id === candidate.id);
       if (index < 0) {
-        this.data.routingPresets.push(clone({ ...candidate, builtin: false }));
+        next.push(clone(candidate));
         added++;
-      } else if (candidate.updatedAt > this.data.routingPresets[index].updatedAt) {
-        this.data.routingPresets[index] = clone({ ...candidate, builtin: false });
+      } else if (candidate.updatedAt > next[index].updatedAt) {
+        next[index] = clone(candidate);
         updated++;
       } else unchanged++;
     }
-    if (added || updated) this.save();
+    if (added || updated) {
+      assertRoutingPresetSnapshotBudget(next);
+      const previous = this.data.routingPresets;
+      this.data.routingPresets = next;
+      try {
+        this.save();
+      } catch (error) {
+        this.data.routingPresets = previous;
+        throw error;
+      }
+    }
     return { added, updated, unchanged };
   }
 
@@ -513,10 +973,11 @@ export class ConfigStore {
     return this.data.deviceLinks;
   }
 
-  createDeviceLink(name: string, permissionCap: PermissionMode): { token: string; link: DeviceLinkConfig } {
+  createDeviceLink(name: string, permissionCap: PermissionMode, capabilities?: DeviceCapability[]): { token: string; link: DeviceLinkConfig } {
     const token = generateSecret();
     const link: DeviceLinkConfig = {
-      id: randomUUID(), name: name.trim().slice(0, 80) || '연결된 기기', tokenHash: hashToken(token), permissionCap, createdAt: Date.now(),
+      id: randomUUID(), name: name.trim().slice(0, 80) || '연결된 기기', tokenHash: hashToken(token), permissionCap,
+      capabilities: normalizeDeviceCapabilities(capabilities, permissionCap), createdAt: Date.now(),
     };
     this.data.deviceLinks.push(link);
     this.save();
@@ -529,11 +990,15 @@ export class ConfigStore {
     return this.data.deviceLinks.find((link) => !link.revokedAt && safeHashEqual(link.tokenHash, hash));
   }
 
-  patchDeviceLink(id: string, patch: { name?: string; permissionCap?: PermissionMode }): DeviceLinkConfig | undefined {
+  patchDeviceLink(id: string, patch: { name?: string; permissionCap?: PermissionMode; capabilities?: DeviceCapability[] }): DeviceLinkConfig | undefined {
     const link = this.data.deviceLinks.find((item) => item.id === id && !item.revokedAt);
     if (!link) return undefined;
     if (patch.name !== undefined) link.name = patch.name.trim().slice(0, 80) || link.name;
-    if (patch.permissionCap !== undefined) link.permissionCap = patch.permissionCap;
+    if (patch.permissionCap !== undefined) link.permissionCap = normalizeDevicePermission(patch.permissionCap);
+    if (patch.capabilities !== undefined) link.capabilities = normalizeDeviceCapabilities(patch.capabilities, link.permissionCap);
+    // A read-only link may inspect ordinary UI state but cannot import/export a
+    // complete work snapshot, even if a stale client submits the capability.
+    if (link.permissionCap === 'read-only') link.capabilities = link.capabilities.filter((item) => item !== 'work-sync');
     this.save();
     return link;
   }
@@ -646,6 +1111,7 @@ export class ConfigStore {
     const i = this.data.providers.findIndex((p) => p.id === provider.id);
     if (i >= 0) this.data.providers[i] = provider;
     else this.data.providers.push(provider);
+    this.clearUnavailableProviderSecret(provider.id);
     if (provider.isDefault) {
       for (const p of this.data.providers) if (p.id !== provider.id) p.isDefault = false;
     }
@@ -656,6 +1122,7 @@ export class ConfigStore {
     const index = this.data.providers.findIndex((p) => p.id === id);
     if (index < 0) return false;
     this.data.providers[index] = { ...this.data.providers[index], ...patch, id };
+    if (Object.prototype.hasOwnProperty.call(patch, 'apiKey')) this.clearUnavailableProviderSecret(id);
     this.save();
     return true;
   }
@@ -663,7 +1130,15 @@ export class ConfigStore {
   removeProvider(id: string): void {
     const before = this.data.providers.length;
     this.data.providers = this.data.providers.filter((p) => p.id !== id);
-    if (this.data.providers.length !== before) this.save();
+    if (this.data.providers.length !== before) {
+      this.clearUnavailableProviderSecret(id);
+      this.save();
+    }
+  }
+
+  private clearUnavailableProviderSecret(id: string): void {
+    this.unavailableProviderSecrets.delete(id);
+    this.recoveryDiagnostics = this.recoveryDiagnostics.filter((item) => item.code !== 'provider-secret-unavailable' || item.providerId !== id);
   }
 
   setDefaultProvider(id: string): void {
@@ -676,20 +1151,26 @@ export class ConfigStore {
   }
 
   regenerateSecret(): string {
-    this.data.pairing = { secret: generateSecret(), pin: this.data.pairing.pin, createdAt: Date.now() };
+    this.data.pairing = { ...this.data.pairing, secret: generateSecret(), createdAt: Date.now() };
     for (const link of this.data.deviceLinks) if (!link.revokedAt) link.revokedAt = Date.now();
     this.save();
     return this.data.pairing.secret;
   }
 
   regeneratePin(): string {
-    this.data.pairing.pin = generatePin();
+    const previous = this.data.pairing.pin;
+    this.data.pairing.pin = nextPairingPin(previous);
+    this.data.pairing.pinCreatedAt = Date.now();
     this.save();
     return this.data.pairing.pin;
   }
 
   get pin(): string {
     return this.data.pairing.pin;
+  }
+
+  get pinCreatedAt(): number {
+    return this.data.pairing.pinCreatedAt;
   }
 }
 

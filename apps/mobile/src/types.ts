@@ -9,19 +9,23 @@ export interface SavedPc {
   host: string;
   hosts?: string[];
   activeHost?: string;
+  protocol?: 'http' | 'https';
+  origins?: string[];
+  activeOrigin?: string;
+  credentialStatus?: 'ok' | 'missing' | 'unavailable';
   port: number;
   secret: string;
   addedAt: number;
 }
 
 export interface PairingPayload {
-  app: string;
+  app: 'mr-robot';
   host: string;
   hosts?: string[];
+  protocol?: 'http' | 'https';
   port: number;
-  version?: number;
-  pin?: string;
-  secret?: string;
+  version: 3;
+  pin: string;
 }
 
 export interface SystemStatus {
@@ -53,6 +57,19 @@ export interface ShellResult {
 export type ProviderType = 'openai-compatible' | 'anthropic' | 'ollama' | 'codex-cli' | 'claude-cli';
 export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
+
+export interface ConversationSyncMergeResult {
+  added: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  conflictIds: string[];
+}
+
+export interface SyncMergeResult {
+  conversations: ConversationSyncMergeResult;
+  routingPresets: { added: number; updated: number; unchanged: number };
+}
 
 export interface ProviderInfo {
   id: string;
@@ -87,7 +104,6 @@ export interface AppSettings {
   deviceName: string;
   safety: { mode: 'read-only' | 'ask' | 'workspace' | 'full'; allowedRoots?: string[] };
   network: { host: string; port: number; externalAccess: boolean };
-  voice?: { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number };
 }
 
 export interface ScheduledJobView {
@@ -113,6 +129,8 @@ export interface CalendarEvent {
 
 export interface ChatConfirmRequest {
   requestId: string;
+  conversationId: string;
+  conversationTitle: string;
   tool: string;
   summary: string;
 }
@@ -122,6 +140,14 @@ export interface ToolEvent {
   input: unknown;
   status: 'start' | 'done' | 'error';
   detail?: string;
+}
+
+export interface ChatRunState {
+  conversationId: string;
+  running: boolean;
+  startedAt?: number;
+  status?: string;
+  steeringQueued: number;
 }
 
 export interface ConversationSummary {

@@ -14,14 +14,17 @@ web-build/
 packages/desktop/.stage/
 apps/mobile/android/.gradle/
 apps/mobile/android/app/build/
+apps/mobile/android/app/src/generated-assets/
 apps/mobile/android/local.properties
 apps/mobile/android/app/*.keystore
 apps/mobile/android/app/*.jks
 release-*/
 
-# Keep only the current distributable installers in Git LFS.
+# Keep published distributable installers in Git LFS.
 release/*
 !release/Mr.Robot-Setup-0.2.0-x64.exe
+!release/Mr.Robot-Setup-0.3.0-x64.exe
 !release/mobile/
 release/mobile/*
 !release/mobile/Mr.Robot-Mobile-0.2.1.apk
+!release/mobile/Mr.Robot-Mobile-0.3.0.apk

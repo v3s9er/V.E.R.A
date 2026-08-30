@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { ChatConfirmRequest, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
+import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
+import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
@@ -14,6 +15,11 @@ declare global {
     mrRobotDesktop?: {
       chooseDirectory(): Promise<string | null>;
       getLocalConnection(): Promise<{ name: string; host: string; port: number; secret: string }>;
+      loadPcs(): Promise<DesktopPcLoadResult>;
+      savePcs(pcs: SavedPc[]): Promise<{ ok: boolean }>;
+      downloadFile(input: { id: string; url: string; token: string; suggestedName: string }): Promise<{ canceled: boolean; path?: string }>;
+      cancelDownload(id: string): Promise<{ ok: boolean }>;
+      onNavigate(handler: (view: string) => void): () => void;
       platform: string;
     };
     webkitSpeechRecognition?: new () => SpeechRecognitionLike;
@@ -56,10 +62,11 @@ const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detai
   { value: 'full', label: '전체 허용', short: '전체', detail: '기기 권한 상한 안에서 PC 전체 작업을 허용합니다.' },
 ];
 
-export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
+export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc }: {
   profile?: ReactNode;
   voiceCommand?: { id: number; text: string } | null;
   onVoiceCommandHandled?: (id: number) => void;
+  activePc?: SavedPc | null;
 }) {
   const { client } = useMrRobot();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -90,8 +97,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
   const [composerError, setComposerError] = useState('');
   const [voiceAck, setVoiceAck] = useState('');
   const [initialized, setInitialized] = useState(false);
+  const [visibleMessageLimit, setVisibleMessageLimit] = useState(160);
   const scroller = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const uploadAbortReason = useRef<'user' | 'timeout' | null>(null);
+  const mountedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const selectedId = useRef<string | null>(null);
   const selectedRef = useRef<ConversationDetail | null>(null);
@@ -99,6 +110,56 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
   const runningConversationRef = useRef<string | null>(null);
   const toolCounter = useRef(0);
   const dragDepth = useRef(0);
+  const deltaBuffer = useRef<{ conversationId: string; text: string } | null>(null);
+  const deltaTimer = useRef<number | null>(null);
+  const ownedTimers = useRef(new Set<number>());
+  const conversationUpdateQueue = useRef<Promise<void>>(Promise.resolve());
+
+  const later = useCallback((callback: () => void, delayMs: number): number => {
+    const id = window.setTimeout(() => {
+      ownedTimers.current.delete(id);
+      callback();
+    }, delayMs);
+    ownedTimers.current.add(id);
+    return id;
+  }, []);
+
+  const flushDelta = useCallback((): void => {
+    if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
+    deltaTimer.current = null;
+    const pending = deltaBuffer.current;
+    deltaBuffer.current = null;
+    if (!pending || selectedId.current !== pending.conversationId) return;
+    setMessages((items) => {
+      const last = items[items.length - 1];
+      if (!last || last.role !== 'assistant') return items;
+      return [...items.slice(0, -1), { ...last, content: last.content + pending.text }];
+    });
+  }, []);
+
+  useEffect(() => {
+    // React StrictMode mounts effects twice in development. Re-arm this guard on
+    // every effect setup so a simulated cleanup cannot permanently suppress UI.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      uploadAbortReason.current = 'user';
+      uploadAbortRef.current?.abort();
+      if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
+      deltaTimer.current = null;
+      deltaBuffer.current = null;
+      for (const timer of ownedTimers.current) window.clearTimeout(timer);
+      ownedTimers.current.clear();
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      if (recognition) {
+        recognition.onresult = null;
+        recognition.onend = null;
+        recognition.onerror = null;
+        try { recognition.stop(); } catch { /* already stopped */ }
+      }
+    };
+  }, []);
 
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
@@ -188,12 +249,28 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
   }, [client]);
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
-    const detail = await client.call('conversations.get', { id }) as ConversationDetail;
+    const [detail, runs] = await Promise.all([
+      client.call('conversations.get', { id }) as Promise<ConversationDetail>,
+      client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+    ]);
+    const selectedRun = runs.find((run) => run.conversationId === id);
+    const controlledRun = selectedRun ?? runs[0];
+    const confirmations = await Promise.all(runs.map((run) => (
+      client.call('chat.pendingConfirm', { conversationId: run.conversationId }, 5000)
+        .catch(() => null) as Promise<ChatConfirmRequest | null>
+    )));
     selectedId.current = id;
     selectedRef.current = detail;
     setSelected(detail);
-    setMessages(fromDetail(detail));
+    const restored = fromDetail(detail);
+    setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }] : restored);
+    setVisibleMessageLimit(160);
     setRoute(null);
+    runningConversationRef.current = controlledRun?.conversationId ?? null;
+    busyRef.current = Boolean(controlledRun);
+    setBusy(Boolean(controlledRun));
+    setStatus(controlledRun?.status ?? '');
+    setConfirm(confirmations.find((item): item is ChatConfirmRequest => item !== null) ?? null);
   }, [client]);
 
   const refresh = useCallback(async (preferredId?: string): Promise<void> => {
@@ -237,8 +314,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     setInput('');
     onVoiceCommandHandled?.(voiceCommand.id);
     void executeCommand(voiceCommand.text);
-    window.setTimeout(() => setVoiceAck(''), 5000);
-  }, [executeCommand, initialized, onVoiceCommandHandled, voiceCommand]);
+    later(() => setVoiceAck(''), 5000);
+  }, [executeCommand, initialized, later, onVoiceCommandHandled, voiceCommand]);
 
   useEffect(() => {
     const offList = client.on('conversations.changed', (data) => {
@@ -255,8 +332,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     const isCurrent = (data: unknown): boolean => (data as { conversationId?: string }).conversationId === selectedId.current;
     const offDelta = client.on('chat.delta', (data) => {
       if (!isCurrent(data)) return;
-      const text = (data as { text: string }).text ?? '';
-      setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') last.content += text; return copy; });
+      const event = data as { conversationId: string; text: string };
+      const text = event.text ?? '';
+      if (!text) return;
+      if (deltaBuffer.current && deltaBuffer.current.conversationId !== event.conversationId) flushDelta();
+      if (deltaBuffer.current) deltaBuffer.current.text += text;
+      else deltaBuffer.current = { conversationId: event.conversationId, text };
+      if (deltaTimer.current === null) deltaTimer.current = window.setTimeout(flushDelta, 32);
     });
     const offTool = client.on('chat.tool', (data) => {
       if (!isCurrent(data)) return;
@@ -270,6 +352,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     });
     const offStatus = client.on('chat.status', (data) => { if (isCurrent(data)) setStatus((data as { status: string }).status ?? ''); });
     const offDone = client.on('chat.done', (data) => {
+      flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
@@ -284,6 +367,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
       setRoute(done.route ?? null);
     });
     const offError = client.on('chat.error', (data) => {
+      flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
@@ -299,7 +383,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
       const wake = data as { kind?: string; commandText?: string; awaitingCommand?: boolean };
       if (wake.kind !== 'pc') return;
       setVoiceAck(wake.commandText ? `음성 명령 확인 · “${wake.commandText}”` : wake.awaitingCommand ? '호출 확인 · 명령을 듣는 중…' : '호출을 들었습니다.');
-      window.setTimeout(() => setVoiceAck(''), 5000);
+      later(() => setVoiceAck(''), 5000);
     });
     const offVoiceReady = client.on('voice.command.ready', (data) => {
       if ((data as { kind?: string }).kind === 'pc') setVoiceAck('말씀하세요 · 다음 문장을 바로 실행합니다.');
@@ -308,7 +392,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
       if ((data as { kind?: string }).kind === 'pc') setVoiceAck('음성 명령 대기 시간이 끝났습니다. 다시 “로봇”이라고 불러주세요.');
     });
     return () => { offList(); offProviders(); offPresets(); offWorkspaces(); offDelta(); offTool(); offStatus(); offDone(); offError(); offConfirm(); offVoice(); offVoiceReady(); offVoiceTimeout(); };
-  }, [client, discoverProviderModels, showArchived]);
+  }, [client, discoverProviderModels, flushDelta, later, showArchived]);
 
   useEffect(() => { if (messages.length > 0 && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [messages]);
 
@@ -326,10 +410,24 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     const created = await client.call('conversations.create', {}) as ConversationDetail;
     setConversations((list) => [created, ...list]); selectedId.current = created.id; selectedRef.current = created; setSelected(created); setMessages([]); setShowArchived(false);
   };
-  const updateConversation = async (patch: Record<string, unknown>): Promise<void> => {
-    if (!selected) return;
-    const detail = await client.call('conversations.update', { id: selected.id, ...patch }) as ConversationDetail;
-    selectedRef.current = detail; setSelected(detail); setConversations((list) => list.map((c) => c.id === detail.id ? detail : c));
+  const updateConversation = (patch: Record<string, unknown>): Promise<void> => {
+    const target = selectedRef.current;
+    if (!target) return Promise.resolve();
+    const task = conversationUpdateQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const detail = await client.call('conversations.update', { id: target.id, ...patch }) as ConversationDetail;
+        if (selectedId.current === detail.id) {
+          selectedRef.current = detail;
+          setSelected(detail);
+        }
+        setConversations((list) => list.map((conversation) => conversation.id === detail.id ? detail : conversation));
+      });
+    const safeTask = task.catch((error) => {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    });
+    conversationUpdateQueue.current = safeTask;
+    return safeTask;
   };
   const archive = async (): Promise<void> => { if (!selected) return; await updateConversation({ status: selected.status === 'archived' ? 'active' : 'archived' }); selectedId.current = null; await refresh(); };
   const remove = async (): Promise<void> => { if (selected) setDeleteTarget(selected); };
@@ -411,24 +509,44 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     if (!workspace) { setComposerError('파일을 올리려면 먼저 이 대화의 컨텍스트에서 작업 폴더를 선택하세요.'); return; }
     setComposerError('');
     setUploading(true);
+    uploadAbortReason.current = null;
+    const uploadController = new AbortController();
+    uploadAbortRef.current = uploadController;
+    const uploadTimeout = window.setTimeout(() => {
+      if (uploadAbortRef.current !== uploadController) return;
+      uploadAbortReason.current = 'timeout';
+      uploadController.abort();
+    }, 120_000);
     try {
       const labels: string[] = [];
       for (const [index, file] of picked.entries()) {
         const relativePath = `.mr-robot-uploads/${Date.now()}-${index}-${file.name.replace(/[\\/:*?"<>|]/g, '_')}`;
-        const response = await fetch(`/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, {
-          method: 'PUT', headers: { 'x-mr-robot-token': client.token, 'content-type': file.type || 'application/octet-stream' }, body: file,
+        const base = activePc ? pcOrigin(activePc) : window.location.origin;
+        const response = await fetch(`${base}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, {
+          method: 'PUT', headers: { 'x-mr-robot-token': client.token, 'content-type': file.type || 'application/octet-stream' }, body: file, signal: uploadController.signal,
         });
-        const body = await response.json() as { path?: string; error?: string };
+        const body = await response.json().catch(() => ({})) as { path?: string; error?: string };
         if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
         labels.push(`[첨부 파일: ${workspace.path}\\${String(body.path ?? relativePath).replaceAll('/', '\\')}]`);
       }
-      setInput((value) => `${value}${value ? '\n' : ''}${labels.join('\n')}`);
+      if (mountedRef.current) setInput((value) => `${value}${value ? '\n' : ''}${labels.join('\n')}`);
     } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
+      if (mountedRef.current) setComposerError(uploadAbortReason.current === 'user' ? '파일 업로드를 중지했습니다.' : uploadAbortReason.current === 'timeout' ? '파일 업로드 시간이 초과되었습니다.' : error instanceof Error ? error.message : String(error));
     } finally {
-      setUploading(false);
-      if (uploadRef.current) uploadRef.current.value = '';
+      window.clearTimeout(uploadTimeout);
+      if (uploadAbortRef.current === uploadController) uploadAbortRef.current = null;
+      uploadAbortReason.current = null;
+      if (mountedRef.current) {
+        setUploading(false);
+        if (uploadRef.current) uploadRef.current.value = '';
+      }
     }
+  };
+
+  const cancelAttachment = (): void => {
+    if (!uploadAbortRef.current) return;
+    uploadAbortReason.current = 'user';
+    uploadAbortRef.current.abort();
   };
 
   const toggleVoice = (): void => {
@@ -461,7 +579,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
     try {
       await client.call('chat.cancel', { conversationId });
       setStatus('중지됨');
-      window.setTimeout(() => {
+      later(() => {
         if (runningConversationRef.current !== conversationId) return;
         runningConversationRef.current = null;
         busyRef.current = false;
@@ -477,13 +595,15 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
       setComposerError(error instanceof Error ? error.message : String(error));
     }
   };
-  const respondConfirm = async (approve: boolean): Promise<void> => { if (!confirm) return; const requestId = confirm.requestId; setConfirm(null); await client.call('chat.confirmResponse', { requestId, approve }).catch(() => undefined); };
+  const respondConfirm = async (approve: boolean): Promise<void> => { if (!confirm) return; const { requestId, conversationId } = confirm; setConfirm(null); await client.call('chat.confirmResponse', { requestId, conversationId, approve }).catch(() => undefined); };
 
   const selectedPreset = routingPresets.find((preset) => preset.id === selected?.routingPresetId);
   const selectedProvider = providers.find((provider) => provider.id === selected?.providerId);
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selected?.workspaceId) ?? workspaces.find((workspace) => workspace.isDefault);
   const selectedAccess = ACCESS.find((access) => access.value === selected?.permissionMode) ?? ACCESS[1];
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
+  const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
+  const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
 
   return (
     <div className="conversation-layout">
@@ -568,7 +688,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
 
         <div className="chat-scroll" ref={scroller}>
           {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
-          {messages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
+          {hiddenMessageCount > 0 && <button type="button" className="chat-history-more" onClick={() => setVisibleMessageLimit((count) => count + 160)}>이전 메시지 {Math.min(160, hiddenMessageCount)}개 더 보기</button>}
+          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
         </div>
 
         <div className="chat-inputbar">
@@ -579,7 +700,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
           <div className="chat-actions">
             {selected?.compactedMessages ? <span className="compaction-note">이전 메시지 {selected.compactedMessages}개 압축됨</span> : null}
             <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />
-            <Button variant="ghost" onClick={() => uploadRef.current?.click()} disabled={!selectedWorkspace || uploading}>{uploading ? '업로드 중…' : '＋ 파일'}</Button>
+            <Button variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '업로드 취소' : '＋ 파일'}</Button>
             <Button variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '듣는 중…' : '🎙 음성'}</Button>
             {busy && <Button onClick={() => void send()} disabled={!input.trim()}>명령 끼워넣기</Button>}
             {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected}>보내기</Button>}
@@ -587,7 +708,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
         </div>
       </section>
 
-      {conversationMenu && <div className="conversation-context-menu" style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+      {conversationMenu && <div className="conversation-context-menu" role="menu" aria-label={`${conversationMenu.conversation.title} 대화 메뉴`} style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
         <div className="context-menu-title">{conversationMenu.conversation.title}</div>
         <button onClick={() => void pinConversation(conversationMenu.conversation)}><span>📌</span> {conversationMenu.conversation.pinned ? '고정 해제' : '대화 고정'}</button>
         <button onClick={() => openRename(conversationMenu.conversation)}><span>✎</span> 이름 바꾸기</button>
@@ -607,7 +728,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled }: {
           <div className="modal-actions"><Button variant="ghost" onClick={() => setWorkspaceDialogOpen(false)} disabled={workspaceAdding}>취소</Button><Button variant="accent" onClick={() => void registerWorkspace(workspacePath)} disabled={!workspacePath.trim() || workspaceAdding}>{workspaceAdding ? '확인 중…' : '폴더 연결'}</Button></div>
         </div>
       </Modal>
-      <Modal open={confirm !== null} onClose={() => void respondConfirm(false)} title="작업 승인 필요">{confirm && <div className="confirm-box"><p className="confirm-text">PC 에이전트가 다음 작업을 실행하려고 합니다.</p><div className="confirm-cmd"><span className="confirm-tool">{TOOL_EMOJI[confirm.tool] ?? '🔧'} {confirm.tool}</span><code>{confirm.summary}</code></div><div className="confirm-actions"><Button variant="danger" onClick={() => void respondConfirm(false)}>거부</Button><Button onClick={() => void respondConfirm(true)}>허용</Button></div></div>}</Modal>
+      <Modal open={confirm !== null} onClose={() => void respondConfirm(false)} title="작업 승인 필요">{confirm && <div className="confirm-box"><p className="confirm-text">{confirm.conversationId === selected?.id ? `현재 대화 ‘${confirm.conversationTitle}’에서 다음 작업을 요청했습니다.` : `백그라운드 대화 ‘${confirm.conversationTitle}’에서 요청한 작업입니다. 현재 보고 있는 대화와 다릅니다.`}</p><div className="confirm-cmd"><span className="confirm-tool">{TOOL_EMOJI[confirm.tool] ?? '🔧'} {confirm.tool}</span><code>{confirm.summary}</code></div><div className="confirm-actions"><Button variant="danger" onClick={() => void respondConfirm(false)}>거부</Button><Button onClick={() => void respondConfirm(true)}>이 대화 작업 허용</Button></div></div>}</Modal>
     </div>
   );
 }

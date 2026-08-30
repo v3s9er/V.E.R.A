@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ScheduledJob, ScheduledJobView } from '@mr-robot/shared';
+import type { PermissionMode, ScheduledJob, ScheduledJobView } from '@mr-robot/shared';
 import type { EventBus } from './eventbus.js';
 import type { Logger } from './logger.js';
 import type { ConfigStore } from './config.js';
@@ -52,6 +52,7 @@ export class SchedulerStore {
 export class Scheduler {
   private jobs: ScheduledJob[] = [];
   private timers = new Map<string, NodeJS.Timeout>();
+  private active = new Map<string, AbortController>();
 
   constructor(
     private readonly store: SchedulerStore,
@@ -59,6 +60,7 @@ export class Scheduler {
     private readonly computer: Computer,
     private readonly loop: AgentLoop,
     private readonly logger: Logger,
+    private readonly globalPermission: () => PermissionMode = () => 'read-only',
   ) {
     this.jobs = store.load();
   }
@@ -90,6 +92,8 @@ export class Scheduler {
   add(input: Omit<ScheduledJob, 'id' | 'createdAt' | 'enabled'>): ScheduledJobView {
     const job: ScheduledJob = {
       ...input,
+      permissionMode: input.permissionMode ?? 'read-only',
+      createdByAdmin: input.createdByAdmin === true,
       id: randomUUID(),
       createdAt: Date.now(),
       enabled: true,
@@ -106,6 +110,8 @@ export class Scheduler {
     const timer = this.timers.get(id);
     if (timer) clearTimeout(timer);
     this.timers.delete(id);
+    this.active.get(id)?.abort();
+    this.active.delete(id);
     const before = this.jobs.length;
     this.jobs = this.jobs.filter((j) => j.id !== id);
     if (this.jobs.length !== before) {
@@ -120,6 +126,10 @@ export class Scheduler {
     const job = this.jobs.find((j) => j.id === id);
     if (!job) return false;
     job.enabled = enabled;
+    if (!enabled) {
+      this.active.get(id)?.abort();
+      this.active.delete(id);
+    }
     this.store.save(this.jobs);
     this.arm(job);
     this.bus.emit('scheduler.changed', this.list());
@@ -134,6 +144,8 @@ export class Scheduler {
   stop(): void {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
+    for (const controller of this.active.values()) controller.abort();
+    this.active.clear();
   }
 
   private arm(job: ScheduledJob): void {
@@ -155,39 +167,59 @@ export class Scheduler {
   private async run(id: string): Promise<void> {
     const job = this.jobs.find((j) => j.id === id);
     if (!job || !job.enabled) return;
+    const previous = this.active.get(id);
+    previous?.abort();
+    const controller = new AbortController();
+    this.active.set(id, controller);
     this.logger.info(`scheduled job starting: ${job.name}`);
 
     let result = '';
     try {
       if (job.type === 'shell') {
+        if (job.createdByAdmin !== true || job.permissionMode !== 'full' || this.globalPermission() !== 'full') {
+          throw new Error('차단됨: 이 셸 예약은 관리자 전체 허용 권한으로 생성되지 않았습니다. 다시 검토해 등록하세요.');
+        }
         const res = await this.computer.shell(job.command ?? '', {
           shell: job.shellKind ?? 'powershell',
           timeoutMs: 120000,
           maxBytes: 20000,
+          signal: controller.signal,
         });
         result = JSON.stringify({ ok: res.ok, exitCode: res.exitCode, stdout: res.stdout.slice(0, 800), stderr: res.stderr.slice(0, 400) });
       } else if (job.type === 'launch') {
-        const res = await this.computer.app.launch(job.target ?? '', job.args ?? []);
+        if (job.createdByAdmin !== true || job.permissionMode !== 'full' || this.globalPermission() !== 'full') {
+          throw new Error('차단됨: 이 앱 실행 예약은 관리자 전체 허용 권한으로 생성되지 않았습니다. 다시 검토해 등록하세요.');
+        }
+        const res = await this.computer.app.launch(job.target ?? '', job.args ?? [], controller.signal);
         result = JSON.stringify({ ok: res.ok, exitCode: res.exitCode, stdout: res.stdout.slice(0, 300) });
       } else {
         // chat: run the prompt through the AI. Destructive tools auto-approved
         // only when the job is explicitly marked allowDestructive.
         const run = await this.loop.run([], job.prompt ?? '', {
-          confirm: async () => job.allowDestructive === true,
+          confirm: async () => job.createdByAdmin === true && job.permissionMode === 'full' && job.allowDestructive === true,
           onTool: () => undefined,
+          signal: controller.signal,
+        }, undefined, {
+          permissionMode: permissionModes[Math.min(permissionModes.indexOf(job.permissionMode ?? 'read-only'), permissionModes.indexOf(this.globalPermission()))] ?? 'read-only',
         });
         result = run.text.slice(0, 800);
       }
     } catch (err) {
       result = `error: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      if (this.active.get(id) === controller) this.active.delete(id);
     }
 
-    job.lastRun = Date.now();
-    job.lastResult = result;
-    if (job.when.kind === 'once') job.enabled = false;
+    const current = this.jobs.find((candidate) => candidate.id === id);
+    if (!current) return;
+    current.lastRun = Date.now();
+    current.lastResult = result;
+    if (current.when.kind === 'once') current.enabled = false;
     this.store.save(this.jobs);
     this.bus.emit('scheduler.ran', this.list());
-    this.logger.info(`scheduled job finished: ${job.name}`);
-    this.arm(job);
+    this.logger.info(`scheduled job finished: ${current.name}`);
+    this.arm(current);
   }
 }
+
+const permissionModes: PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];

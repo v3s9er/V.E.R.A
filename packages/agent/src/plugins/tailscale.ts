@@ -18,16 +18,11 @@ export function createTailscalePlugin(): MrRobotPlugin {
     manifest: {
       id: 'tailscale-connect', name: 'Tailscale Connect', version: '0.2.0', kind: 'transport', enabledByDefault: false,
       description: '휴대폰·노트북을 외부망에서도 직접 연결하고 Mr.Robot 파일 전송을 운반합니다.',
-      capabilities: ['transport.tailnet', 'files.peer-transfer', 'wake.priority-handshake'],
+      capabilities: ['transport.tailnet', 'files.peer-transfer'],
       permissions: ['network.client'],
       dependencies: [{ id: 'tailscale', name: 'Tailscale', required: true }],
     },
     activate(ctx) {
-      const claims = new Map<string, { device: string; at: number }>();
-      ctx.on('voice.wake', (raw) => {
-        const wake = raw as { wakeId?: string; device?: string; kind?: string; at?: number };
-        if (wake.kind === 'pc' && wake.wakeId) claims.set(wake.wakeId, { device: String(wake.device ?? 'desktop'), at: wake.at ?? Date.now() });
-      });
       ctx.registerCommand('tailscale.status', async () => {
         const result = await run(['status', '--json']);
         if (!result.ok) return { ok: false, installed: !/ENOENT|not found/i.test(result.output), error: result.output };
@@ -41,17 +36,6 @@ export function createTailscalePlugin(): MrRobotPlugin {
         if (!result.ok) throw new Error(result.output);
         const data = JSON.parse(result.output) as { Peer?: Record<string, { HostName?: string; DNSName?: string; TailscaleIPs?: string[]; Online?: boolean }> };
         return Object.entries(data.Peer ?? {}).map(([id, peer]) => ({ id, name: peer.HostName ?? peer.DNSName ?? id, addresses: peer.TailscaleIPs ?? [], online: peer.Online === true }));
-      }, { destructive: false });
-      ctx.registerCommand('wake.claim', (raw) => {
-        const body = (raw ?? {}) as { wakeId?: string; device?: string; kind?: 'pc' | 'mobile' };
-        const wakeId = String(body.wakeId ?? '').slice(0, 100);
-        if (!wakeId) throw new Error('wakeId가 필요합니다.');
-        const current = claims.get(wakeId);
-        const candidate = { device: String(body.device ?? body.kind ?? 'unknown'), at: Date.now() };
-        if (!current || body.kind === 'pc') claims.set(wakeId, candidate);
-        const winner = claims.get(wakeId) as { device: string; at: number };
-        ctx.setTimeout(() => claims.delete(wakeId), 10_000);
-        return { accepted: winner.device === candidate.device, winner: winner.device, claimedAt: winner.at };
       }, { destructive: false });
     },
   };

@@ -209,6 +209,12 @@ export interface ToolCallRecord {
 export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
+  /** Input tokens served from a provider-side prompt cache. */
+  cachedPromptTokens?: number;
+  /** Input tokens written into a provider-side prompt cache. */
+  cacheWritePromptTokens?: number;
+  /** Output tokens reported specifically as hidden reasoning. */
+  reasoningTokens?: number;
 }
 
 export type ConversationStatus = 'active' | 'archived';
@@ -263,6 +269,8 @@ export interface MemoryItem {
 /** A destructive tool is paused and the user must approve it. */
 export interface ChatConfirmRequest {
   requestId: string;
+  conversationId: string;
+  conversationTitle: string;
   tool: string;
   input: unknown;
   summary: string;
@@ -398,7 +406,7 @@ export interface FsEntry {
   modifiedAt: number;
 }
 
-export type DependencyId = 'node' | 'git' | 'speech-ko' | 'codex' | 'claude' | 'orca' | 'ollama' | 'tailscale' | 'docker';
+export type DependencyId = 'node' | 'git' | 'speech-ko' | 'codex' | 'claude' | 'orca' | 'ollama' | 'cloudflared' | 'tailscale' | 'docker';
 
 export interface DependencyInfo {
   id: DependencyId;
@@ -423,6 +431,59 @@ export interface DependencyInstallResult {
   ok: boolean;
   item: DependencyInfo;
   output: string;
+}
+
+/** Result of merging one peer's conversation snapshot into this PC. */
+export interface ConversationSyncMergeResult {
+  added: number;
+  updated: number;
+  unchanged: number;
+  /** Divergent edits are retained as visible conflict-copy conversations. */
+  conflicts: number;
+  conflictIds: string[];
+}
+
+export interface SyncMergeResult {
+  conversations: ConversationSyncMergeResult;
+  routingPresets: { added: number; updated: number; unchanged: number };
+}
+
+/** Pluggable remote transports. Account relay remains unavailable until its external control plane is configured. */
+export type RemoteTransportProviderId = 'cloudflare-quick' | 'google-relay';
+
+export interface RemoteLinkConfig {
+  provider: RemoteTransportProviderId;
+  /** Only an HTTP loopback Agent URL is accepted by the current quick-link provider. */
+  localUrl: string;
+  /** Deliberately false for temporary links; they must never silently reopen after login. */
+  autoStart: false;
+}
+
+export interface RemoteTransportProviderInfo {
+  id: RemoteTransportProviderId;
+  name: string;
+  available: boolean;
+  temporary: boolean;
+  requiresAccount: boolean;
+  reason?: string;
+}
+
+export interface RemoteLinkStatus {
+  provider: RemoteTransportProviderId;
+  config: RemoteLinkConfig;
+  running: boolean;
+  installed: boolean;
+  executable?: string;
+  processId?: number;
+  publicUrl?: string;
+  websocketUrl?: string;
+  startedAt?: number;
+  temporary: true;
+  beta: true;
+  warning: string;
+  lastError?: string;
+  diagnostics?: string;
+  providers: RemoteTransportProviderInfo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +515,10 @@ export interface ScheduledJob {
   when: ScheduleWhen;
   /** For chat jobs: auto-approve destructive tools even in confirm mode. */
   allowDestructive: boolean;
+  /** Effective permission ceiling captured when the job was created. */
+  permissionMode?: PermissionMode;
+  /** Only locally authenticated administrators may create privileged jobs. */
+  createdByAdmin?: boolean;
   enabled: boolean;
   createdAt: number;
   lastRun?: number;
@@ -478,6 +543,9 @@ export interface NetworkSettings {
 }
 
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
+
+/** Narrow, independently revocable privileges granted to a paired device. */
+export type DeviceCapability = 'work-sync';
 
 export interface SafetySettings {
   /** read-only < ask < workspace < full. Legacy confirm is migrated to ask. */
@@ -504,7 +572,7 @@ export interface AppSettings {
     enabled: boolean;
     wakePhrase: string;
     language: string;
-    /** Desktop wins a simultaneous wake claim; mobile falls back after this delay. */
+    /** Legacy compatibility value retained for existing desktop voice settings. */
     pcPriorityMs: number;
   };
 }

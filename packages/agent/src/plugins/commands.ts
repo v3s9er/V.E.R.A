@@ -1,4 +1,17 @@
 import type { NeutralTool } from '../ai/provider.js';
+import type { PermissionMode } from '@mr-robot/shared';
+
+/**
+ * Host-created execution metadata. It is deliberately passed separately from
+ * command params so an AI tool call cannot forge its workspace or approval.
+ */
+export interface PluginExecutionContext {
+  readonly signal?: AbortSignal;
+  readonly permissionMode: PermissionMode;
+  readonly workspaceRoot?: string;
+  readonly destructiveApproved: boolean;
+  readonly approvalSource: 'not-required' | 'policy' | 'prompt' | 'run-capability';
+}
 
 export interface RegisterCommandOptions {
   description?: string;
@@ -17,7 +30,7 @@ export interface RegisterCommandOptions {
 export interface PluginCommandDef {
   name: string;
   pluginId: string;
-  handler: (params: unknown) => unknown | Promise<unknown>;
+  handler: (params: unknown, execution?: PluginExecutionContext) => unknown | Promise<unknown>;
   description?: string;
   tool: boolean;
   destructive: boolean;

@@ -22,7 +22,7 @@ function instantiate(c: ProviderConfig): AiProvider {
 
 function normalizeBaseUrl(type: ProviderConfig['type'], value: string): string {
   if (type.endsWith('-cli')) return '';
-  const trimmed = value.trim().replace(/\/+$/, '');
+  const trimmed = value.trim();
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
@@ -30,7 +30,22 @@ function normalizeBaseUrl(type: ProviderConfig['type'], value: string): string {
     throw new Error('Base URL은 http:// 또는 https://로 시작하는 올바른 주소여야 합니다.');
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Base URL은 HTTP(S) 주소만 사용할 수 있습니다.');
-  return trimmed;
+  if (parsed.username || parsed.password) throw new Error('Base URL에 사용자 이름이나 비밀번호를 포함할 수 없습니다. API 키는 전용 입력란을 사용하세요.');
+  if (parsed.search || parsed.hash) throw new Error('Base URL에 쿼리 문자열이나 해시를 포함할 수 없습니다.');
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+/**
+ * ProviderInfo crosses the trust boundary to every authenticated client. A
+ * malformed legacy config must never turn that response into a credential
+ * disclosure, even when the provider itself cannot be instantiated.
+ */
+function publicBaseUrl(type: ProviderConfig['type'], value: string): string {
+  try {
+    return normalizeBaseUrl(type, value);
+  } catch {
+    return '';
+  }
 }
 
 function defaultModel(type: ProviderConfig['type']): string {
@@ -58,7 +73,7 @@ export class ProviderRegistry {
     this.providers.clear();
     for (const c of this.config.providers) {
       try {
-        this.providers.set(c.id, instantiate(c));
+        this.providers.set(c.id, instantiate({ ...c, baseUrl: normalizeBaseUrl(c.type, c.baseUrl) }));
       } catch {
         // invalid provider skipped; still listed so the user can fix/remove it
       }
@@ -72,7 +87,7 @@ export class ProviderRegistry {
       id: p.id,
       label: p.label,
       type: p.type,
-      baseUrl: p.baseUrl,
+      baseUrl: publicBaseUrl(p.type, p.baseUrl),
       model: p.model,
       hasKey: Boolean(p.apiKey),
       isDefault: p.isDefault,
@@ -93,7 +108,11 @@ export class ProviderRegistry {
     const config = this.config.providers.find((provider) => provider.id === id);
     if (!config) return undefined;
     if (config.model === selectedModel) return this.get(id);
-    return instantiate({ ...config, model: selectedModel });
+    try {
+      return instantiate({ ...config, baseUrl: normalizeBaseUrl(config.type, config.baseUrl), model: selectedModel });
+    } catch {
+      return undefined;
+    }
   }
 
   default(): AiProvider | undefined {
@@ -119,6 +138,25 @@ export class ProviderRegistry {
     const preferred = this.resolve('general');
     if (preferred?.supportsTools && preferred.id !== excludeId) return preferred;
     return [...this.providers.values()].find((p) => p.supportsTools && p.id !== excludeId);
+  }
+
+  costTier(id: string): number {
+    return this.list().find((provider) => provider.id === id)?.costTier ?? 1;
+  }
+
+  freeProvider(role: ModelRole, roleProviders: string[] = [], requireTools = false): AiProvider | undefined {
+    const freeIds = new Set(this.list().filter((provider) => provider.costTier === 0).map((provider) => provider.id));
+    const ordered = [
+      ...roleProviders,
+      ...(this.config.routing.roles[role] ?? []),
+      ...this.list().map((provider) => provider.id),
+    ];
+    for (const id of ordered) {
+      if (!freeIds.has(id)) continue;
+      const provider = this.providers.get(id);
+      if (provider && (!requireTools || provider.supportsTools)) return provider;
+    }
+    return undefined;
   }
 
   add(input: ProviderAddInput): ProviderInfo {

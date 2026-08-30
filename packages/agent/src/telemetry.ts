@@ -12,6 +12,9 @@ export interface RoutingTrace {
   effort?: string;
   promptTokens: number;
   completionTokens: number;
+  cachedPromptTokens?: number;
+  cacheWritePromptTokens?: number;
+  reasoningTokens?: number;
   toolCalls: number;
   latencyMs: number;
   estimatedCost: number;
@@ -37,14 +40,20 @@ export class TelemetryStore {
     } catch { return []; }
   }
 
-  summary(): { turns: number; promptTokens: number; completionTokens: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> } {
+  summary(): { turns: number; promptTokens: number; completionTokens: number; cachedPromptTokens: number; cacheWritePromptTokens: number; reasoningTokens: number; cacheHitRate: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> } {
     const entries = this.list(1000);
     const counts = new Map<string, number>();
     for (const entry of entries) counts.set(entry.model ?? '알 수 없음', (counts.get(entry.model ?? '알 수 없음') ?? 0) + 1);
+    const promptTokens = entries.reduce((sum, item) => sum + item.promptTokens, 0);
+    const cachedPromptTokens = entries.reduce((sum, item) => sum + (item.cachedPromptTokens ?? 0), 0);
     return {
       turns: entries.length,
-      promptTokens: entries.reduce((sum, item) => sum + item.promptTokens, 0),
+      promptTokens,
       completionTokens: entries.reduce((sum, item) => sum + item.completionTokens, 0),
+      cachedPromptTokens,
+      cacheWritePromptTokens: entries.reduce((sum, item) => sum + (item.cacheWritePromptTokens ?? 0), 0),
+      reasoningTokens: entries.reduce((sum, item) => sum + (item.reasoningTokens ?? 0), 0),
+      cacheHitRate: promptTokens > 0 ? cachedPromptTokens / promptTokens : 0,
       toolCalls: entries.reduce((sum, item) => sum + item.toolCalls, 0),
       estimatedCost: entries.reduce((sum, item) => sum + item.estimatedCost, 0),
       failures: entries.filter((item) => !item.ok).length,

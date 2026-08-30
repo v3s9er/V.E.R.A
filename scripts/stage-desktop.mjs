@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const desktop = join(root, 'packages', 'desktop');
 const stage = join(desktop, '.stage');
+const notices = join(root, 'THIRD_PARTY_NOTICES.txt');
 
 function copyTree(source, destination) {
   mkdirSync(destination, { recursive: true });
@@ -19,6 +20,9 @@ function copyTree(source, destination) {
 if (!stage.startsWith(`${desktop}\\`) && !stage.startsWith(`${desktop}/`)) throw new Error('invalid desktop stage path');
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
+
+execFileSync(process.execPath, [join(root, 'scripts', 'third-party-notices.mjs')], { stdio: 'inherit' });
+copyFileSync(notices, join(stage, 'THIRD_PARTY_NOTICES.txt'));
 
 // The esbuild JS service can crash on some Windows/Node combinations when the
 // workspace path contains non-ASCII characters. The CLI uses the same pinned
@@ -43,6 +47,6 @@ const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.2.0', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs',
+  name: 'mr-robot-desktop', version: '0.3.0', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs',
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

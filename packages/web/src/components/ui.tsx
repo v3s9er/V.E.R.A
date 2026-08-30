@@ -1,4 +1,4 @@
-import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, useEffect } from 'react';
+import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, useEffect, useId, useRef } from 'react';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <div className={`card ${className}`}>{children}</div>;
@@ -75,20 +75,60 @@ export function Modal({
   title?: string;
   size?: 'default' | 'wide';
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   useEffect(() => {
     if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusableSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusInitial = window.requestAnimationFrame(() => {
+      const dialog = dialogRef.current;
+      const autoFocus = dialog?.querySelector<HTMLElement>('[autofocus]');
+      const first = dialog?.querySelector<HTMLElement>(focusableSelector);
+      (autoFocus ?? first ?? dialog)?.focus();
+    });
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(focusableSelector)]
+        .filter((element) => !element.hidden && element.getClientRects().length > 0);
+      if (!focusable.length) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.cancelAnimationFrame(focusInitial);
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = previousOverflow;
+      previous?.focus();
+    };
   }, [open, onClose]);
   if (!open) return null;
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className={`modal modal-${size}`} role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className={`modal modal-${size}`} role="dialog" aria-modal="true" aria-labelledby={title ? titleId : undefined} aria-label={title ? undefined : '대화 상자'} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          {title && <div className="modal-title">{title}</div>}
+          {title && <div id={titleId} className="modal-title">{title}</div>}
           <button type="button" className="modal-close" aria-label="닫기" onClick={onClose}>×</button>
         </div>
         <div className="modal-content">{children}</div>

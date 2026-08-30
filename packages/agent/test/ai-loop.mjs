@@ -17,6 +17,9 @@ let voteOpinionCalls = 0;
 let crossGroupCalls = 0;
 let swarmSolverCalls = 0;
 let swarmVerifierCalls = 0;
+let premiumBudgetCalls = 0;
+let freeBudgetCalls = 0;
+const freeBudgetSystems = [];
 const mock = createServer((req, res) => {
   if (!req.url?.endsWith('/chat/completions')) {
     res.writeHead(404).end();
@@ -31,6 +34,24 @@ const mock = createServer((req, res) => {
       res.write('data: [DONE]\n\n');
       res.end();
     };
+    const parsed = JSON.parse(body);
+    if (parsed.model === 'premium-budget' || parsed.model === 'free-budget') {
+      if (parsed.model === 'premium-budget') premiumBudgetCalls++;
+      else {
+        freeBudgetCalls++;
+        freeBudgetSystems.push(parsed.messages?.find((message) => message.role === 'system')?.content ?? '');
+      }
+      const round = premiumBudgetCalls + freeBudgetCalls;
+      if (round <= 3) {
+        sse({ choices: [{ delta: { role: 'assistant', content: '' } }] });
+        sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: `budget_call_${round}`, function: { name: 'shell_exec', arguments: `{"command":"echo budget-${round}","shell":"cmd"}` } }] } }] });
+        sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+      } else {
+        sse({ choices: [{ delta: { content: 'BUDGET-COMPLETE' } }], usage: { prompt_tokens: 5, completion_tokens: 2 } });
+      }
+      done();
+      return;
+    }
     if (body.includes('sequential AI workflow')) {
       pipelineStageCalls++;
       sse({ choices: [{ delta: { content: `PIPELINE-STAGE-${pipelineStageCalls}` } }], usage: { prompt_tokens: 4, completion_tokens: 2 } });
@@ -172,6 +193,104 @@ const swarm = await server.loop.run([], '허가된 CTF 테스트', { confirm: as
 check('CTF swarm runs every solver concurrently before verification', swarmSolverCalls === 3, String(swarmSolverCalls));
 check('CTF swarm stops after verifier accepts a reproduced flag', swarmVerifierCalls === 1 && swarm.route?.reason.includes('플래그 검증 성공'), swarm.route?.reason);
 
+// A premium ceiling is a count of real provider invocations, not a count of
+// provider selections. Three tool rounds plus the final response must spend
+// only one premium call and continue every later round on a free tool model.
+const premiumBudgetProvider = server.providersAdd({
+  label: 'Premium Budget', type: 'openai-compatible', baseUrl: 'http://127.0.0.1:9999/v1',
+  model: 'premium-budget', apiKey: 'test-key', source: 'api', costTier: 2,
+});
+server.providersAdd({
+  label: 'Free Budget', type: 'openai-compatible', baseUrl: 'http://127.0.0.1:9999/v1',
+  model: 'free-budget', apiKey: 'test-key', source: 'free', costTier: 0,
+});
+const budgetResult = await server.loop.run([], '명령 실행하고 세 번 검증해줘', { confirm: async () => true }, [], {
+  providerId: premiumBudgetProvider.id,
+  providerModel: 'premium-budget',
+  reasoningEffort: 'high',
+  routing: { mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true },
+});
+check('multi-tool loop never exceeds actual premium invocation ceiling', premiumBudgetCalls === 1, String(premiumBudgetCalls));
+check('all post-ceiling tool rounds continue on free model', freeBudgetCalls === 3 && budgetResult.text === 'BUDGET-COMPLETE', `${freeBudgetCalls} / ${budgetResult.text}`);
+check('fallback system identity and route use the actual free model', freeBudgetSystems.every((system) => system.includes('Free Budget') && system.includes('free-budget')) && budgetResult.route?.model === 'free-budget', `${budgetResult.route?.providerLabel} / ${budgetResult.route?.model}`);
+
+// A single-mode scenario is a local router choice, not a fan-out. The graph
+// can describe many roles while only the selected model receives the prompt.
+let singleCascadeCalls = 0;
+const singleCascadeProvider = {
+  id: 'single-cascade', label: 'Single Cascade', type: 'openai-compatible', model: 'single-cascade',
+  supportsTools: true, supportedReasoning: ['auto'],
+  async chat() {
+    singleCascadeCalls++;
+    return { text: 'single-only', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } };
+  },
+  async ping() { return { ok: true }; }, async models() { return ['single-cascade']; },
+};
+const singleCascadeRegistry = {
+  default: () => singleCascadeProvider,
+  resolve: () => singleCascadeProvider,
+  costTier: () => 0,
+};
+const singleCascadeLoop = new AgentLoop(singleCascadeRegistry, { execute: async () => '{}' });
+const singleCascadeResult = await singleCascadeLoop.run([], '짧게 답해줘', {}, [], {
+  routing: {
+    mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true,
+    graph: { nodes: [node('fast-one', 'fast', 10), node('general-one', 'general', 100), node('reasoning-one', 'reasoning', 200), node('critic-one', 'critic', 300)], edges: [] },
+  },
+});
+check('single-mode cascade invokes only one selected model', singleCascadeCalls === 1 && singleCascadeResult.text === 'single-only', `${singleCascadeCalls} / ${singleCascadeResult.text}`);
+
+// Equivalent JSON arguments must share one repeat signature even when a model
+// changes object key order. Two consecutive blocked rounds end the paid loop.
+let repeatedProviderCalls = 0;
+let repeatedExecutions = 0;
+const repeatingProvider = {
+  ...singleCascadeProvider, id: 'repeat-test', label: 'Repeat Test', model: 'repeat-test',
+  async chat() {
+    repeatedProviderCalls++;
+    const args = repeatedProviderCalls % 2
+      ? '{"command":"echo stable","shell":"cmd"}'
+      : '{"shell":"cmd","command":"echo stable"}';
+    return {
+      text: '',
+      toolCalls: [{ id: `repeat-${repeatedProviderCalls}`, name: 'shell_exec', args }],
+      usage: { promptTokens: 2, completionTokens: 1 },
+    };
+  },
+};
+const repeatedLoop = new AgentLoop(
+  { default: () => repeatingProvider },
+  { execute: async () => { repeatedExecutions++; return '{"ok":true}'; } },
+);
+const repeatedResult = await repeatedLoop.run([], '명령 실행해줘');
+check('canonical repeat guard ignores object key order', repeatedExecutions === 2, String(repeatedExecutions));
+check('consecutive no-progress rounds stop further paid calls', repeatedProviderCalls === 4 && repeatedResult.text.includes('반복되어 작업을 중단'), `${repeatedProviderCalls} / ${repeatedResult.text}`);
+
+let steerableRepeatCalls = 0;
+let steeringPolls = 0;
+const steerableRepeatProvider = {
+  ...repeatingProvider, id: 'steerable-repeat', label: 'Steerable Repeat', model: 'steerable-repeat',
+  async chat(req) {
+    steerableRepeatCalls++;
+    if (req.turns.some((turn) => turn.role === 'user' && turn.content.includes('다른 접근'))) {
+      return { text: 'steering-recovered', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } };
+    }
+    return {
+      text: '',
+      toolCalls: [{ id: `steer-repeat-${steerableRepeatCalls}`, name: 'shell_exec', args: '{"command":"echo stable","shell":"cmd"}' }],
+      usage: { promptTokens: 2, completionTokens: 1 },
+    };
+  },
+};
+const steerableRepeatLoop = new AgentLoop(
+  { default: () => steerableRepeatProvider },
+  { execute: async () => '{"ok":true}' },
+);
+const steerableRepeatResult = await steerableRepeatLoop.run([], '명령 실행해줘', {
+  takeSteering: () => ++steeringPolls === 4 ? ['다른 접근으로 마무리해줘'] : [],
+});
+check('steering at the repeat threshold is applied before automatic stop', steerableRepeatCalls === 5 && steerableRepeatResult.text === 'steering-recovered', `${steerableRepeatCalls} / ${steerableRepeatResult.text}`);
+
 // Native subscription agents receive one explicit run approval in ask mode,
 // then consume instructions queued while their non-interactive CLI was busy.
 const nativeCalls = [];
@@ -193,6 +312,36 @@ check('native ask mode requests explicit approval', nativeApprovals === 1, Strin
 check('approved native run is scoped to workspace mode', nativeCalls.every((call) => call.permissionMode === 'workspace'));
 check('native steering starts bounded continuation', nativeCalls.length === 2 && nativeCalls[1].prompt.includes('검증도 추가해줘'), String(nativeCalls.length));
 check('native continuation returns latest result and aggregates usage', nativeResult.text === 'native-2' && nativeResult.usage.promptTokens === 6);
+
+// Native steering continuations are separate paid invocations as well. Once
+// the first native run consumes the limit, the continuation must be selected,
+// identified and effort-clamped against the actual free native provider.
+const budgetedNativeCalls = [];
+const premiumNative = {
+  ...nativeProvider, id: 'premium-native', label: 'Premium Native', model: 'premium-native-model',
+  async runAgent(req) { budgetedNativeCalls.push({ provider: 'premium', ...req }); return { text: 'premium-native-result', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } }; },
+};
+const freeNative = {
+  ...nativeProvider, id: 'free-native', label: 'Free Native', model: 'free-native-model', supportedReasoning: ['auto'],
+  async runAgent(req) { budgetedNativeCalls.push({ provider: 'free', ...req }); return { text: 'free-native-result', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } }; },
+};
+const nativeBudgetRegistry = {
+  default: () => premiumNative,
+  costTier: (id) => id === premiumNative.id ? 2 : 0,
+  freeProvider: () => freeNative,
+};
+const nativeBudgetLoop = new AgentLoop(nativeBudgetRegistry, { execute: async () => '{}' });
+let budgetSteeringReads = 0;
+const nativeBudgetResult = await nativeBudgetLoop.run([], '파일을 수정해줘', {
+  takeSteering: () => ++budgetSteeringReads === 1 ? ['테스트를 한 번 더 실행해줘'] : [],
+}, [], {
+  workspacePath: process.env.MR_ROBOT_HOME,
+  permissionMode: 'workspace',
+  reasoningEffort: 'high',
+  routing: { mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true },
+});
+check('native continuations obey the same premium invocation ceiling', budgetedNativeCalls.filter((call) => call.provider === 'premium').length === 1 && budgetedNativeCalls.filter((call) => call.provider === 'free').length === 1, JSON.stringify(budgetedNativeCalls.map((call) => call.provider)));
+check('native fallback recomputes identity, effort and final route', budgetedNativeCalls[1]?.reasoningEffort === 'auto' && budgetedNativeCalls[1]?.prompt.includes('Free Native') && nativeBudgetResult.route?.model === 'free-native-model', `${budgetedNativeCalls[1]?.reasoningEffort} / ${nativeBudgetResult.route?.model}`);
 
 // Cleanup
 await server.stop();

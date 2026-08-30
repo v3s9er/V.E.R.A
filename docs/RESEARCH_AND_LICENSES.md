@@ -35,9 +35,14 @@
 - 외부 파일 연결은 [Tailscale Taildrop의 peer-to-peer 전송 설명](https://tailscale.com/kb/1106/taildrop)을
   참고했지만 Taildrop API에 종속하지 않습니다. Tailscale은 IP transport이고 실제 전송 권한과
   파일 API는 Mr.Robot이 소유합니다.
-- Android 음성은 [Android foreground service/microphone 제한](https://developer.android.com/develop/background-work/services/fgs/service-types)을
-  따라 화면/포그라운드 중심으로 구현했습니다. 불명확한 모델 라이선스가 있는 wake-word
-  가중치는 번들하지 않았습니다.
+- VPN 없는 선택 연결은 [Cloudflare Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)의
+  임시 HTTPS 경로를 사용합니다. 개발·테스트용 임시 주소라는 공급자 경계를 UI에 표시하고,
+  기본 설치·실행·자동 시작은 모두 끈 상태로 둡니다. 파일·상태 전송은 별도의 90초 1회성
+  capability를 사용해 대상 PC에 소스 PC 장기 토큰을 전달하지 않습니다.
+- Android의 [foreground service/microphone 제한](https://developer.android.com/develop/background-work/services/fgs/service-types)과
+  OEM별 백그라운드 정책을 검토한 결과, 모바일 음성 상시 대기는 제거했습니다. 음성 호출은
+  PC의 로컬 인식 플러그인에서만 동작하고 모바일은 텍스트·파일·승인 제어에 집중합니다.
+  불명확한 라이선스의 wake-word 가중치는 번들하지 않았습니다.
 - 캘린더는 로컬/ICS를 완성 경계로 두었습니다. Google 연결은
   [Calendar events.insert](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert)와
   OAuth consent를 따를 adapter 자리만 유지하며 공용 client secret을 내장하지 않습니다.
@@ -56,6 +61,8 @@
 검사합니다. 이는 법률 자문이 아니며 공개 상용 배포 전에는 최종 SBOM/NOTICE와 코드 서명,
 각 공급자 이용약관 검토가 필요합니다.
 
-2026-08-23 감사에서 직접 의존성은 MIT/Apache/BSD/ISC 계열로 확인됐고, 전이 의존성
-`node-forge`가 `(BSD-3-Clause OR GPL-2.0)` 이중 라이선스로 탐지됐습니다. 배포 시
-BSD-3-Clause 선택 조건과 고지를 적용해야 하며 GPL-only 코드로 분류하지 않습니다.
+2026-08-31 최종 감사에서 직접 런타임 의존성은 MIT/Apache/BSD/ISC 계열로 확인됐습니다.
+브랜드 PNG 생성에만 쓰는 개발 의존성 Sharp의 사전 빌드 libvips 패키지는 LGPL-3.0-or-later를
+함께 표시하므로 결정적 NOTICE에 해당 고지를 포함했습니다. Sharp/libvips 바이너리는 Electron
+stage와 APK에는 들어가지 않고 생성된 이미지 자산만 배포됩니다. 공개 상용 배포 전에는 이
+NOTICE와 실제 패키지 내용을 다시 대조해야 합니다.

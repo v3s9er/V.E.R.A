@@ -11,6 +11,7 @@
   },
   "files": ["**/*"],
   "win": {
+    "icon": "build/icon.png",
     "target": ["nsis"],
     "artifactName": "Mr.Robot-Setup-${version}-${arch}.${ext}"
   },

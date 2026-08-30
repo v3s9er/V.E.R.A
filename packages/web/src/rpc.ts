@@ -1,4 +1,4 @@
-import type { RpcMessage, RpcRequest } from '@mr-robot/shared';
+import type { PermissionMode, RpcMessage, RpcRequest } from '@mr-robot/shared';
 
 type Listener = (data: unknown) => void;
 
@@ -16,9 +16,12 @@ export class MrRobotClient {
   private closedByUser = false;
   private connectionGeneration = 0;
   private authToken = '';
+  private cancelConnecting: ((reason: Error) => void) | null = null;
 
   connected = false;
   authed = false;
+  isAdmin = false;
+  permissionCap: PermissionMode = 'read-only';
   onClose: (() => void) | null = null;
   onAuthFail: (() => void) | null = null;
 
@@ -29,42 +32,56 @@ export class MrRobotClient {
     this.authToken = secret;
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancelAttempt: ((reason: Error) => void) | null = null;
       const finish = (err?: Error): void => {
         if (settled) return;
         settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        if (this.cancelConnecting === cancelAttempt) this.cancelConnecting = null;
         if (err) reject(err);
         else resolve();
       };
 
       const ws = new WebSocket(url);
       this.ws = ws;
-      const timer = setTimeout(() => {
+      cancelAttempt = (reason) => {
+        try { ws.close(); } catch { /* best effort */ }
+        finish(reason);
+      };
+      this.cancelConnecting = cancelAttempt;
+      timer = setTimeout(() => {
         ws.close();
         finish(new Error('연결 시간 초과'));
       }, timeoutMs);
 
       ws.onopen = () => {
         if (generation !== this.connectionGeneration) { ws.close(); return; }
-        clearTimeout(timer); // connection is up — cancel the connect timeout
         this.connected = true;
         void this.call('auth', { secret })
           .then((r) => {
-            this.authed = Boolean((r as { ok?: boolean })?.ok);
+            const auth = r as { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode };
+            this.authed = Boolean(auth?.ok);
+            this.isAdmin = auth?.isAdmin === true;
+            this.permissionCap = auth?.permissionCap ?? 'read-only';
             if (this.authed) finish();
             else {
               this.onAuthFail?.();
+              ws.close();
               finish(new Error('인증 실패: 시크릿이 일치하지 않습니다.'));
             }
           })
-          .catch((err: Error) => finish(err));
+          .catch((err: Error) => { ws.close(); finish(err); });
       };
       ws.onmessage = (ev) => { if (generation === this.connectionGeneration) this.onMessage(String(ev.data)); };
-      ws.onerror = () => finish(new Error('연결 오류'));
+      ws.onerror = () => { ws.close(); finish(new Error('연결 오류')); };
       ws.onclose = () => {
         if (generation !== this.connectionGeneration) return;
         clearTimeout(timer);
         this.connected = false;
         this.authed = false;
+        this.isAdmin = false;
+        this.permissionCap = 'read-only';
         this.settlePending(new Error('연결이 끊어졌습니다'));
         this.ws = null;
         if (!this.closedByUser) this.onClose?.();
@@ -99,7 +116,13 @@ export class MrRobotClient {
           reject(e);
         },
       });
-      ws.send(JSON.stringify(req));
+      try {
+        ws.send(JSON.stringify(req));
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -112,12 +135,16 @@ export class MrRobotClient {
     set.add(handler);
     return () => {
       set?.delete(handler);
+      if (set?.size === 0) this.listeners.delete(event);
     };
   }
 
   close(): void {
     this.connectionGeneration++;
     this.closedByUser = true;
+    const cancelConnecting = this.cancelConnecting;
+    this.cancelConnecting = null;
+    cancelConnecting?.(new Error('연결을 취소했습니다'));
     this.settlePending(new Error('연결 종료'));
     try {
       this.ws?.close();
@@ -125,6 +152,17 @@ export class MrRobotClient {
       /* ignore */
     }
     this.ws = null;
+    this.connected = false;
+    this.authed = false;
+    this.isAdmin = false;
+    this.permissionCap = 'read-only';
+  }
+
+  dispose(): void {
+    this.close();
+    this.listeners.clear();
+    this.onClose = null;
+    this.onAuthFail = null;
   }
 
   private onMessage(raw: string): void {
@@ -155,33 +193,85 @@ export class MrRobotClient {
   }
 }
 
+function endpointFallback(value: string): 'http' | 'https' {
+  try {
+    const host = new URL(`http://${value}`).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const octets = host.split('.').map(Number);
+    const privateIpv4 = octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) && (
+      octets[0] === 10 || octets[0] === 127 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127)
+    );
+    if (host === 'localhost' || host.endsWith('.local') || !host.includes('.') || host === '::1' || privateIpv4) return 'http';
+  } catch { /* URL constructor below reports the actual error */ }
+  return typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https' : 'http';
+}
+
 export function wsUrlFor(hostPort: string): string {
-  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const target = hostPort || window.location.host;
-  return `${scheme}://${target}/ws`;
+  const parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(target) ? target : `${endpointFallback(target)}://${target}`);
+  const scheme = parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? 'wss' : 'ws';
+  return `${scheme}://${parsed.host}/ws`;
 }
 
 export function httpUrlFor(hostPort: string): string {
-  const scheme = window.location.protocol === 'https:' ? 'https' : 'http';
   const target = hostPort || window.location.host;
-  return `${scheme}://${target}`;
+  const parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(target) ? target : `${endpointFallback(target)}://${target}`);
+  const scheme = parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? 'https' : 'http';
+  return `${scheme}://${parsed.host}`;
 }
 
 export interface PairingPayload {
-  app: string;
+  app: 'mr-robot';
   host: string;
   hosts?: string[];
+  protocol?: 'http' | 'https';
   port: number;
-  version?: number;
-  pin?: string;
-  secret?: string;
+  version: 3;
+  pin: string;
+}
+
+function isTailnetHost(hostname: string): boolean {
+  const octets = hostname.replace(/^\[|\]$/g, '').split('.').map(Number);
+  return octets.length === 4
+    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+    && octets[0] === 100
+    && octets[1] >= 64
+    && octets[1] <= 127;
+}
+
+function assertSecurePairingHost(value: string, port: number, protocol: 'http' | 'https'): void {
+  const input = value.trim();
+  const parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(input) ? input : `${protocol}://${input}:${port}`);
+  if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) throw new Error('unsupported pairing protocol');
+  if (parsed.username || parsed.password) throw new Error('pairing URLs cannot contain credentials');
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'wss:' && !isTailnetHost(parsed.hostname)) {
+    throw new Error('pairing requires HTTPS or a Tailscale address');
+  }
 }
 
 export function parsePairingPayload(raw: string): PairingPayload | null {
   try {
-    const obj = JSON.parse(raw) as PairingPayload;
-    if (obj?.app === 'mr-robot' && obj.host && obj.port && (obj.pin || obj.secret)) return obj;
-    return null;
+    const obj = JSON.parse(raw) as Partial<PairingPayload>;
+    if (obj?.app !== 'mr-robot' || obj.version !== 3) return null;
+    if (typeof obj.host !== 'string' || !obj.host.trim() || obj.host.length > 2_048) return null;
+    if (!Number.isInteger(obj.port) || Number(obj.port) < 1 || Number(obj.port) > 65_535) return null;
+    if (typeof obj.pin !== 'string' || !/^\d{6}$/.test(obj.pin)) return null;
+    if (obj.protocol !== undefined && obj.protocol !== 'http' && obj.protocol !== 'https') return null;
+    if (obj.hosts !== undefined && (!Array.isArray(obj.hosts)
+      || obj.hosts.length > 8
+      || obj.hosts.some((host) => typeof host !== 'string' || !host.trim() || host.length > 2_048))) return null;
+    const payload: PairingPayload = {
+      app: 'mr-robot',
+      version: 3,
+      host: obj.host.trim(),
+      hosts: obj.hosts?.map((host) => host.trim()),
+      protocol: obj.protocol,
+      port: Number(obj.port),
+      pin: obj.pin,
+    };
+    const protocol = payload.protocol ?? 'http';
+    for (const host of [payload.host, ...(payload.hosts ?? [])]) assertSecurePairingHost(host, payload.port, protocol);
+    return payload;
   } catch {
     return null;
   }

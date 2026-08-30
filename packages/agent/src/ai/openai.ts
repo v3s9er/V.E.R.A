@@ -1,10 +1,32 @@
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
-import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, Turn } from './provider.js';
+import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, ProviderUsage, Turn } from './provider.js';
 import { toOpenAiTools } from './tools.js';
 import { readErrorBody, readSse } from './sse.js';
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '');
+}
+
+function usageFromOpenAi(value: any, current: ProviderUsage = { promptTokens: 0, completionTokens: 0 }): ProviderUsage {
+  const input = value?.prompt_tokens ?? value?.input_tokens ?? current.promptTokens;
+  const output = value?.completion_tokens ?? value?.output_tokens ?? current.completionTokens;
+  const cached = value?.prompt_tokens_details?.cached_tokens
+    ?? value?.input_tokens_details?.cached_tokens
+    ?? current.cachedPromptTokens;
+  const reasoning = value?.completion_tokens_details?.reasoning_tokens
+    ?? value?.output_tokens_details?.reasoning_tokens
+    ?? current.reasoningTokens;
+  return {
+    promptTokens: typeof input === 'number' ? input : 0,
+    completionTokens: typeof output === 'number' ? output : 0,
+    ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
+    ...(typeof reasoning === 'number' ? { reasoningTokens: reasoning } : {}),
+  };
+}
+
+function cacheKey(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 64) || undefined;
 }
 
 function toOpenAiMessages(turns: Turn[], system?: string): Array<Record<string, unknown>> {
@@ -103,6 +125,7 @@ export class OpenAICompatibleProvider implements AiProvider {
       model: this.model,
       messages: toOpenAiMessages(req.turns, req.system),
       stream: true,
+      stream_options: { include_usage: true },
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
       ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { reasoning_effort: req.reasoningEffort } : {}),
@@ -124,10 +147,14 @@ export class OpenAICompatibleProvider implements AiProvider {
 
     let text = '';
     const byIndex = new Map<number, ProviderToolCall>();
-    let usage = { promptTokens: 0, completionTokens: 0 };
+    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
+    let sawDone = false;
 
     for await (const { data } of readSse(res)) {
-      if (data === '[DONE]') continue;
+      if (data === '[DONE]') {
+        sawDone = true;
+        break;
+      }
       let json: any;
       try {
         json = JSON.parse(data);
@@ -155,11 +182,12 @@ export class OpenAICompatibleProvider implements AiProvider {
         }
       }
       if (json.usage) {
-        usage = {
-          promptTokens: json.usage.prompt_tokens ?? usage.promptTokens,
-          completionTokens: json.usage.completion_tokens ?? usage.completionTokens,
-        };
+        usage = usageFromOpenAi(json.usage, usage);
       }
+    }
+
+    if (!sawDone) {
+      throw new Error(`[${this.label}] Chat Completions stream ended before [DONE]`);
     }
 
     const toolCalls: ProviderToolCall[] = [];
@@ -176,9 +204,13 @@ export class OpenAICompatibleProvider implements AiProvider {
     const body: Record<string, unknown> = {
       model: this.model,
       input: toResponsesInput(req.turns),
+      stream: true,
+      store: false,
+      parallel_tool_calls: true,
       ...(req.system ? { instructions: req.system } : {}),
       ...(req.maxTokens !== undefined ? { max_output_tokens: req.maxTokens } : {}),
       ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { reasoning: { effort: req.reasoningEffort } } : {}),
+      ...(cacheKey(req.promptCacheKey) ? { prompt_cache_key: cacheKey(req.promptCacheKey) } : {}),
     };
     if (req.tools?.length) {
       body.tools = req.tools.map((tool) => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters }));
@@ -187,23 +219,124 @@ export class OpenAICompatibleProvider implements AiProvider {
     const res = await fetch(this.responsesEndpoint(), {
       method: 'POST', headers: this.headers(), body: JSON.stringify(body), signal: req.signal,
     });
-    if (!res.ok) throw new Error(`[${this.label}] HTTP ${res.status}: ${await readErrorBody(res)}`);
-    const json = await res.json() as any;
-    const toolCalls: ProviderToolCall[] = [];
-    let text = typeof json.output_text === 'string' ? json.output_text : '';
-    for (const item of json.output ?? []) {
-      if (item.type === 'function_call') toolCalls.push({ id: item.call_id ?? item.id ?? '', name: item.name ?? '', args: item.arguments ?? '{}' });
-      if (!text && item.type === 'message') {
-        for (const content of item.content ?? []) if ((content.type === 'output_text' || content.type === 'text') && typeof content.text === 'string') text += content.text;
-      }
-    }
-    if (text) req.onEvent?.({ type: 'text', text });
-    for (const call of toolCalls) req.onEvent?.({ type: 'tool', call });
-    return {
-      text,
-      toolCalls,
-      usage: { promptTokens: json.usage?.input_tokens ?? 0, completionTokens: json.usage?.output_tokens ?? 0 },
+    if (!res.ok || !res.body) throw new Error(`[${this.label}] HTTP ${res.status}: ${await readErrorBody(res)}`);
+
+    let text = '';
+    let refusalText = '';
+    let sawRefusal = false;
+    let completed = false;
+    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
+    const calls = new Map<number, ProviderToolCall>();
+    const emitted = new Set<string>();
+    const emitCall = (call: ProviderToolCall): void => {
+      const key = call.id || `${call.name}:${call.args}`;
+      if (emitted.has(key)) return;
+      emitted.add(key);
+      req.onEvent?.({ type: 'tool', call: { ...call } });
     };
+    const setFinalRefusal = (value: unknown): void => {
+      sawRefusal = true;
+      if (typeof value !== 'string' || value.length === 0) return;
+      if (value.startsWith(refusalText)) {
+        const suffix = value.slice(refusalText.length);
+        if (suffix) req.onEvent?.({ type: 'text', text: suffix });
+      } else if (!refusalText) {
+        req.onEvent?.({ type: 'text', text: value });
+      }
+      refusalText = value;
+    };
+
+    for await (const { data } of readSse(res)) {
+      if (data === '[DONE]') continue;
+      let event: any;
+      try {
+        event = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (event.type === 'response.failed') {
+        const detail = event.response?.error?.message
+          ?? event.response?.error?.code
+          ?? event.error?.message
+          ?? event.message
+          ?? 'unknown response failure';
+        throw new Error(`[${this.label}] Responses stream failed: ${detail}`);
+      }
+      if (event.type === 'response.incomplete') {
+        const reason = event.response?.incomplete_details?.reason
+          ?? event.response?.status
+          ?? 'unknown reason';
+        throw new Error(`[${this.label}] Responses stream incomplete: ${reason}`);
+      }
+      if (event.type === 'error' || event.error) {
+        const detail = event.error?.message ?? event.message ?? JSON.stringify(event.error ?? event);
+        throw new Error(`[${this.label}] ${detail}`);
+      }
+      if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+        text += event.delta;
+        req.onEvent?.({ type: 'text', text: event.delta });
+      }
+      if (event.type === 'response.refusal.delta') {
+        sawRefusal = true;
+        if (typeof event.delta === 'string' && event.delta.length > 0) {
+          refusalText += event.delta;
+          req.onEvent?.({ type: 'text', text: event.delta });
+        }
+      }
+      if (event.type === 'response.refusal.done') setFinalRefusal(event.refusal);
+
+      const index = Number.isInteger(event.output_index) ? Number(event.output_index) : 0;
+      const item = event.item;
+      if ((event.type === 'response.output_item.added' || event.type === 'response.output_item.done') && item?.type === 'function_call') {
+        const call = calls.get(index) ?? { id: '', name: '', args: '' };
+        if (item.call_id || item.id) call.id = String(item.call_id ?? item.id);
+        if (item.name) call.name = String(item.name);
+        if (typeof item.arguments === 'string') call.args = item.arguments;
+        calls.set(index, call);
+      }
+      if (event.type === 'response.function_call_arguments.delta' && typeof event.delta === 'string') {
+        const call = calls.get(index) ?? { id: String(event.call_id ?? event.item_id ?? ''), name: '', args: '' };
+        call.args += event.delta;
+        calls.set(index, call);
+      }
+      if (event.type === 'response.function_call_arguments.done') {
+        const call = calls.get(index) ?? { id: String(event.call_id ?? event.item_id ?? ''), name: '', args: '' };
+        if (typeof event.name === 'string') call.name = event.name;
+        if (typeof event.arguments === 'string') call.args = event.arguments;
+        calls.set(index, call);
+      }
+      if (event.type === 'response.completed') {
+        if (event.response?.status && event.response.status !== 'completed') {
+          throw new Error(`[${this.label}] Responses stream ended with unexpected status: ${event.response.status}`);
+        }
+        completed = true;
+        usage = usageFromOpenAi(event.response?.usage, usage);
+        if (!text) {
+          for (const output of event.response?.output ?? []) {
+            if (output.type !== 'message') continue;
+            for (const content of output.content ?? []) {
+              if ((content.type === 'output_text' || content.type === 'text') && typeof content.text === 'string') text += content.text;
+              if (content.type === 'refusal') setFinalRefusal(content.refusal);
+            }
+          }
+          if (text) req.onEvent?.({ type: 'text', text });
+        }
+      }
+      if (event.usage) usage = usageFromOpenAi(event.usage, usage);
+      if (completed) break;
+    }
+
+    if (!completed) {
+      throw new Error(`[${this.label}] Responses stream ended before response.completed`);
+    }
+    if (!text && sawRefusal) {
+      if (!refusalText) throw new Error(`[${this.label}] Model refused the request without an explanation`);
+      text = refusalText;
+    }
+
+    const toolCalls = [...calls.values()].filter((call) => call.name || call.args);
+    for (const call of toolCalls) emitCall(call);
+    return { text, toolCalls, usage };
   }
 
   async ping(): Promise<ProviderHealth> {

@@ -6,7 +6,7 @@ import type { Computer } from '../computer/index.js';
 import type { ProviderRegistry } from '../ai/registry.js';
 import type { ConfigStore } from '../config.js';
 import type { NeutralTool } from '../ai/provider.js';
-import { PluginCommandRegistry } from './commands.js';
+import { PluginCommandRegistry, type PluginExecutionContext } from './commands.js';
 import { PluginContextImpl } from './context.js';
 import { extractPlugin, loadPluginModule, unloadPluginModule, withTimeout, type MrRobotPlugin, type LoadedModule } from './loader.js';
 import { PluginStorage } from './storage.js';
@@ -186,12 +186,15 @@ export class PluginManager {
   }
 
   /** Invoke a plugin-registered command (RPC entry point). */
-  async call(name: string, params: unknown): Promise<unknown> {
+  async call(name: string, params: unknown, execution?: PluginExecutionContext): Promise<unknown> {
     const cmd = this.commands.get(name);
     if (!cmd) throw new Error(`unknown plugin command: ${name}`);
     const plugin = this.plugins.get(cmd.pluginId);
     const isControl = /(?:\.status|\.config\.(?:get|set)|\.servers\.(?:list|add|remove))$/.test(name);
     if (plugin?.info.enabled === false && !isControl) throw new Error(`${plugin.info.name} 플러그인이 꺼져 있습니다.`);
-    return cmd.handler(params);
+    execution?.signal?.throwIfAborted();
+    const result = await cmd.handler(params, execution);
+    execution?.signal?.throwIfAborted();
+    return result;
   }
 }

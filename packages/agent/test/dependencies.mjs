@@ -2,7 +2,7 @@ import { DependencyManager } from '../dist/dependencies.js';
 
 const manager = new DependencyManager();
 const status = await manager.status();
-const expected = ['node', 'git', 'speech-ko', 'codex', 'claude', 'orca', 'ollama', 'tailscale', 'docker'];
+const expected = ['node', 'git', 'speech-ko', 'codex', 'claude', 'orca', 'ollama', 'cloudflared', 'tailscale', 'docker'];
 
 if (status.map((item) => item.id).join(',') !== expected.join(',')) {
   throw new Error(`unexpected dependency inventory: ${status.map((item) => item.id).join(',')}`);

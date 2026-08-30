@@ -33,11 +33,13 @@ async function main(): Promise<void> {
   const webDir = args.webDir ?? (existsSync(defaultWeb) ? defaultWeb : undefined);
 
   const { host, port } = await server.start({ port: args.port, host: args.host, webDir });
+  const pairing = server.pairingInfo(false, true);
 
   console.log(`Mr.Robot agent v${VERSION}`);
   console.log(`  web UI : http://127.0.0.1:${port}`);
-  console.log(`  pairing: PIN ${server.config.pin}  ·  LAN http://${server.lanAddress()}:${port}`);
-  console.log(`  clients: scan the QR in the web UI, or enter the PIN from your phone.`);
+  console.log(`  pairing: one-use PIN ${pairing.pin ?? '------'} (expires in 5 minutes)`);
+  if (pairing.host !== '127.0.0.1') console.log(`  secure route: http://${pairing.host}:${port} (Tailscale)`);
+  console.log('  mobile : start Cloudflare Quick Link in the plugin screen, or enable the optional Tailscale route.');
 
   let stopping = false;
   const shutdown = async (): Promise<void> => {

@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",
@@ -8,19 +8,21 @@
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "node scripts/patch-expo-windows-pch.mjs",
+    "postinstall": "node scripts/patch-expo-windows-pch.mjs && node scripts/generate-brand-assets.mjs",
+    "assets:generate": "node scripts/generate-brand-assets.mjs",
     "build:shared": "npm run build -w @mr-robot/shared",
     "build:agent": "npm run build -w @mr-robot/agent",
     "build:web": "npm run build -w @mr-robot/web",
-    "build": "npm run build:shared && npm run build:agent && npm run build:web",
+    "build": "npm run assets:generate && npm run build:shared && npm run build:agent && npm run build:web",
     "typecheck": "npm run typecheck -w @mr-robot/shared && npm run typecheck -w @mr-robot/agent && npm run typecheck -w @mr-robot/web && npm run typecheck --prefix apps/mobile",
     "start:agent": "npm run start -w @mr-robot/agent",
     "dev:agent": "npm run build:shared && npm run dev -w @mr-robot/agent",
     "dev:web": "npm run dev -w @mr-robot/web",
     "dev:desktop": "npm run dev -w @mr-robot/desktop",
+    "notices": "node scripts/third-party-notices.mjs",
     "stage:desktop": "npm run build && node scripts/stage-desktop.mjs",
     "build:installer": "npm run stage:desktop && electron-builder --projectDir packages/desktop --config electron-builder.json --win nsis --x64 --publish never",
-    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs",
+    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && tsx packages/agent/test/qr-security.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs",
     "test:leak": "node --expose-gc packages/agent/test/leak.mjs"
   },
   "devDependencies": {
@@ -29,6 +31,7 @@
     "@types/ws": "^8.18.1",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
+    "sharp": "^0.35.4",
     "tsx": "^4.19.2",
     "typescript": "^7.0.2"
   },

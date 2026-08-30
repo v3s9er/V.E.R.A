@@ -3,7 +3,7 @@ import type { ChatUsage, ModelRole, PermissionMode, ReasoningEffort, RoutingNode
 import type { ProviderRegistry } from './registry.js';
 import { ToolExecutor, type ConfirmFn } from './executor.js';
 import { neutralTool } from './tools.js';
-import { parseToolArgs, type NeutralTool, type Turn } from './provider.js';
+import { parseToolArgs, type NeutralTool, type ProviderUsage, type Turn } from './provider.js';
 import type { ModelRouter } from './router.js';
 import type { ContextBroker } from '../context-broker.js';
 
@@ -25,6 +25,14 @@ const NATIVE_AGENT_PROMPT = `Operate as Mr.Robot's native coding agent. Work aut
 - Implement the request, run proportionate tests/builds, inspect failures, and iterate until verified.
 - Do not stop at a plan or tutorial when you can perform the work.
 - Do not claim success without evidence. In the final response lead with the outcome and mention only material checks or blockers.`;
+
+function addUsage(total: ChatUsage, next: ProviderUsage): void {
+  total.promptTokens += next.promptTokens;
+  total.completionTokens += next.completionTokens;
+  total.cachedPromptTokens = (total.cachedPromptTokens ?? 0) + (next.cachedPromptTokens ?? 0);
+  total.cacheWritePromptTokens = (total.cacheWritePromptTokens ?? 0) + (next.cacheWritePromptTokens ?? 0);
+  total.reasoningTokens = (total.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0);
+}
 
 export interface LoopCallbacks {
   onText?(delta: string): void;
@@ -54,19 +62,41 @@ export interface RunOptions {
   /** null disables routing; a value applies a conversation-specific scenario. */
   routing?: RoutingPresetSettings | null;
   workspacePath?: string;
+  /** Stable conversation-scoped provider cache namespace. */
+  cacheKey?: string;
 }
 
 const MAX_STEPS = 16;
 const MAX_SCENARIO_NODES = 8;
+const MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS = 2;
+
+function canonicalToolValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalToolValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalToolValue(item)]),
+    );
+  }
+  return value;
+}
+
+function toolSignature(name: string, input: unknown): string {
+  return `${name}:${JSON.stringify(canonicalToolValue(input))}`;
+}
 
 function orderedNodes(routing: RoutingPresetSettings): RoutingNode[] {
   const nodes = [...(routing.graph?.nodes ?? [])].filter((node) => node.kind === 'model');
+  if (nodes.length > MAX_SCENARIO_NODES) throw new Error(`모델 시나리오는 최대 ${MAX_SCENARIO_NODES}개 노드까지 실행할 수 있습니다.`);
   if (nodes.length < 2) return nodes;
   const ids = new Set(nodes.map((node) => node.id));
+  if (ids.size !== nodes.length) throw new Error('모델 시나리오에 중복된 노드 ID가 있습니다.');
   const incoming = new Map(nodes.map((node) => [node.id, 0]));
   const outgoing = new Map(nodes.map((node) => [node.id, [] as string[]]));
   for (const edge of routing.graph?.edges ?? []) {
-    if (!ids.has(edge.from) || !ids.has(edge.to)) continue;
+    if (!ids.has(edge.from) || !ids.has(edge.to)) throw new Error(`연결선 ${edge.id}이 존재하지 않는 노드를 가리킵니다.`);
+    if (edge.from === edge.to) throw new Error(`연결선 ${edge.id}은 같은 노드를 서로 연결할 수 없습니다.`);
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
     outgoing.get(edge.from)?.push(edge.to);
   }
@@ -85,7 +115,10 @@ function orderedNodes(routing: RoutingPresetSettings): RoutingNode[] {
       }
     }
   }
-  return (result.length === nodes.length ? result : nodes.sort(byPosition)).slice(0, MAX_SCENARIO_NODES);
+  if (result.length !== nodes.length && routing.executionMode === 'pipeline') {
+    throw new Error('순차 시나리오 연결선에 순환이 있어 실행 순서를 정할 수 없습니다.');
+  }
+  return result.length === nodes.length ? result : nodes.sort(byPosition);
 }
 
 function toolsFor(text: string): typeof COMPUTER_TOOLS {
@@ -117,12 +150,15 @@ export class AgentLoop {
     extraTools: NeutralTool[] = [],
     options: RunOptions = {},
   ): Promise<LoopResult> {
+    cb.signal?.throwIfAborted();
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
     const tools = [...toolsFor(userMessage).map(neutralTool), ...extraTools];
     const repeatedCalls = new Map<string, number>();
+    let previousToolRound = '';
+    let consecutiveNoProgressRounds = 0;
 
     if (!provider) {
       return {
@@ -140,45 +176,100 @@ export class AgentLoop {
     const scenario = options.routing;
     const executionMode = scenario?.executionMode ?? 'single';
     const nodes = scenario ? orderedNodes(scenario) : [];
+    const premiumLimit = scenario ? Math.max(0, Math.floor(scenario.maxPremiumCalls)) : Number.POSITIVE_INFINITY;
+    let premiumCalls = 0;
+    /**
+     * Reserve one premium invocation. This must only be called immediately
+     * before chat()/runAgent(): choosing a provider for a stage is not usage,
+     * while every tool round and native continuation is a separate call.
+     */
+    const providerForCall = (
+      requested: ReturnType<ProviderRegistry['default']>,
+      role: ModelRole,
+      requireTools = false,
+      requireNative = false,
+    ) => {
+      if (!requested || (requireNative && !requested.runAgent)) return undefined;
+      if (!Number.isFinite(premiumLimit) || this.registry.costTier(requested.id) === 0) return requested;
+      if (premiumCalls < premiumLimit) {
+        premiumCalls++;
+        return requested;
+      }
+      let fallback = this.registry.freeProvider(role, scenario?.roles[role] ?? [], requireTools);
+      // freeProvider filters tool capability, but native execution is optional;
+      // skip a non-native free API model when another free CLI is available.
+      if (requireNative && !fallback?.runAgent) {
+        fallback = this.registry.list()
+          .filter((candidate) => candidate.costTier === 0)
+          .map((candidate) => this.registry.get(candidate.id))
+          .find((candidate) => Boolean(candidate?.runAgent));
+      }
+      if (!fallback || (requireNative && !fallback.runAgent)) return undefined;
+      cb.onStatus?.(`고비용 호출 상한 ${premiumLimit}회 도달 · 무료 모델 ${fallback.label}로 전환`);
+      return fallback;
+    };
+    const effortFor = (actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): ReasoningEffort =>
+      actualProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto';
+    const identifiedSystem = (base: string, actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): string =>
+      `${base}\n\nYou are currently running through the provider "${actualProvider.label}" with model "${actualProvider.model}". When asked what model you are, answer with this exactly.`;
     const providerForNode = (node: RoutingNode) => {
       const role = node.role ?? 'general';
       return this.registry.resolve(role, node.providerId, node.providerModel, scenario?.roles[role]);
     };
     const stageCall = async (node: RoutingNode, system: string, content: string, status?: string) => {
-      const stageProvider = providerForNode(node);
+      cb.signal?.throwIfAborted();
+      const stageProvider = providerForCall(providerForNode(node), node.role ?? 'general');
       if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 의견을 내지 못했습니다.' };
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
       try {
         const response = await stageProvider.chat({
-          system,
+          system: identifiedSystem(system, stageProvider),
           turns: [{ role: 'user', content }],
-          reasoningEffort: stageProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto',
+          reasoningEffort: effortFor(stageProvider),
           signal: cb.signal,
+          promptCacheKey: options.cacheKey ? `${options.cacheKey}:stage:${node.id}` : undefined,
         });
-        usage.promptTokens += response.usage.promptTokens;
-        usage.completionTokens += response.usage.completionTokens;
+        addUsage(usage, response.usage);
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: response.text };
       } catch (error) {
+        if (cb.signal?.aborted) throw cb.signal.reason ?? error;
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: `단계 실패: ${error instanceof Error ? error.message : String(error)}` };
       }
     };
-    const stageAgentCall = async (node: RoutingNode, system: string, content: string, allowedTools: NeutralTool[], status: string, permissionMode = options.permissionMode) => {
-      const stageProvider = providerForNode(node);
-      if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 풀이에 참여하지 못했습니다.' };
+    const stageAgentCall = async (
+      node: RoutingNode,
+      system: string,
+      content: string,
+      allowedTools: NeutralTool[],
+      status: string,
+      permissionMode = options.permissionMode,
+      approvedPluginTools?: ReadonlySet<string>,
+    ) => {
+      const requestedProvider = providerForNode(node);
+      if (!requestedProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 풀이에 참여하지 못했습니다.' };
       cb.onStatus?.(status);
       const localTurns: Turn[] = [{ role: 'user', content }];
       let collected = '';
+      const usedModels = new Set<string>();
       try {
         for (let step = 0; step < 4; step++) {
+          cb.signal?.throwIfAborted();
+          const stageProvider = providerForCall(requestedProvider, node.role ?? 'general', allowedTools.length > 0);
+          if (!stageProvider) {
+            const exhausted = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료${allowedTools.length > 0 ? ' 도구' : ''} 모델이 없습니다.`;
+            collected = [collected, exhausted].filter(Boolean).join('\n');
+            break;
+          }
+          usedModels.add(`${stageProvider.label} / ${stageProvider.model}`);
           const response = await stageProvider.chat({
-            system,
+            system: identifiedSystem(system, stageProvider),
             turns: localTurns,
             tools: stageProvider.supportsTools ? allowedTools : undefined,
-            reasoningEffort: stageProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto',
+            reasoningEffort: effortFor(stageProvider),
             signal: cb.signal,
+            promptCacheKey: options.cacheKey ? `${options.cacheKey}:agent:${node.id}` : undefined,
           });
-          usage.promptTokens += response.usage.promptTokens;
-          usage.completionTokens += response.usage.completionTokens;
+          addUsage(usage, response.usage);
           if (response.text) collected = [collected, response.text].filter(Boolean).join('\n');
           if (response.toolCalls.length === 0) break;
           localTurns.push({ role: 'assistant', content: response.text, toolCalls: response.toolCalls });
@@ -189,9 +280,13 @@ export class AgentLoop {
             let toolContent: string;
             try {
               if (!allowedTools.some((tool) => tool.name === call.name)) toolContent = JSON.stringify({ error: `${call.name} is not available inside this solver sandbox` });
-              else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode);
+              else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, cb.signal, {
+                workspaceRoot: options.workspacePath,
+                approvedPluginTools,
+              });
               cb.onTool?.({ name: call.name, input, status: 'done' });
             } catch (error) {
+              if (cb.signal?.aborted) throw cb.signal.reason ?? error;
               toolContent = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
               cb.onTool?.({ name: call.name, input, status: 'error', detail: toolContent });
             }
@@ -199,9 +294,10 @@ export class AgentLoop {
           }
           localTurns.push({ role: 'tool', content: '', toolResults });
         }
-        return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: collected || '도구 실행 결과만 생성했고 요약을 남기지 않았습니다.' };
+        return { label: node.label, model: [...usedModels].join(' → ') || '연결 없음', text: collected || '도구 실행 결과만 생성했고 요약을 남기지 않았습니다.' };
       } catch (error) {
-        return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: `스웜 작업자 실패: ${error instanceof Error ? error.message : String(error)}` };
+        if (cb.signal?.aborted) throw cb.signal.reason ?? error;
+        return { label: node.label, model: [...usedModels].join(' → ') || '연결 없음', text: `스웜 작업자 실패: ${error instanceof Error ? error.message : String(error)}` };
       }
     };
 
@@ -231,7 +327,6 @@ export class AgentLoop {
         }
         nativePermission = 'workspace';
       }
-      cb.onStatus?.(`네이티브 에이전트 실행 · ${provider.label} · ${options.workspacePath}`);
       const recentConversation = history
         .filter((turn) => turn.role === 'user' || turn.role === 'assistant')
         .slice(-12)
@@ -244,17 +339,32 @@ export class AgentLoop {
         recentConversation && `Recent conversation context:\n${recentConversation}`,
         `Current user request:\n${userMessage}`,
       ].filter(Boolean).join('\n\n');
-      const runNative = (prompt: string) => nativeProvider.runAgent!({
-          prompt,
+      const runNative = async (prompt: string) => {
+        const actualProvider = providerForCall(nativeProvider, routeRole, false, true);
+        if (!actualProvider?.runAgent) return undefined;
+        const actualEffort = effortFor(actualProvider);
+        cb.onStatus?.(`네이티브 에이전트 실행 · ${actualProvider.label} · ${options.workspacePath}`);
+        const result = await actualProvider.runAgent({
+          prompt: identifiedSystem(prompt, actualProvider),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
-          reasoningEffort: routeEffort,
+          reasoningEffort: actualEffort,
           signal: cb.signal,
           onStatus: cb.onStatus,
         });
-      let native = await runNative(originalPrompt);
-      usage.promptTokens += native.usage.promptTokens;
-      usage.completionTokens += native.usage.completionTokens;
+        return { result, provider: actualProvider, effort: actualEffort };
+      };
+      let nativeCall = await runNative(originalPrompt);
+      if (!nativeCall) {
+        const text = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료 네이티브 에이전트가 없습니다.`;
+        turns.push({ role: 'assistant', content: text });
+        cb.onText?.(text);
+        return { text, turns, usage, route: { providerId: provider.id, providerLabel: provider.label, model: provider.model, role: routeRole, effort: routeEffort, reason: `${routeReason} · 네이티브 호출 예산 소진` } };
+      }
+      let native = nativeCall.result;
+      let actualNativeProvider = nativeCall.provider;
+      let actualNativeEffort = nativeCall.effort;
+      addUsage(usage, native.usage);
       // Native CLIs cannot accept stdin steering reliably in print/exec mode.
       // Consume queued instructions immediately after each run and start a
       // compact continuation with the verified result, bounded to three passes.
@@ -262,14 +372,20 @@ export class AgentLoop {
         const steering = cb.takeSteering?.() ?? [];
         if (steering.length === 0) break;
         cb.onStatus?.(`추가 명령 ${steering.length}개 반영 · 네이티브 후속 실행 ${steeringRound}/3`);
-        native = await runNative([
+        nativeCall = await runNative([
           NATIVE_AGENT_PROMPT,
           `Original request:\n${userMessage}`,
           `Previous native-agent result:\n${native.text.slice(-24_000)}`,
           `The user added these instructions while the task was running. Apply them now without discarding verified work:\n${steering.map((item) => `- ${item}`).join('\n')}`,
         ].join('\n\n'));
-        usage.promptTokens += native.usage.promptTokens;
-        usage.completionTokens += native.usage.completionTokens;
+        if (!nativeCall) {
+          cb.onStatus?.(`추가 명령 중단 · 고비용 호출 상한 ${premiumLimit}회 및 무료 네이티브 대체 모델 없음`);
+          break;
+        }
+        native = nativeCall.result;
+        actualNativeProvider = nativeCall.provider;
+        actualNativeEffort = nativeCall.effort;
+        addUsage(usage, native.usage);
       }
       turns.push({ role: 'assistant', content: native.text });
       cb.onText?.(native.text);
@@ -277,7 +393,7 @@ export class AgentLoop {
         text: native.text,
         turns,
         usage,
-        route: { providerId: provider.id, providerLabel: provider.label, model: provider.model, role: routeRole, effort: routeEffort, reason: `${routeReason} · 네이티브 CLI 에이전트` },
+        route: { providerId: actualNativeProvider.id, providerLabel: actualNativeProvider.label, model: actualNativeProvider.model, role: routeRole, effort: actualNativeEffort, reason: `${routeReason} · 네이티브 CLI 에이전트${actualNativeProvider.id !== nativeProvider.id ? ' · 고비용 상한 후 무료 모델 전환' : ''}` },
       };
     }
 
@@ -305,7 +421,7 @@ export class AgentLoop {
       const maxIterations = Math.max(1, Math.min(12, scenario?.maxIterations ?? 6));
       const sandboxTools = tools.filter((tool) => tool.name === 'ctf.inspect' || tool.name.startsWith('docker.ctf.'));
       let solverTools = sandboxTools;
-      let swarmPermission = options.permissionMode;
+      let approvedSandboxTools: ReadonlySet<string> | undefined;
       const needsSandboxApproval = sandboxTools.some((tool) => tool.name.startsWith('docker.ctf.'))
         && options.permissionMode !== 'full' && options.permissionMode !== 'read-only';
       if (needsSandboxApproval) {
@@ -314,7 +430,7 @@ export class AgentLoop {
           input: { workers: solvers.map((node) => node.label), tools: sandboxTools.map((tool) => tool.name), workspace: options.workspacePath },
           summary: `${solvers.length}개 CTF 솔버가 선택한 작업 폴더를 Docker 격리 환경에 마운트하고 CTF 분석 명령을 실행하도록 이번 작업 동안 허용`,
         }) : false;
-        if (approved) swarmPermission = 'full';
+        if (approved) approvedSandboxTools = new Set(sandboxTools.filter((tool) => tool.name.startsWith('docker.ctf.')).map((tool) => tool.name));
         else solverTools = sandboxTools.filter((tool) => !tool.name.startsWith('docker.ctf.'));
       }
 
@@ -326,7 +442,8 @@ export class AgentLoop {
           [retainedContext, `Authorized CTF/wargame request:\n${userMessage}`, options.workspacePath && `Selected workspace: ${options.workspacePath}`].filter(Boolean).join('\n\n').slice(-35_000),
           solverTools,
           `CTF 공유 증거 수집 · ${node.label}`,
-          swarmPermission,
+          options.permissionMode,
+          approvedSandboxTools,
         ));
       }
       let sharedBoard = evidence.map((item) => `[Shared evidence · ${item.label} · ${item.model}]\n${item.text}`).join('\n\n');
@@ -350,7 +467,8 @@ export class AgentLoop {
           ].filter(Boolean).join('\n\n').slice(-50_000),
           solverTools,
           `CTF 경쟁 ${iteration}/${maxIterations} · ${node.label}`,
-          swarmPermission,
+          options.permissionMode,
+          approvedSandboxTools,
         )));
         transcript.push(...current.map((item) => ({ iteration, ...item })));
         const currentBoard = current.map((item, index) => `[Iteration ${iteration} · Candidate ${index + 1} · ${item.label} · ${item.model}]\n${item.text}`).join('\n\n');
@@ -362,7 +480,8 @@ export class AgentLoop {
           [retainedContext, `Authorized CTF/wargame request:\n${userMessage}`, sharedBoard].filter(Boolean).join('\n\n').slice(-60_000),
           solverTools,
           `CTF 검증 ${iteration}/${maxIterations} · ${finalNode.label}`,
-          swarmPermission,
+          options.permissionMode,
+          approvedSandboxTools,
         );
         const accepted = /^SOLVED:\s*YES\s*$/im.test(verifierResult.text) && /^FLAG:\s*\S+/im.test(verifierResult.text);
         if (accepted) { solved = true; break; }
@@ -457,32 +576,41 @@ export class AgentLoop {
         ...transcript.map((item) => `[Group ${item.group} · Round ${item.round} · ${item.label} · ${item.model}]\n${item.text}`),
       ].filter(Boolean).join('\n\n').slice(-50_000);
     }
-    if (provider && !provider.supportedReasoning.includes(routeEffort)) routeEffort = 'auto';
-
     let advisor: { providerLabel: string; model: string } | undefined;
     if (!provider.supportsTools && tools.length > 0) {
-      cb.onStatus?.(`advisor:${provider.label}`);
-      const advice = await provider.chat({
-        system: 'Analyze the user request and produce a concise, concrete execution plan for another computer-use agent. Do not claim that any action has already happened.',
-        turns: [{ role: 'user', content: userMessage }],
-        reasoningEffort: routeEffort,
-        signal: cb.signal,
-      });
-      usage.promptTokens += advice.usage.promptTokens;
-      usage.completionTokens += advice.usage.completionTokens;
+      const requestedAdvisor = provider;
+      // This reservation is adjacent to the actual advisor invocation; merely
+      // deciding that an advisor is useful must not spend premium budget.
+      const adviceProvider = providerForCall(requestedAdvisor, routeRole);
+      let advice: Awaited<ReturnType<typeof requestedAdvisor.chat>> | undefined;
+      if (adviceProvider) {
+        cb.onStatus?.(`advisor:${adviceProvider.label}`);
+        advice = await adviceProvider.chat({
+          system: identifiedSystem('Analyze the user request and produce a concise, concrete execution plan for another computer-use agent. Do not claim that any action has already happened.', adviceProvider),
+          turns: [{ role: 'user', content: userMessage }],
+          reasoningEffort: effortFor(adviceProvider),
+          signal: cb.signal,
+          promptCacheKey: options.cacheKey ? `${options.cacheKey}:advisor` : undefined,
+        });
+        addUsage(usage, advice.usage);
+      }
       const executorProvider = this.registry.toolCapable(provider.id);
       if (!executorProvider) {
-        turns.push({ role: 'assistant', content: advice.text });
-        return { text: advice.text, turns, usage, route: { providerId: provider.id, providerLabel: provider.label, model: provider.model, role: routeRole, effort: routeEffort, reason: `${routeReason} · 구독 CLI 추론 모듈 (도구 실행 모델 미설정)` } };
+        const text = advice?.text ?? `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료 모델이 없습니다.`;
+        turns.push({ role: 'assistant', content: text });
+        return { text, turns, usage, route: { providerId: provider.id, providerLabel: provider.label, model: provider.model, role: routeRole, effort: routeEffort, reason: `${routeReason} · 구독 CLI 추론 모듈 (도구 실행 모델 미설정)` } };
       }
-      advisor = { providerLabel: provider.label, model: provider.model };
-      retainedContext = [retainedContext, `Expert advisor plan (${provider.label} / ${provider.model}):\n${advice.text}`].filter(Boolean).join('\n\n');
+      if (advice) {
+        advisor = { providerLabel: adviceProvider!.label, model: adviceProvider!.model };
+        retainedContext = [retainedContext, `Expert advisor plan (${adviceProvider!.label} / ${adviceProvider!.model}):\n${advice.text}`].filter(Boolean).join('\n\n');
+      }
       provider = executorProvider;
     }
 
-    // Tell the model exactly what it is, so it never misidentifies itself.
+    // Static context is shared, but provider identity and reasoning capability
+    // are recalculated for every actual call because a later tool round may
+    // cross the premium ceiling and switch to a free model.
     const context = retainedContext ? `\n\nRelevant retained context:\n${retainedContext}` : '';
-    const system = `${SYSTEM_PROMPT}${context}\n\nYou are currently running through the provider "${provider.label}" with model "${provider.model}". When asked what model you are, answer with this exactly.`;
     const route = {
       providerId: provider.id,
       providerLabel: provider.label,
@@ -492,21 +620,45 @@ export class AgentLoop {
       reason: routeReason,
       ...(advisor ? { advisor } : {}),
     };
-    cb.onStatus?.(`model:${route.providerLabel}:${route.role}:${route.effort}`);
+    const requestedMainProvider = provider;
+    let fallbackNoted = false;
+    let reportedModel = '';
 
     for (let step = 0; step < MAX_STEPS; step++) {
-      const res = await provider.chat({
-        system,
+      cb.signal?.throwIfAborted();
+      const actualProvider = providerForCall(requestedMainProvider, routeRole, tools.length > 0);
+      if (!actualProvider) {
+        const text = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료${tools.length > 0 ? ' 도구 실행' : ''} 모델이 없습니다.`;
+        turns.push({ role: 'assistant', content: text });
+        cb.onText?.(text);
+        return { text, turns, usage, route };
+      }
+      const actualEffort = effortFor(actualProvider);
+      route.providerId = actualProvider.id;
+      route.providerLabel = actualProvider.label;
+      route.model = actualProvider.model;
+      route.effort = actualEffort;
+      if (!fallbackNoted && (actualProvider.id !== requestedMainProvider.id || actualProvider.model !== requestedMainProvider.model)) {
+        route.reason = `${route.reason} · 고비용 상한 후 무료 모델 전환`;
+        fallbackNoted = true;
+      }
+      const modelKey = `${route.providerId}:${route.model}:${route.effort}`;
+      if (modelKey !== reportedModel) {
+        cb.onStatus?.(`model:${route.providerLabel}:${route.role}:${route.effort}`);
+        reportedModel = modelKey;
+      }
+      const res = await actualProvider.chat({
+        system: identifiedSystem(`${SYSTEM_PROMPT}${context}`, actualProvider),
         turns,
         tools,
-        reasoningEffort: route.effort,
+        reasoningEffort: actualEffort,
         signal: cb.signal,
+        promptCacheKey: options.cacheKey ? `${options.cacheKey}:main` : undefined,
         onEvent: (e) => {
           if (e.type === 'text') cb.onText?.(e.text);
         },
       });
-      usage.promptTokens += res.usage.promptTokens;
-      usage.completionTokens += res.usage.completionTokens;
+      addUsage(usage, res.usage);
 
       if (res.toolCalls.length === 0) {
         turns.push({ role: 'assistant', content: res.text });
@@ -517,34 +669,60 @@ export class AgentLoop {
       cb.onStatus?.('running tools…');
 
       const toolResults: Array<{ id: string; name: string; content: string }> = [];
-      for (const call of res.toolCalls) {
-        const input = parseToolArgs(call.args);
+      const roundInputs = res.toolCalls.map((call) => parseToolArgs(call.args));
+      const roundSignatures = res.toolCalls.map((call, index) => toolSignature(call.name, roundInputs[index]));
+      const roundFingerprint = roundSignatures.join('\n');
+      let blockedRepeats = 0;
+      for (const [callIndex, call] of res.toolCalls.entries()) {
+        const input = roundInputs[callIndex];
         cb.onTool?.({ name: call.name, input, status: 'start' });
         let content: string;
         try {
-          const signature = `${call.name}:${JSON.stringify(input)}`;
+          const signature = roundSignatures[callIndex];
           const repeats = (repeatedCalls.get(signature) ?? 0) + 1;
           repeatedCalls.set(signature, repeats);
-          content = repeats > 2
-            ? JSON.stringify({ error: 'same tool call repeated; change the approach or finish with the available evidence' })
-            : await this.executor.execute(call.name, input, cb.confirm, options.permissionMode);
+          if (repeats > 2) {
+            blockedRepeats++;
+            content = JSON.stringify({ error: 'same tool call repeated; change the approach or finish with the available evidence' });
+          } else {
+            content = await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, cb.signal, {
+              workspaceRoot: options.workspacePath,
+            });
+          }
           cb.onTool?.({ name: call.name, input, status: 'done' });
         } catch (err) {
+          if (cb.signal?.aborted) throw cb.signal.reason ?? err;
           content = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
           cb.onTool?.({ name: call.name, input, status: 'error', detail: content });
         }
         toolResults.push({ id: call.id, name: call.name, content });
       }
       turns.push({ role: 'tool', content: '', toolResults });
+      const noProgress = blockedRepeats === res.toolCalls.length;
+      consecutiveNoProgressRounds = noProgress && roundFingerprint === previousToolRound
+        ? consecutiveNoProgressRounds + 1
+        : noProgress ? 1 : 0;
+      previousToolRound = roundFingerprint;
       const steering = cb.takeSteering?.() ?? [];
       if (steering.length) {
         turns.push({ role: 'user', content: `The user added these instructions while the task was running. Apply them now without discarding verified work:\n${steering.map((item) => `- ${item}`).join('\n')}` });
         cb.onStatus?.(`추가 명령 ${steering.length}개 반영`);
+        // A human correction is progress even if the immediately preceding
+        // model round repeated an old call. Give the next round a fresh chance.
+        consecutiveNoProgressRounds = 0;
+        previousToolRound = '';
+      } else if (consecutiveNoProgressRounds >= MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS) {
+        const text = '같은 도구 호출이 결과 변화 없이 반복되어 작업을 중단했습니다. 현재 증거를 바탕으로 다른 접근이 필요합니다.';
+        turns.push({ role: 'assistant', content: text });
+        cb.onText?.(text);
+        return { text, turns, usage, route };
       }
     }
 
+    const text = '(도구 호출이 너무 많아 중단했습니다. 요청을 더 구체적으로 바꿔 보세요.)';
+    turns.push({ role: 'assistant', content: text });
     return {
-      text: '(도구 호출이 너무 많아 중단했습니다. 요청을 더 구체적으로 바꿔 보세요.)',
+      text,
       turns,
       usage,
       route,

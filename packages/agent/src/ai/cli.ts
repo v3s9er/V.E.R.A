@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, Turn } from './provider.js';
+import { terminateProcessTree } from '../computer/shell.js';
 
 const MAX_OUTPUT = 8 * 1024 * 1024;
 const MAX_HELP_OUTPUT = 256 * 1024;
@@ -202,10 +203,9 @@ export class CliProvider implements AiProvider {
       });
       let stdout = '';
       let stderr = '';
-      const abort = (): void => {
-        child.kill();
-      };
-      req.signal?.addEventListener('abort', abort, { once: true });
+      const abort = (): void => terminateProcessTree(child);
+      if (req.signal?.aborted) abort();
+      else req.signal?.addEventListener('abort', abort, { once: true });
       child.stdin.end(this.type === 'codex-cli' ? prompt : '', 'utf8');
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
@@ -215,10 +215,14 @@ export class CliProvider implements AiProvider {
       child.stderr.on('data', (chunk: string) => {
         if (stderr.length < MAX_OUTPUT) stderr += chunk;
       });
-      child.once('error', reject);
+      child.once('error', (error) => {
+        req.signal?.removeEventListener('abort', abort);
+        reject(error);
+      });
       child.once('close', (code) => {
         req.signal?.removeEventListener('abort', abort);
-        if (code === 0) resolve(stdout);
+        if (req.signal?.aborted) reject(new Error('작업이 중지되었습니다.'));
+        else if (code === 0) resolve(stdout);
         else reject(cliFailure(this.label, code, stdout, stderr));
       });
     });
@@ -238,16 +242,16 @@ export class CliProvider implements AiProvider {
         '--no-session-persistence',
         '--model', this.model,
         ...(effort ? ['--effort', effort] : []),
-        ...(permission === 'read-only'
+        ...(permission === 'read-only' || permission === 'ask'
           ? ['--permission-mode', 'plan', '--tools', 'Read,Glob,Grep']
           : permission === 'full'
             ? ['--allow-dangerously-skip-permissions', '--dangerously-skip-permissions']
-            : ['--permission-mode', permission === 'workspace' ? 'acceptEdits' : 'dontAsk']),
+            : ['--permission-mode', 'acceptEdits']),
         ...this.extraArgs,
       ]
       : [
         'exec', '--json', '--skip-git-repo-check', '--ephemeral',
-        '--sandbox', permission === 'read-only' ? 'read-only' : permission === 'full' ? 'danger-full-access' : 'workspace-write',
+        '--sandbox', permission === 'full' ? 'danger-full-access' : permission === 'workspace' ? 'workspace-write' : 'read-only',
         '-C', req.cwd,
         ...(this.model ? ['--model', this.model] : []),
         ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []),
@@ -265,8 +269,9 @@ export class CliProvider implements AiProvider {
       });
       let stdout = '';
       let stderr = '';
-      const abort = (): void => { child.kill(); };
-      req.signal?.addEventListener('abort', abort, { once: true });
+      const abort = (): void => terminateProcessTree(child);
+      if (req.signal?.aborted) abort();
+      else req.signal?.addEventListener('abort', abort, { once: true });
       child.stdin.end(this.type === 'codex-cli' ? req.prompt : '', 'utf8');
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
@@ -275,7 +280,10 @@ export class CliProvider implements AiProvider {
         if (/tool|command|exec|file/i.test(chunk)) req.onStatus?.('native-agent:working');
       });
       child.stderr.on('data', (chunk: string) => { if (stderr.length < MAX_OUTPUT) stderr += chunk; });
-      child.once('error', reject);
+      child.once('error', (error) => {
+        req.signal?.removeEventListener('abort', abort);
+        reject(error);
+      });
       child.once('close', (code) => {
         req.signal?.removeEventListener('abort', abort);
         if (req.signal?.aborted) reject(new Error('작업이 중지되었습니다.'));
@@ -303,7 +311,7 @@ export class CliProvider implements AiProvider {
       child.stdout.on('data', (chunk: string) => { if (output.length < MAX_HELP_OUTPUT) output += chunk; });
       child.stderr.on('data', (chunk: string) => { if (output.length < MAX_HELP_OUTPUT) output += chunk; });
       const timer = setTimeout(() => {
-        child.kill();
+        terminateProcessTree(child);
         resolve({ ok: false, error: 'CLI 응답 시간이 초과되었습니다.' });
       }, 6000);
       child.once('error', (err) => {
@@ -363,7 +371,7 @@ export class CliProvider implements AiProvider {
       child.once('error', finish);
       child.once('close', finish);
       const timer = setTimeout(() => {
-        child.kill();
+        terminateProcessTree(child);
         finish();
       }, 4000);
     });

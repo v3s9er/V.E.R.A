@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { MrRobotClient, wsUrlFor } from '../rpc';
 import {
+  connectionOrigins,
   detectServingPc,
   exchangePin,
   getLastPcId,
-  loadPcs,
+  loadPcsForEnvironment,
+  originForDiscoveredHost,
+  parsePcEndpoint,
+  pcOrigin,
   removePc,
-  savePcs,
+  savePcsForEnvironment,
   setLastPcId,
   upsertPc,
   type SavedPc,
@@ -21,43 +25,76 @@ type Phase = 'auto' | 'list' | 'connecting' | 'error';
  *  - auto-connects to the last used PC (or the only one),
  *  - lets the user register more PCs by host + PIN and switch between them.
  */
-export function ConnectGate({ client, onConnected }: { client: MrRobotClient; onConnected: (pc: SavedPc) => void }) {
+export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobotClient; onConnected: (pc: SavedPc) => void; onCancel?: () => void }) {
   const [phase, setPhase] = useState<Phase>('auto');
   const [error, setError] = useState('');
-  const [pcs, setPcs] = useState<SavedPc[]>(() => loadPcs());
+  const [pcs, setPcs] = useState<SavedPc[]>([]);
   const [connectingPc, setConnectingPc] = useState<SavedPc | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState('');
   const [hostPort, setHostPort] = useState('');
   const [pin, setPin] = useState('');
   const [addBusy, setAddBusy] = useState(false);
+  const connectAttempt = useRef(0);
+  const clientOwner = useRef<number | null>(null);
 
   const connectTo = useCallback(
     async (pc: SavedPc): Promise<boolean> => {
+      const attempt = ++connectAttempt.current;
       setPhase('connecting');
       setConnectingPc(pc);
       setError('');
-      const candidates = [...new Set([pc.activeHost, pc.host, ...(pc.hosts ?? [])].filter((value): value is string => Boolean(value)))];
+      const candidates = connectionOrigins(pc);
+      const isCurrent = (): boolean => attempt === connectAttempt.current;
+      const ownsClient = (): boolean => clientOwner.current === attempt;
       let lastError = '연결할 주소가 없습니다.';
       for (let index = 0; index < candidates.length; index++) {
+        if (!isCurrent()) return false;
         const candidate = candidates[index];
         try {
-          await client.connect(wsUrlFor(`${candidate}:${pc.port}`), pc.secret, index < candidates.length - 1 ? 2500 : 8000);
+          clientOwner.current = attempt;
+          await client.connect(wsUrlFor(candidate), pc.secret, index < candidates.length - 1 ? 2500 : 8000);
+          if (!isCurrent() || !ownsClient()) return false;
           let refreshedHosts = pc.hosts ?? [pc.host];
+          let refreshedOrigins = connectionOrigins(pc);
           try {
-            const info = await client.call('pairing.info', {}) as { host?: string; hosts?: string[] };
+            const info = await client.call('pairing.info', {}) as { host?: string; hosts?: string[]; port?: number };
+            if (!isCurrent() || !ownsClient()) return false;
             refreshedHosts = [...new Set([info.host, ...(info.hosts ?? []), ...refreshedHosts].filter((value): value is string => Boolean(value)))];
+            const infoPort = Number.isInteger(info.port) && Number(info.port) > 0 ? Number(info.port) : pc.port;
+            refreshedOrigins = [...new Set([
+              candidate,
+              ...refreshedOrigins,
+              ...[info.host, ...(info.hosts ?? [])]
+                .filter((value): value is string => Boolean(value))
+                .map((host) => originForDiscoveredHost(host, infoPort)),
+            ])];
           } catch { /* keep the working connection */ }
-          const connectedPc = { ...pc, hosts: refreshedHosts, activeHost: candidate };
-          savePcs(loadPcs().map((item) => item.id === pc.id ? connectedPc : item));
+          if (!isCurrent() || !ownsClient()) return false;
+          const endpoint = parsePcEndpoint(candidate, pc.port, pc.protocol ?? 'http');
+          const connectedPc = { ...pc, hosts: refreshedHosts, origins: refreshedOrigins, activeHost: endpoint.host, activeOrigin: endpoint.origin };
+          const registry = await loadPcsForEnvironment();
+          if (!isCurrent() || !ownsClient()) return false;
+          const updated = registry.map((item) => item.id === pc.id ? connectedPc : item);
+          await savePcsForEnvironment(updated);
+          if (!isCurrent() || !ownsClient()) return false;
+          setPcs(updated);
           setLastPcId(pc.id);
+          if (!isCurrent() || !ownsClient()) return false;
           onConnected(connectedPc);
           return true;
         } catch (err) {
+          if (!isCurrent()) return false;
+          if (ownsClient()) {
+            client.close();
+            clientOwner.current = null;
+          }
           lastError = err instanceof Error ? err.message : String(err);
         }
       }
+      if (!isCurrent()) return false;
       setError(`${pc.name} 연결 실패: ${lastError}. PC 주소와 네트워크 연결을 확인하세요.`);
+      setConnectingPc(null);
       setPhase('list');
       return false;
     },
@@ -67,30 +104,49 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
   useEffect(() => {
     let cancelled = false;
     const boot = async (): Promise<void> => {
-      // 1. Refresh the serving PC's credentials (cheap; loopback only).
-      let next = loadPcs();
-      const serving = await detectServingPc();
-      if (serving) {
-        next = upsertPc(next, serving);
-        savePcs(next);
+      try {
+        // 1. Refresh the serving PC's credentials (cheap; loopback only).
+        let next = await loadPcsForEnvironment();
+        if (cancelled) return;
+        const serving = await detectServingPc();
+        if (cancelled) return;
+        if (serving) {
+          next = upsertPc(next, serving);
+          await savePcsForEnvironment(next);
+          if (cancelled) return;
+        }
         setPcs(next);
-      }
-      if (cancelled) return;
 
-      // 2. Auto-connect: last used PC, or the only registered one.
-      const lastId = getLastPcId();
-      const target = next.find((p) => p.id === lastId) ?? (next.length === 1 ? next[0] : null);
-      if (target) {
-        const ok = await connectTo(target);
-        if (cancelled || ok) return;
+        // 2. Auto-connect: last used PC, or the only registered one.
+        const lastId = getLastPcId();
+        const target = next.find((p) => p.id === lastId) ?? (next.length === 1 ? next[0] : null);
+        if (target) {
+          const ok = await connectTo(target);
+          if (cancelled || ok) return;
+        }
+        if (!cancelled) setPhase('list');
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setPhase('list');
+        }
       }
-      setPhase('list');
     };
     void boot();
     return () => {
       cancelled = true;
+      connectAttempt.current += 1;
     };
   }, [connectTo]);
+
+  const cancelConnect = (): void => {
+    connectAttempt.current += 1;
+    clientOwner.current = null;
+    client.close();
+    setConnectingPc(null);
+    setError('');
+    setPhase('list');
+  };
 
   const addPc = async (): Promise<void> => {
     if (!hostPort.trim() || pin.length !== 6 || addBusy) return;
@@ -98,20 +154,25 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
     setError('');
     try {
       const secret = await exchangePin(hostPort, pin, name.trim() || '웹 브라우저');
+      const endpoint = parsePcEndpoint(hostPort);
       const pc: Omit<SavedPc, 'id' | 'addedAt'> = {
         name: name.trim() || hostPort.trim(),
-        host: hostPort.split(':')[0] || hostPort.trim(),
-        port: Number(hostPort.split(':')[1] ?? 8787),
+        host: endpoint.host,
+        port: endpoint.port,
+        protocol: endpoint.protocol,
+        origins: [endpoint.origin],
+        activeOrigin: endpoint.origin,
         secret,
       };
-      const next = upsertPc(loadPcs(), pc);
-      savePcs(next);
+      const next = upsertPc(await loadPcsForEnvironment(), pc);
+      await savePcsForEnvironment(next);
       setPcs(next);
       setName('');
       setHostPort('');
       setPin('');
       setShowAdd(false);
-      await connectTo(next[next.length - 1]);
+      const saved = next.find((item) => connectionOrigins(item).includes(endpoint.origin)) ?? next[next.length - 1];
+      await connectTo(saved);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -119,9 +180,9 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
     }
   };
 
-  const deletePc = (id: string): void => {
-    const next = removePc(loadPcs(), id);
-    savePcs(next);
+  const deletePc = async (id: string): Promise<void> => {
+    const next = removePc(await loadPcsForEnvironment(), id);
+    await savePcsForEnvironment(next);
     setPcs(next);
     if (getLastPcId() === id) setLastPcId(null);
   };
@@ -134,7 +195,7 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
             <Spinner size={26} />
           </div>
           <p className="gate-sub">{connectingPc ? `"${connectingPc.name}"에 연결하는 중…` : '연결 중…'}</p>
-          <Button variant="ghost" onClick={() => setPhase('list')}>
+          <Button variant="ghost" onClick={cancelConnect}>
             취소
           </Button>
         </div>
@@ -184,13 +245,13 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
               <div>
                 <div className="pc-name">{pc.name}</div>
                 <div className="pc-addr">
-                  {pc.host}:{pc.port}
+                  {pc.activeOrigin ?? pc.origins?.[0] ?? pcOrigin(pc)}
                 </div>
               </div>
             </div>
             <div className="pc-actions">
               <Button onClick={() => void connectTo(pc)}>연결</Button>
-              <Button variant="ghost" onClick={() => deletePc(pc.id)} title="등록 해제">
+              <Button variant="ghost" onClick={() => void deletePc(pc.id)} title="등록 해제">
                 ✕
               </Button>
             </div>
@@ -203,7 +264,7 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 서재 데스크톱" />
             </Field>
             <Field label="PC 주소" hint="해당 PC의 설정 → 모바일 연결 탭에 표시되는 주소">
-              <Input value={hostPort} onChange={(e) => setHostPort(e.target.value)} placeholder="192.168.0.10:8787" />
+              <Input value={hostPort} onChange={(e) => setHostPort(e.target.value)} placeholder="https://example.trycloudflare.com" />
             </Field>
             <Field label="PIN 코드" hint="해당 PC 화면에 표시되는 6자리 숫자">
               <Input
@@ -214,7 +275,7 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
               />
             </Field>
             <div className="chat-actions">
-              <Button variant="ghost" onClick={() => setShowAdd(false)}>
+              <Button variant="ghost" onClick={() => setShowAdd(false)} disabled={addBusy}>
                 취소
               </Button>
               <Button onClick={() => void addPc()} disabled={addBusy || !hostPort.trim() || pin.length !== 6}>
@@ -223,9 +284,10 @@ export function ConnectGate({ client, onConnected }: { client: MrRobotClient; on
             </div>
           </div>
         ) : (
-          <Button variant="accent" onClick={() => setShowAdd(true)}>
-            ＋ PC 추가
-          </Button>
+          <div className="chat-actions">
+            {onCancel && <Button variant="ghost" onClick={onCancel}>닫기</Button>}
+            <Button variant="accent" onClick={() => setShowAdd(true)}>＋ PC 추가</Button>
+          </div>
         )}
       </Card>
     </div>

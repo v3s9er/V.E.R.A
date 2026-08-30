@@ -27,7 +27,14 @@ export interface NeutralTool {
 export interface ProviderResult {
   text: string;
   toolCalls: ProviderToolCall[];
-  usage: ChatUsage;
+  usage: ProviderUsage;
+}
+
+/** Provider-native usage details that do not require widening the public RPC protocol. */
+export interface ProviderUsage extends ChatUsage {
+  cachedPromptTokens?: number;
+  cacheWritePromptTokens?: number;
+  reasoningTokens?: number;
 }
 
 export interface ProviderHealth {
@@ -46,6 +53,8 @@ export interface ChatRequest {
   temperature?: number;
   maxTokens?: number;
   reasoningEffort?: ReasoningEffort;
+  /** Stable, non-secret prefix used by providers to reuse cached prompt prefixes. */
+  promptCacheKey?: string;
   signal?: AbortSignal;
   /** Stream deltas (text and finalized tool calls) as they arrive. */
   onEvent?: (e: ProviderEvent) => void;

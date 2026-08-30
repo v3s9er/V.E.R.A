@@ -4,6 +4,11 @@ import type { Turn } from '../ai/provider.js';
 
 interface PendingConfirm {
   requestId: string;
+  conversationId: string;
+  conversationTitle: string;
+  tool: string;
+  input: unknown;
+  summary: string;
   resolve: (ok: boolean) => void;
   timer: NodeJS.Timeout;
 }
@@ -13,8 +18,8 @@ const CONFIRM_TIMEOUT_MS = 120_000;
 /**
  * Per-connection chat state: the conversation turns plus the
  * approval-in-flight bookkeeping. One confirmation at a time (tool calls
- * execute sequentially), resolved by the client or by timeout, and always
- * settled on disconnect — nothing is left dangling.
+ * execute sequentially), resolved by the owning device or by timeout.
+ * A transient socket disconnect does not own or cancel this state.
  */
 export class ChatSession {
   turns: Turn[] = [];
@@ -37,6 +42,8 @@ export class ChatSession {
 
   cancel(): void {
     this.abort?.abort();
+    this.settlePending(false);
+    this.steering.length = 0;
   }
 
   steer(text: string): number {
@@ -55,30 +62,40 @@ export class ChatSession {
     return this.steering.length;
   }
 
+  /** Host-only snapshot. Callers must verify run ownership before returning it. */
+  pendingConfirmForOwner(): ChatConfirmRequest | undefined {
+    if (this.pending === null) return undefined;
+    const { requestId, conversationId, conversationTitle, tool, summary } = this.pending;
+    // Raw tool input is deliberately not replayed after reconnect. The
+    // human-readable summary is enough to approve or reject the paused call.
+    return { requestId, conversationId, conversationTitle, tool, input: undefined, summary };
+  }
+
   end(): void {
+    this.settlePending(false);
+    this.steering.length = 0;
     this.abort = null;
     this.busy = false;
   }
 
   askConfirm(send: (event: string, data: unknown) => void, req: Omit<ChatConfirmRequest, 'requestId'>): Promise<boolean> {
     this.settlePending(false);
-    this.steering.length = 0;
     return new Promise<boolean>((resolve) => {
       const requestId = randomUUID();
       const timer = setTimeout(() => this.settlePending(false), CONFIRM_TIMEOUT_MS);
       timer.unref?.();
-      this.pending = { requestId, resolve, timer };
+      this.pending = { requestId, ...req, resolve, timer };
       send('chat.confirm', { requestId, ...req });
     });
   }
 
-  respondConfirm(requestId: string, approve: boolean): boolean {
-    if (!this.pending || this.pending.requestId !== requestId) return false;
+  respondConfirm(requestId: string, conversationId: string, approve: boolean): boolean {
+    if (!this.pending || this.pending.requestId !== requestId || this.pending.conversationId !== conversationId) return false;
     this.settlePending(approve);
     return true;
   }
 
-  /** Settle everything — called on disconnect so no promise ever hangs. */
+  /** Settle everything during explicit cancellation or server shutdown. */
   reset(): void {
     this.cancel();
     this.end();

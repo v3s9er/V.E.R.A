@@ -10,6 +10,7 @@ interface Props {
 
 export function DependencySetup({ modal = false, onComplete }: Props) {
   const { client } = useMrRobot();
+  const canManage = client.isAdmin;
   const [report, setReport] = useState<DependencyReport | null>(null);
   const [selected, setSelected] = useState<Set<DependencyId>>(new Set());
   const [busy, setBusy] = useState<DependencyId | 'all' | 'complete' | null>(null);
@@ -35,13 +36,13 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
-    if (!modal || !report || autoStarted.current || report.wizardVersion >= 4) return;
+    if (!canManage || !modal || !report || autoStarted.current || report.wizardVersion >= 4) return;
     autoStarted.current = true;
     const missing = report.items.filter((item) => !item.installed && ['node', 'git', 'speech-ko', 'codex', 'claude'].includes(item.id));
     if (missing.length === 0) { void complete(); return; }
     setSelected(new Set(missing.map((item) => item.id)));
     window.setTimeout(() => void installMissing(missing), 250);
-  }, [modal, report]);
+  }, [canManage, modal, report]);
 
   const toggle = (id: DependencyId): void => {
     setSelected((current) => {
@@ -129,13 +130,14 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
       {report && !report.packageManagerAvailable && (
         <div className="dependency-warning">winget을 찾지 못했습니다. Windows 앱 설치 관리자를 먼저 업데이트해야 자동 설치할 수 있습니다.</div>
       )}
+      {!canManage && <div className="dependency-warning">의존성 설치와 업데이트는 해당 PC의 데스크톱 앱에서 관리자 연결로 진행하세요. 현재 기기에서는 설치 상태만 볼 수 있습니다.</div>}
       <div className="dependency-list">
         {report?.items.map((item) => (
           <label className={`dependency-row ${item.installed ? 'installed' : ''}`} key={item.id}>
             <input
               type="checkbox"
               checked={item.installed || selected.has(item.id)}
-              disabled={item.installed || busy !== null || !item.canInstall}
+              disabled={!canManage || item.installed || busy !== null || !item.canInstall}
               onChange={() => toggle(item.id)}
             />
             <span className="dependency-copy">
@@ -150,7 +152,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
               {item.path && <span className="dependency-path" title={item.path}>{item.path}</span>}
             </span>
             {!item.installed && (
-              <Button disabled={busy !== null || !item.canInstall} onClick={(event) => { event.preventDefault(); void installOne(item.id); }}>
+              <Button disabled={!canManage || busy !== null || !item.canInstall} onClick={(event) => { event.preventDefault(); void installOne(item.id); }}>
                 {busy === item.id ? '설치 중…' : '설치'}
               </Button>
             )}
@@ -161,10 +163,10 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
       {message && <pre className="dependency-output">{message}</pre>}
       <p className="panel-hint">Codex와 Claude는 설치 후 각 공식 로그인 화면에서 직접 인증해야 합니다. Mr.Robot은 로그인 토큰을 복사하거나 묶어서 배포하지 않습니다.</p>
       <div className="dependency-actions">
-        <Button disabled={busy !== null || selected.size === 0} onClick={() => void installSelected()}>
+        <Button disabled={!canManage || busy !== null || selected.size === 0} onClick={() => void installSelected()}>
           {busy === 'all' ? '선택 항목 설치 중…' : '선택한 누락 항목 설치'}
         </Button>
-        {modal && <Button variant="ghost" disabled={busy !== null} onClick={() => void complete()}>{busy === 'complete' ? '저장 중…' : '검사 완료하고 시작'}</Button>}
+        {modal && <Button variant="ghost" disabled={!canManage || busy !== null} onClick={() => void complete()}>{busy === 'complete' ? '저장 중…' : '검사 완료하고 시작'}</Button>}
       </div>
     </Card>
   );

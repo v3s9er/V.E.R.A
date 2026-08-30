@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { DependencyReport, SystemStatus } from '@mr-robot/shared';
-import { MrRobotClient, wsUrlFor } from './rpc';
+import { MrRobotClient } from './rpc';
 import { MrRobotContext } from './state';
-import { loadPcs, setLastPcId, type SavedPc } from './pcs';
+import { loadPcsForEnvironment, setLastPcId, type SavedPc } from './pcs';
 import { ConnectGate } from './components/ConnectGate';
 import type { ViewKey } from './components/Sidebar';
 import { ProfileMenu } from './components/ProfileMenu';
 import { ChatView } from './views/ChatView';
-import { SchedulesView } from './views/SchedulesView';
-import { PluginsView } from './views/PluginsView';
-import { SettingsView } from './views/SettingsView';
 import { DependencySetup } from './components/DependencySetup';
-import { FilesView } from './views/FilesView';
-import { Spinner } from './components/ui';
+
+const SchedulesView = lazy(() => import('./views/SchedulesView').then((module) => ({ default: module.SchedulesView })));
+const PluginsView = lazy(() => import('./views/PluginsView').then((module) => ({ default: module.PluginsView })));
+const SettingsView = lazy(() => import('./views/SettingsView').then((module) => ({ default: module.SettingsView })));
+const FilesView = lazy(() => import('./views/FilesView').then((module) => ({ default: module.FilesView })));
 
 export function App() {
   const client = useMemo(() => new MrRobotClient(), []);
@@ -21,12 +21,21 @@ export function App() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [connected, setConnected] = useState(false);
   const [activePc, setActivePc] = useState<SavedPc | null>(null);
-  const [pcList, setPcList] = useState<SavedPc[]>(() => loadPcs());
+  const [pcList, setPcList] = useState<SavedPc[]>([]);
   const [showDependencySetup, setShowDependencySetup] = useState(false);
-  const [desktopBootError, setDesktopBootError] = useState('');
   const [voiceCommands, setVoiceCommands] = useState<Array<{ id: number; text: string }>>([]);
   const voiceCommandId = useRef(0);
   const desktopStandalone = Boolean(window.mrRobotDesktop);
+
+  useEffect(() => {
+    let active = true;
+    void loadPcsForEnvironment().then((items) => { if (active) setPcList(items); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => window.mrRobotDesktop?.onNavigate?.((target) => {
+    if (target === 'chat' || target === 'files' || target === 'schedules' || target === 'plugins' || target === 'settings') setView(target);
+  }), []);
 
   useEffect(() => {
     // On an unexpected drop, return to the connect gate so it can auto-reconnect.
@@ -37,50 +46,37 @@ export function App() {
     };
     client.onClose = onDrop;
     client.onAuthFail = onDrop;
-    return () => client.close();
+    return () => client.dispose();
   }, [client]);
 
   useEffect(() => {
-    if (!desktopStandalone || ready) return;
-    let cancelled = false;
-    let retryTimer: number | undefined;
-    const connectLocal = async (): Promise<void> => {
-      try {
-        const local = await window.mrRobotDesktop!.getLocalConnection();
-        await client.connect(wsUrlFor(`${local.host}:${local.port}`), local.secret, 8000);
-        if (cancelled) { client.close(); return; }
-        const pc: SavedPc = { ...local, id: 'desktop-local', addedAt: 0, hosts: [local.host], activeHost: local.host };
-        setActivePc(pc);
-        setPcList([pc]);
-        setConnected(true);
-        setDesktopBootError('');
-        setReady(true);
-      } catch (error) {
-        if (cancelled) return;
-        setDesktopBootError(error instanceof Error ? error.message : String(error));
-        retryTimer = window.setTimeout(() => void connectLocal(), 1200);
-      }
-    };
-    void connectLocal();
-    return () => {
-      cancelled = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
-    };
-  }, [client, desktopStandalone, ready]);
-
-  useEffect(() => {
     if (!ready) return;
+    let disposed = false;
+    let timer: number | undefined;
     const refresh = async (): Promise<void> => {
+      if (disposed || document.visibilityState === 'hidden') return;
       try {
         const s = (await client.call('status')) as SystemStatus;
-        setStatus(s);
+        if (!disposed) setStatus(s);
       } catch {
         /* disconnected */
       }
+      if (!disposed && document.visibilityState === 'visible') timer = window.setTimeout(() => void refresh(), 10000);
     };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 10000);
-    return () => clearInterval(timer);
+    const resume = (): void => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      if (document.visibilityState === 'visible' && navigator.onLine) void refresh();
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('online', resume);
+    resume();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('online', resume);
+    };
   }, [client, ready]);
 
   useEffect(() => {
@@ -96,6 +92,10 @@ export function App() {
 
   useEffect(() => {
     if (!ready) return;
+    if (!client.isAdmin) {
+      setShowDependencySetup(false);
+      return;
+    }
     void client.call('dependencies.status', {})
       .then((value) => setShowDependencySetup((value as DependencyReport).wizardVersion < 4))
       .catch(() => setShowDependencySetup(false));
@@ -112,6 +112,7 @@ export function App() {
   };
 
   const disconnect = (): void => {
+    setLastPcId(null);
     client.close();
     setConnected(false);
     setStatus(null);
@@ -126,15 +127,12 @@ export function App() {
   };
 
   if (!ready) {
-    if (desktopStandalone) {
-      return <div className="gate"><div className="gate-card"><div className="gate-brand"><Spinner size={26} /></div><p className="gate-sub">내장 로컬 에이전트를 시작하는 중…</p>{desktopBootError && <p className="gate-sub dim">자동 재시도 중 · {desktopBootError}</p>}</div></div>;
-    }
     return (
       <ConnectGate
         client={client}
         onConnected={(pc) => {
           setActivePc(pc);
-          setPcList(loadPcs());
+          void loadPcsForEnvironment().then(setPcList);
           setConnected(true);
           setReady(true);
         }}
@@ -154,7 +152,7 @@ export function App() {
               </button>
               <div className="workspace-heading"><h1>{viewMeta[view].title}</h1><p>{viewMeta[view].description}</p></div>
               <div className="topbar-meta">
-              {!desktopStandalone && pcList.length > 0 && (
+              {pcList.length > 0 && (
                 <select
                   className="input pc-switch"
                   value={activePc?.id ?? ''}
@@ -163,7 +161,7 @@ export function App() {
                 >
                   {pcList.map((pc) => (
                     <option key={pc.id} value={pc.id}>
-                      🖥️ {pc.name} · {pc.host}:{pc.port}
+                      🖥️ {pc.name} · {pc.activeOrigin ?? pc.origins?.[0] ?? `${pc.host}:${pc.port}`}
                     </option>
                   ))}
                 </select>
@@ -180,9 +178,10 @@ export function App() {
                   )}
                 </>
               )}
-              {!desktopStandalone && <button className="btn btn-ghost" onClick={disconnect} title="연결 해제 / PC 관리">
+              {!client.isAdmin && <span className="topbar-chip locked" title="PC 관리 설정은 데스크톱 관리자 연결에서만 변경할 수 있습니다.">🔒 연결 기기 · 관리 제한</span>}
+              <button className="btn btn-ghost" onClick={disconnect} title="연결 해제 / PC 관리">
                 연결 해제
-              </button>}
+              </button>
                 <ProfileMenu standalone={desktopStandalone} header view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} />
               </div>
             </div>
@@ -191,14 +190,17 @@ export function App() {
             </nav>
           </header>}
           {view === 'chat' && <ChatView
+            activePc={activePc}
             profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} />}
             voiceCommand={voiceCommands[0] ?? null}
             onVoiceCommandHandled={(id) => setVoiceCommands((queued) => queued.filter((command) => command.id !== id))}
           />}
-          {view === 'schedules' && <SchedulesView />}
-          {view === 'files' && activePc && <FilesView activePc={activePc} pcs={pcList} />}
-          {view === 'plugins' && <PluginsView />}
-          {view === 'settings' && <SettingsView onOpenChat={() => setView('chat')} />}
+          {view !== 'chat' && <Suspense fallback={<div className="view-loading" role="status"><span className="spinner" /> 화면을 준비하는 중…</div>}>
+            {view === 'schedules' && <SchedulesView />}
+            {view === 'files' && activePc && <FilesView activePc={activePc} pcs={pcList} />}
+            {view === 'plugins' && <PluginsView />}
+            {view === 'settings' && <SettingsView onOpenChat={() => setView('chat')} />}
+          </Suspense>}
         </main>
         {showDependencySetup && <DependencySetup modal onComplete={() => setShowDependencySetup(false)} />}
       </div>

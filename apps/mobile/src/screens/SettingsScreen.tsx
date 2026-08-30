@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -9,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { MrRobotClient } from '../rpc';
 import type { AppSettings, ProviderInfo, ProviderType, SystemStatus } from '../types';
 import { colors, radius } from '../theme';
@@ -31,6 +34,7 @@ const SERVICE_PRESETS: Array<{ label: string; type: ProviderType; baseUrl: strin
 ];
 
 export function SettingsScreen({ client }: { client: MrRobotClient }) {
+  const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -174,8 +178,9 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
       )}
 
       <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modal}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+          <ScrollView style={styles.modal} contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.title}>제공자 추가</Text>
             <Text style={styles.faint}>서비스를 고르면 주소·모델이 자동 입력됩니다 — 키만 넣으세요.</Text>
             <View style={styles.chipRow}>
@@ -236,8 +241,9 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
                 <Text style={styles.smallBtnText}>{busy ? '추가 중…' : '추가'}</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </ScrollView>
         </View>
+        </KeyboardAvoidingView>
       </Modal>
     </ScrollView>
   );
@@ -283,6 +289,7 @@ const styles = StyleSheet.create({
   chipTextOn: { color: '#fff' },
   errorText: { color: colors.err, fontSize: 13 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', padding: 24 },
-  modal: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 20, gap: 8 },
+  modal: { maxHeight: '92%', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  modalContent: { padding: 20, gap: 8 },
   modalActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
 });

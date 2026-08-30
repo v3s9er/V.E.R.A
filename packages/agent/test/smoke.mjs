@@ -5,9 +5,12 @@
  * Covers: event bus, plugin attach/detach leak-freedom, plugin commands,
  * computer shell/screen, HTTP API + pairing, WebSocket RPC.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { PassThrough, Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
@@ -15,6 +18,8 @@ const here = dirnameOf(import.meta);
 const dist = resolve(here, '..', 'dist');
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
+const { browserOriginAllowed, createByteLimitStream, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
+const { createRemoteLinkPlugin, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { screenSize } = await import(pathToFileURL(join(dist, 'computer', 'screen.js')).href);
@@ -42,6 +47,90 @@ check('on/emit', count === 1);
 off();
 bus.emit('x');
 check('off stops delivery', count === 1);
+
+console.log('1b. transport + HTTP security helpers');
+check('Tailscale CGNAT transport range accepted', isTailnetAddress('100.64.0.1') && isTailnetAddress('100.127.255.254') && isTailnetAddress('::ffff:100.100.10.20'));
+check('look-alike non-Tailscale ranges rejected', !isTailnetAddress('100.63.255.255') && !isTailnetAddress('100.128.0.1') && !isTailnetAddress('192.168.10.20'));
+check('private peer base accepted', normalizePeerBase('http://192.168.10.20:8787').origin === 'http://192.168.10.20:8787');
+let metadataBlocked = false;
+try { normalizePeerBase('http://169.254.169.254'); } catch { metadataBlocked = true; }
+check('cloud metadata/link-local peer blocked', metadataBlocked);
+let publicPeerBlocked = false;
+try { normalizePeerBase('https://example.com'); } catch { publicPeerBlocked = true; }
+check('arbitrary public peer blocked', publicPeerBlocked);
+check('same browser origin accepted', browserOriginAllowed('http://127.0.0.1:8787', '127.0.0.1:8787', '127.0.0.1'));
+check('foreign browser origin rejected', !browserOriginAllowed('https://evil.example', '127.0.0.1:8787', '127.0.0.1'));
+let byteLimitBlocked = false;
+try {
+  await pipeline(
+    Readable.from(Buffer.alloc(9)),
+    createByteLimitStream(8, 'test limit'),
+    new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+  );
+} catch { byteLimitBlocked = true; }
+check('stream byte limit counts actual bytes', byteLimitBlocked);
+check('quick tunnel URL parser', parseQuickTunnelUrl('INF route https://quiet-tree.trycloudflare.com ready') === 'https://quiet-tree.trycloudflare.com');
+check('remote link only accepts loopback', normalizeRemoteLinkLocalUrl('http://127.0.0.1:8787') === 'http://127.0.0.1:8787');
+let arbitraryLocalServiceBlocked = false;
+try { normalizeRemoteLinkLocalUrl('http://192.168.10.20:8787'); } catch { arbitraryLocalServiceBlocked = true; }
+check('remote link rejects non-loopback targets', arbitraryLocalServiceBlocked);
+check('remote link plugin defaults off', createRemoteLinkPlugin().manifest.enabledByDefault === false);
+class FakeTunnelProcess extends EventEmitter {
+  constructor(pid) {
+    super();
+    this.pid = pid;
+    this.stdout = new PassThrough();
+    this.stderr = new PassThrough();
+    this.exitCode = null;
+    this.killed = false;
+  }
+  kill() { this.killed = true; return true; }
+  close(code = 0) { this.exitCode = code; this.emit('close', code, null); }
+}
+const tunnelA = new FakeTunnelProcess(101);
+const tunnelB = new FakeTunnelProcess(102);
+const tunnelQueue = [tunnelA, tunnelB];
+const remoteCommands = new Map();
+const remoteStorage = new Map();
+const racePlugin = createRemoteLinkPlugin({ findExecutable: () => 'fake-cloudflared', spawnProcess: () => tunnelQueue.shift() });
+const fakePluginContext = {
+  pluginId: 'remote-link',
+  logger: { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } },
+  storage: { get: (key) => remoteStorage.get(key), set: (key, value) => remoteStorage.set(key, value) },
+  registerCommand: (name, handler) => remoteCommands.set(name, handler),
+  on() {}, once() {}, emit() {},
+  setInterval, setTimeout, clearInterval, clearTimeout,
+  computer: {}, ai: { providerCount: () => 0 },
+};
+racePlugin.activate(fakePluginContext);
+const startA = Promise.resolve(remoteCommands.get('remote-link.start')({})).catch((error) => error);
+const stopA = Promise.resolve(remoteCommands.get('remote-link.stop')({}));
+const startB = Promise.resolve(remoteCommands.get('remote-link.start')({}));
+tunnelB.stderr.write('INF route https://generation-b.trycloudflare.com ready');
+const startedB = await startB;
+tunnelA.stderr.write('INF stale https://generation-a.trycloudflare.com ready');
+tunnelA.close();
+const stoppedA = await stopA;
+const canceledA = await startA;
+const afterStaleClose = await remoteCommands.get('remote-link.status')({});
+check('remote link stop/start race preserves new child state', startedB.publicUrl?.includes('generation-b') && stoppedA.publicUrl?.includes('generation-b') && afterStaleClose.publicUrl?.includes('generation-b') && canceledA instanceof Error);
+const stopB = Promise.resolve(remoteCommands.get('remote-link.stop')({}));
+tunnelB.close();
+await stopB;
+await racePlugin.deactivate(fakePluginContext);
+const confineBase = mkdtempSync(join(tmpdir(), 'mr-robot-confine-'));
+const confineRoot = join(confineBase, 'root');
+const confineOutside = join(confineBase, 'outside');
+mkdirSync(confineRoot);
+mkdirSync(confineOutside);
+symlinkSync(confineOutside, join(confineRoot, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+let junctionBlocked = false;
+try { resolveConfinedPath(confineRoot, 'escape/secret.txt'); } catch { junctionBlocked = true; }
+check('confined path rejects symlink/junction ancestors', junctionBlocked);
+let lexicalEscapeBlocked = false;
+try { resolveConfinedPath(confineRoot, '../outside/secret.txt'); } catch { lexicalEscapeBlocked = true; }
+check('confined path rejects lexical traversal', lexicalEscapeBlocked);
+rmSync(confineBase, { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
 console.log('2. plugins: leak-free attach/detach');
@@ -114,16 +203,46 @@ server.plugins.setEnabled('orca', false);
 const ping = await (await fetch(`${base}/api/ping`)).json();
 check('GET /api/ping', ping.ok === true);
 
-const pairing = await (await fetch(`${base}/api/pairing`)).json();
-check('pairing info (loopback)', pairing.pin && pairing.qrPayload && pairing.maskedSecret && pairing.hosts?.includes(pairing.host));
+const foreignOrigin = await fetch(`${base}/api/ping`, { headers: { origin: 'https://evil.example' } });
+check('foreign browser Origin rejected', foreignOrigin.status === 403);
+const pairingWithoutAuth = await fetch(`${base}/api/pairing`);
+check('pairing info requires auth even on loopback', pairingWithoutAuth.status === 401);
+const pairingResponse = await fetch(`${base}/api/pairing`, { headers: { 'x-mr-robot-token': server.secret } });
+const pairing = await pairingResponse.json();
+check('pairing HTTP info omits ephemeral pairing code', pairingResponse.status === 200 && !Object.hasOwn(pairing, 'pin') && !Object.hasOwn(pairing, 'qrPayload') && pairing.maskedSecret && pairing.hosts?.includes(pairing.host));
+check('pairing HTTP response never exposes localSecret', !Object.hasOwn(pairing, 'localSecret'));
+const localPairing = server.pairingInfo(false, true);
+check('local administrator can request a short-lived pairing code', typeof localPairing.pin === 'string' && localPairing.pin.length === 6 && typeof localPairing.qrPayload === 'string' && Number(localPairing.pinExpiresAt) > Date.now());
+const proxiedPairingResponse = await fetch(`${base}/api/pairing`, {
+  headers: {
+    'x-mr-robot-token': server.secret,
+    origin: 'https://safe-link.trycloudflare.com',
+    'cf-ray': 'abcd1234ef567890-icn',
+    'cf-connecting-ip': '203.0.113.10',
+  },
+});
+const proxiedPairing = await proxiedPairingResponse.json();
+check('proxied loopback pairing response also omits localSecret', proxiedPairingResponse.status === 200 && !Object.hasOwn(proxiedPairing, 'localSecret'));
 
 const bad = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: '000000' }) });
 check('wrong pin rejected', bad.status === 400);
 
 const paired = await (
-  await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: pairing.pin }) })
+  await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: localPairing.pin }) })
 ).json();
 check('pin exchange returns secret', typeof paired.secret === 'string' && paired.secret.length > 32);
+const reusedPin = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: localPairing.pin }) });
+check('successful pairing consumes the PIN', reusedPin.status === 400);
+const fullRequestPin = server.config.regeneratePin();
+const requestedFullPair = await (
+  await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: fullRequestPin, permissionCap: 'full' }) })
+).json();
+check('PIN cannot self-grant full access', server.authenticate(requestedFullPair.secret)?.permissionCap === 'ask' && server.authenticate(requestedFullPair.secret)?.isAdmin === false);
+const readOnlyPin = server.config.regeneratePin();
+const readOnlyPaired = await (
+  await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: readOnlyPin, permissionCap: 'read-only' }) })
+).json();
+check('read-only pin exchange returns scoped secret', typeof readOnlyPaired.secret === 'string' && readOnlyPaired.secret.length > 32);
 
 const noAuth = await fetch(`${base}/api/status`);
 check('status requires auth', noAuth.status === 401);
@@ -132,9 +251,48 @@ const authed = await fetch(`${base}/api/status`, { headers: { 'x-mr-robot-token'
 const status = await authed.json();
 check('status with token', authed.status === 200 && status.ok === true, JSON.stringify(status));
 
-const uploaded = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke/direct-transfer.txt')}`, {
+const originalChatOnce = server.chatOnce;
+let observedRestAuth;
+server.chatOnce = async (text, auth) => { observedRestAuth = auth; return { text }; };
+const restChat = await fetch(`${base}/api/chat`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'x-mr-robot-token': readOnlyPaired.secret },
+  body: JSON.stringify({ text: 'REST auth bridge' }),
+});
+server.chatOnce = originalChatOnce;
+check('REST chat forwards paired permission context', restChat.status === 200 && observedRestAuth?.permissionCap === 'read-only' && observedRestAuth?.isAdmin === false);
+const blockedPluginCall = await fetch(`${base}/api/plugins/call`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
+  body: JSON.stringify({ name: 'remote-link.config.set', params: { provider: 'cloudflare-quick', enabled: false, autoStart: false, localUrl: 'http://127.0.0.1:8787' } }),
+});
+check('REST plugin call enforces paired permission context', blockedPluginCall.status === 400);
+const blockedProviderProbe = await fetch(`${base}/api/providers/test/missing-provider`, { headers: { 'x-mr-robot-token': readOnlyPaired.secret } });
+check('provider connection details are administrator-only', blockedProviderProbe.status === 403);
+
+const limitedUpload = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke/denied.txt')}`, {
+  method: 'PUT',
+  headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': readOnlyPaired.secret },
+  body: 'must not be written by an ask/read-only device',
+});
+check('read-only paired device cannot mutate shared files', limitedUpload.status === 403);
+const askSharedUpload = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke/paired-transfer.txt')}`, {
   method: 'PUT',
   headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': paired.secret },
+  body: 'paired shared bytes',
+});
+check('ask paired device can write only the shared transfer area', askSharedUpload.status === 200);
+const rootUpload = await fetch(`${base}/api/files/upload?path=`, {
+  method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': paired.secret }, body: 'must not escape as a root sibling',
+});
+check('shared upload rejects an empty/root target before streaming', rootUpload.status === 400 && !readdirSync(home).some((name) => name.startsWith('shared.upload-')));
+const directoryUpload = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke')}`, {
+  method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': paired.secret }, body: 'must not replace a directory',
+});
+check('shared upload rejects a directory target', directoryUpload.status === 400);
+const uploaded = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke/direct-transfer.txt')}`, {
+  method: 'PUT',
+  headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': server.secret },
   body: 'direct bytes without an AI call',
 });
 check('paired device uploads direct file stream', uploaded.status === 200 && (await uploaded.json()).size === 31);
@@ -142,20 +300,80 @@ const fileList = await (await fetch(`${base}/api/files?path=${encodeURIComponent
 check('paired device lists shared files', fileList.items?.some((entry) => entry.name === 'direct-transfer.txt'));
 const downloaded = await fetch(`${base}/api/files/download?path=${encodeURIComponent('smoke/direct-transfer.txt')}`, { headers: { 'x-mr-robot-token': paired.secret } });
 check('paired device downloads direct file stream', downloaded.status === 200 && await downloaded.text() === 'direct bytes without an AI call');
+const fileGrantResponse = await fetch(`${base}/api/transfers/grant`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ kind: 'file', path: 'smoke/direct-transfer.txt' }),
+});
+const fileGrant = (await fileGrantResponse.json()).grant;
+check('source PC issues a short-lived file-scoped transfer grant', fileGrantResponse.status === 200 && typeof fileGrant === 'string' && fileGrant.length >= 32);
 const directPull = await fetch(`${base}/api/files/pull`, {
-  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
-  body: JSON.stringify({ sourceBase: base, sourceSecret: paired.secret, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/direct-copy.txt' }),
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: base, sourceGrant: fileGrant, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/direct-copy.txt' }),
 });
 check('PC-to-PC endpoint performs direct stream pull', directPull.status === 200 && (await directPull.json()).transport === 'direct-device-stream');
+const reusedGrantPull = await fetch(`${base}/api/files/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: base, sourceGrant: fileGrant, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/direct-reuse.txt' }),
+});
+check('file transfer grant is single-use', reusedGrantPull.status === 400);
+const leakedSecretPull = await fetch(`${base}/api/files/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: base, sourceSecret: server.secret, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/no-secret-forwarding.txt' }),
+});
+check('target PC rejects legacy long-lived source credentials', leakedSecretPull.status === 400);
+const rootPull = await fetch(`${base}/api/files/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: base, sourceGrant: 'x'.repeat(43), sourcePath: 'smoke/direct-transfer.txt', targetPath: '.' }),
+});
+check('PC-to-PC pull rejects shared root as a file target', rootPull.status === 400);
+const ssrfPull = await fetch(`${base}/api/files/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: 'http://169.254.169.254', sourceGrant: 'x'.repeat(43), sourcePath: 'metadata', targetPath: 'smoke/blocked.txt' }),
+});
+check('PC-to-PC pull blocks link-local SSRF target', ssrfPull.status === 400);
 const traversal = await fetch(`${base}/api/files/download?path=${encodeURIComponent('../config.json')}`, { headers: { 'x-mr-robot-token': paired.secret } });
-check('shared-file traversal is blocked', traversal.status === 404);
-const syncSnapshot = await (await fetch(`${base}/api/sync/snapshot`, { headers: { 'x-mr-robot-token': paired.secret } })).json();
-check('paired device exports versioned work snapshot', syncSnapshot.version === 1 && Array.isArray(syncSnapshot.conversations) && Array.isArray(syncSnapshot.routingPresets));
+check('shared-file traversal is blocked', traversal.status === 403);
+const deniedSyncSnapshot = await fetch(`${base}/api/sync/snapshot`, { headers: { 'x-mr-robot-token': readOnlyPaired.secret } });
+check('read-only paired device cannot export private work history', deniedSyncSnapshot.status === 403);
+const syncSnapshotResponse = await fetch(`${base}/api/sync/snapshot`, { headers: { 'x-mr-robot-token': paired.secret } });
+const syncSnapshot = await syncSnapshotResponse.json();
+check('default ask device exports versioned work snapshot through its narrow capability', syncSnapshotResponse.status === 200 && syncSnapshot.version === 1 && Array.isArray(syncSnapshot.conversations) && Array.isArray(syncSnapshot.routingPresets));
+const syncGrantResponse = await fetch(`${base}/api/transfers/grant`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret }, body: JSON.stringify({ kind: 'sync' }),
+});
+const syncGrant = (await syncGrantResponse.json()).grant;
 const syncPull = await fetch(`${base}/api/sync/pull`, {
   method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
-  body: JSON.stringify({ sourceBase: base, sourceSecret: paired.secret }),
+  body: JSON.stringify({ sourceBase: base, sourceGrant: syncGrant }),
 });
-check('device work sync uses direct transport and zero AI tokens', syncPull.status === 200 && (await syncPull.json()).aiTokens === 0);
+check('default ask device work sync uses direct transport and zero AI tokens', syncPull.status === 200 && (await syncPull.json()).aiTokens === 0);
+server.config.patchDeviceLink(paired.linkId, { capabilities: [] });
+const disabledSyncGrant = await fetch(`${base}/api/transfers/grant`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret }, body: JSON.stringify({ kind: 'sync' }),
+});
+check('revoking only work-sync capability blocks sync without changing chat permission', disabledSyncGrant.status === 403 && server.authenticate(paired.secret)?.permissionCap === 'ask');
+server.config.patchDeviceLink(paired.linkId, { capabilities: ['work-sync'] });
+for (let attempt = 0; attempt < 5; attempt++) {
+  await fetch(`${base}/api/pair`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'cf-ray': 'feedface12345678-icn',
+      'cf-connecting-ip': '203.0.113.44',
+    },
+    body: JSON.stringify({ pin: '111111' }),
+  });
+}
+const pairingRateLimited = await fetch(`${base}/api/pair`, {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'cf-ray': 'feedface12345678-icn',
+    'cf-connecting-ip': '203.0.113.44',
+  },
+  body: JSON.stringify({ pin: '111111' }),
+});
+check('pairing failures are rate limited per proxied client', pairingRateLimited.status === 429 && Number(pairingRateLimited.headers.get('retry-after')) > 0);
 
 // WS RPC
 const ws = await new Promise((resolveWs, reject) => {
@@ -183,6 +401,38 @@ check('ws rejects before auth', unauthStatus.ok === false && unauthStatus.error?
 const authRes = await rpc(ws, 'auth', { secret: paired.secret });
 check('ws auth', authRes.ok === true && authRes.result?.ok === true);
 
+const adminEventWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+await rpc(adminEventWs, 'auth', { secret: server.secret });
+const pairedEvents = [];
+const adminEvents = [];
+const collectPaired = (raw) => {
+  const message = JSON.parse(raw.toString());
+  if (message.id === 0) pairedEvents.push(message);
+};
+const collectAdmin = (raw) => {
+  const message = JSON.parse(raw.toString());
+  if (message.id === 0) adminEvents.push(message);
+};
+ws.on('message', collectPaired);
+adminEventWs.on('message', collectAdmin);
+server.bus.emit('scheduler.changed', [{ id: 'private-job', prompt: 'PRIVATE_PROMPT', command: 'PRIVATE_COMMAND', lastResult: 'PRIVATE_STDOUT' }]);
+server.bus.emit('log', { ts: Date.now(), level: 'error', scope: 'private', message: 'PRIVATE_LOG' });
+server.bus.emit('voice.command', { text: 'PRIVATE_VOICE_TRANSCRIPT' });
+server.bus.emit('providers.changed', [{ id: 'private-provider', label: 'PRIVATE_PROVIDER' }]);
+server.bus.emit('future.unreviewed.secret', { secret: 'PRIVATE_FUTURE_EVENT' });
+await new Promise((resolveTimer) => setTimeout(resolveTimer, 30));
+ws.off('message', collectPaired);
+adminEventWs.off('message', collectAdmin);
+const sensitiveEvents = new Set(['scheduler.changed', 'log', 'voice.command', 'providers.changed']);
+check('non-admin WS receives no scheduler prompt/command/result, log, voice transcript, or provider-admin events', !pairedEvents.some((message) => sensitiveEvents.has(message.event)));
+check('administrator WS receives reviewed sensitive events', [...sensitiveEvents].every((event) => adminEvents.some((message) => message.event === event)));
+check('unreviewed event types fail closed for every WS client', !pairedEvents.some((message) => message.event === 'future.unreviewed.secret') && !adminEvents.some((message) => message.event === 'future.unreviewed.secret'));
+adminEventWs.close();
+
 const wsStatus = await rpc(ws, 'status', {});
 check('ws status after auth', wsStatus.ok === true && wsStatus.result?.hostname);
 
@@ -199,7 +449,7 @@ check('persistent conversation list', conversationList.ok === true && conversati
 
 const blockedEscalation = await rpc(ws, 'settings.set', { safety: { mode: 'full' } });
 check('device token cannot escalate global permission', blockedEscalation.ok === false);
-const adminAuth = await rpc(ws, 'auth', { secret: pairing.localSecret });
+const adminAuth = await rpc(ws, 'auth', { secret: server.secret });
 check('loopback admin auth', adminAuth.ok === true && adminAuth.result?.ok === true);
 const presetList = await rpc(ws, 'routing.presets.list', {});
 check('routing presets exposed over RPC', presetList.ok === true && presetList.result?.length >= 4);
@@ -210,9 +460,36 @@ check('routing preset applies over RPC', presetApply.ok === true && presetApply.
 const presetDelete = await rpc(ws, 'routing.presets.delete', { id: presetSave.result.id });
 check('routing preset deletes over RPC', presetDelete.ok === true && presetDelete.result?.ok === true);
 await rpc(ws, 'settings.set', { safety: { mode: 'full' } });
-const elevatedLink = await rpc(ws, 'pairing.link.update', { id: paired.linkId, permissionCap: 'full' });
-check('admin can set per-device permission cap', elevatedLink.ok === true && elevatedLink.result?.permissionCap === 'full');
+const liveLinkedWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+const liveLinkedAuth = await rpc(liveLinkedWs, 'auth', { secret: paired.secret });
+const liveLinkedClosed = new Promise((resolveClose) => {
+  const timer = setTimeout(() => resolveClose(false), 1500);
+  liveLinkedWs.once('close', () => { clearTimeout(timer); resolveClose(true); });
+});
+const elevatedLink = await rpc(ws, 'pairing.link.update', { id: paired.linkId, permissionCap: 'full', capabilities: [] });
+check('admin can set per-device permission cap while independently revoking sync', elevatedLink.ok === true && elevatedLink.result?.permissionCap === 'full' && elevatedLink.result?.capabilities?.length === 0 && server.isSyncSecret(paired.secret) === false);
+check('permission change immediately closes already-authenticated device sockets', liveLinkedAuth.result?.ok === true && await liveLinkedClosed);
+const syncEnabledLink = await rpc(ws, 'pairing.link.update', { id: paired.linkId, capabilities: ['work-sync'] });
+check('admin can grant the narrow work-sync capability separately', syncEnabledLink.ok === true && syncEnabledLink.result?.capabilities?.includes('work-sync') && server.isSyncSecret(paired.secret) === true);
 await rpc(ws, 'auth', { secret: paired.secret });
+const promotedAdminApi = await fetch(`${base}/api/settings`, {
+  method: 'PUT', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret }, body: JSON.stringify({ deviceName: 'must-not-change' }),
+});
+check('promoted full link is still not a control-plane administrator', promotedAdminApi.status === 403);
+const promotedSync = await fetch(`${base}/api/sync/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
+  body: JSON.stringify({
+    sourceBase: base,
+    sourceGrant: (await (await fetch(`${base}/api/transfers/grant`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret }, body: JSON.stringify({ kind: 'sync' }),
+    })).json()).grant,
+  }),
+});
+check('capability-enabled link may run cross-PC sync', promotedSync.status === 200 && (await promotedSync.json()).aiTokens === 0);
 const shellRes = await rpc(ws, 'computer.shell', { command: 'echo ws-shell-ok', shell: 'cmd' });
 check('ws computer.shell', shellRes.ok === true && shellRes.result?.stdout?.includes('ws-shell-ok'));
 
