@@ -53,6 +53,7 @@ const mobileHome = read('apps/mobile/src/screens/HomeScreen.tsx');
 const mobilePcList = read('apps/mobile/src/screens/PcListScreen.tsx');
 const mobilePcsRegistry = read('apps/mobile/src/pcs.ts');
 const mobileRpc = read('apps/mobile/src/pairing.ts');
+const mobileAppConfig = read('apps/mobile/app.json');
 const webRpc = read('packages/web/src/rpc.ts');
 const mobileManifest = read('apps/mobile/android/app/src/main/AndroidManifest.xml');
 const css = read('packages/web/src/styles.css');
@@ -80,11 +81,24 @@ if (!css.includes('.routing-group-bubble') || !css.includes('.graph-edge.selecte
 if (!pcsRegistry.includes('connectionOrigins') || !pcsRegistry.includes('activeOrigin') || !pcsRegistry.includes('originForDiscoveredHost')) throw new Error('desktop registry does not preserve per-address origins for LAN/HTTPS fallback');
 if (!pcsRegistry.includes('if (!result.ok) throw') || pcsRegistry.includes("loadPcs().catch(() => []")) throw new Error('secure desktop registry failures can be mistaken for an empty registry');
 if (!connectGate.includes('clientOwner') || !connectGate.includes('ownsClient()') || !connectGate.includes('if (!isCurrent() || !ownsClient()) return false')) throw new Error('connection gate lacks attempt-scoped client ownership guards');
-if (!connectGate.includes('window.mrRobotDesktop && !preferredPc') || !connectGate.includes('await connectTo(localPc, false)') || !connectGate.includes('로컬 에이전트를 준비하는 중')) throw new Error('desktop startup can regress into the remote PC pairing gate');
+if (!connectGate.includes('const desktopLocalMode = Boolean(window.mrRobotDesktop && !preferredPc && !manageConnections)')
+  || !connectGate.includes('if (desktopLocalMode)')
+  || connectGate.includes('if (window.mrRobotDesktop && !preferredPc)')
+  || !connectGate.includes('await connectTo(localPc, false)')
+  || !connectGate.includes('로컬 에이전트를 준비하는 중')) throw new Error('desktop local startup or explicit connection-manager routing can regress');
 if (!connectGate.includes('if (manageConnections)') || !profileMenu.includes('원격 PC 추가·관리') || !profileMenu.includes('로컬 에이전트 · 준비됨')) throw new Error('desktop optional remote-PC management is not separated from local startup');
+if (!connectGate.includes("/^(?:\\d{6}|\\d{12})$/.test(pin)") || !connectGate.includes("slice(0, 12)") || !connectGate.includes('외출용 12자리 일회용 코드')) throw new Error('desktop remote-PC registration does not accept the stronger travel handoff code');
 if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
 if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
 if (!pluginsView.includes('refreshRemotePairing(status)') || !pluginsView.includes('host: status.publicUrl') || !pluginsView.includes("QRCode.toDataURL(payload") || !pluginsView.includes('모바일 원탭 연결')) throw new Error('Quick Link does not refresh a one-tap HTTPS+PIN QR after starting');
+if ((serverSource.match(/'remote-link\.changed'/g) ?? []).length < 2 || !pluginsView.includes("client.on('remote-link.changed'") || !settings.includes("client.on('remote-link.changed'")) throw new Error('Quick Link runtime status is not delivered live to both administrator views');
+if (!pluginsView.includes('plugin-live-route') || !css.includes('.plugin-live-route') || !pluginsView.includes('expanded !== p.id')) throw new Error('running Quick Link address disappears when the plugin card is collapsed');
+if (!settings.includes("name: 'remote-link.status'") || !settings.includes('Quick Link HTTPS') || !settings.includes('host: remoteOrigin') || !settings.includes('Quick Link 페어링 QR')) throw new Error('mobile connection settings do not merge the active HTTPS Quick Link into the visible route and QR');
+if (!settings.includes("pairing?.host !== '127.0.0.1'") || !settings.includes('pairing-remote-required') || !settings.includes('Quick Link를 먼저 시작하세요')) throw new Error('mobile connection settings can render a loopback QR that mobile clients must reject');
+if (![settings, pluginsView].every((source) => source.includes("width: 300, margin: 4, errorCorrectionLevel: 'M'") && source.includes('hosts: [...new Set(['))) throw new Error('remote pairing QR readability or duplicate-host normalization can regress');
+if (!settings.includes("client.call('pairing.createRemoteHandoff'") || !pluginsView.includes("client.call('pairing.createRemoteHandoff'") || !settings.includes('12자리 외출 코드') || !pluginsView.includes('24시간·1회용 외출 코드 생성')) throw new Error('Quick Link administrator views lack the separate 24-hour one-use remote handoff code');
+if (!settings.includes("client.call('pairing.revokeRemoteHandoff'") || !pluginsView.includes("client.call('pairing.revokeRemoteHandoff'") || !settings.includes('즉시 폐기') || !pluginsView.includes('즉시 폐기')) throw new Error('remote handoff code cannot be explicitly revoked from administrator views');
+if (settings.includes('외출 코드: ${remoteHandoff.pin}') || pluginsView.includes('외출 코드: ${remoteHandoff.pin}')) throw new Error('clipboard failures can persist the remote handoff plaintext in ordinary UI status messages');
 if (!pluginsView.includes('공개 연결 승인') || !pluginsView.includes('위험을 이해했으며 연결') || !pluginsView.includes('사용 후 반드시 링크를 중지')) throw new Error('Cloudflare links can expose the agent publicly without explicit informed confirmation');
 if (!pluginsView.includes('if (remoteActionRef.current) return') || !pluginsView.includes("setRemoteStage('사전 상태 확인')")) throw new Error('Quick Link fast connect lacks duplicate-click and staged loading guards');
 if (!pluginsView.includes("client.call('dependencies.install', { id: 'cloudflared' }, 20 * 60_000)") || !pluginsView.includes("client.call('plugins.setEnabled', { id: plugin.id, enabled: true })") || !pluginsView.includes('Quick Link 빠른 연결')) throw new Error('Quick Link does not bootstrap its dependency and plugin after approval');
@@ -103,9 +117,22 @@ if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyb
 if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 보안 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
 if (mobileRpc.includes('obj.secret') || mobilePcList.includes('payload.secret') || webRpc.includes('obj.secret')) throw new Error('legacy QR payloads can still import a long-lived device secret');
 if (!mobileRpc.includes("obj.version !== 3") || !webRpc.includes("obj.version !== 3")
-  || !mobileRpc.includes("/^\\d{6}$/.test(obj.pin)") || !webRpc.includes("/^\\d{6}$/.test(obj.pin)")) throw new Error('QR pairing is not restricted to v3 six-digit one-time PIN payloads');
+  || !mobileRpc.includes("/^(?:\\d{6}|\\d{12})$/.test(obj.pin)") || !webRpc.includes("/^(?:\\d{6}|\\d{12})$/.test(obj.pin)")) throw new Error('QR pairing is not restricted to v3 six- or twelve-digit one-time code payloads');
 if (!mobileRpc.includes('pairingOrigins(payload)') || !mobileRpc.includes('securePairingOrigin')
   || !webRpc.includes('assertSecurePairingHost')) throw new Error('QR import does not enforce HTTPS or Tailscale origins consistently');
+if (!mobilePcList.includes('scanLockRef.current = true')
+  || !mobilePcList.includes('setDetectedPayload(payload)')
+  || !mobilePcList.includes('이 PC에 연결')
+  || !mobilePcList.includes('다른 QR입니다. 카메라는 계속 스캔 중')
+  || !mobilePcList.includes('barcodeScannerSettings={QR_SCANNER_SETTINGS}')) throw new Error('mobile QR scanning can regress to immediate connection, duplicate handling, or stop-on-foreign-code behavior');
+if (!mobilePcList.includes('const detectedOrigins = detectedPayload ? pairingOrigins(detectedPayload) : []')
+  || !mobilePcList.includes('detectedOrigins.map')
+  || !mobilePcList.includes('표시된 후보만 순서대로 확인')) throw new Error('mobile QR confirmation can hide fallback origins that may actually receive the pairing credential');
+const mobileScanHandler = mobilePcList.slice(mobilePcList.indexOf('const onScan ='), mobilePcList.indexOf('const connectDetectedPc ='));
+if (mobileScanHandler.includes('exchangePin') || !mobileAppConfig.includes('"barcodeScannerEnabled": true')) throw new Error('mobile QR detection can reconnect immediately or ship without native barcode scanning enabled');
+if (!mobilePcList.includes('PAIRING_PIN_PATTERN.test(pin)')
+  || !mobilePcList.includes("slice(0, 12)")
+  || !mobilePcList.includes('6자리 PIN 또는 외출용으로 발급한 12자리')) throw new Error('mobile manual pairing does not accept both local and travel one-time codes');
 if (!mobileChat.includes('FileSystem.createUploadTask') || !mobileChat.includes('cancelAttachment') || !mobileChat.includes('120_000')) throw new Error('mobile chat attachment upload lacks cancel, timeout, or lifecycle cleanup');
 if (!app.includes('!client.isAdmin') || !app.includes('관리 제한')) throw new Error('paired-device admin scope is not visible in the workspace header');
 if (!settings.includes('const canManage = client.isAdmin') || !settings.includes('access-scope-banner') || !settings.includes('disabled={locked}')) throw new Error('settings do not expose and enforce paired-device read-only management scope');

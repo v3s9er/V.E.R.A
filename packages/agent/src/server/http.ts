@@ -223,7 +223,7 @@ export interface PairingInfo {
   port: number;
   pin?: string;
   pinExpiresAt?: number;
-  maskedSecret: string;
+  maskedSecret?: string;
   qrPayload?: string;
   localSecret?: string;
 }

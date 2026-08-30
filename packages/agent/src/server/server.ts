@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { networkInterfaces, hostname as osHostname, platform } from 'node:os';
 import type { AddressInfo } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type {
   AppSettings,
   DeviceCapability,
@@ -56,8 +56,10 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.3';
+export const VERSION = '0.3.4';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
+const REMOTE_HANDOFF_TTL_MINUTES = 5;
+const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
 
@@ -73,7 +75,7 @@ const ADMIN_EVENT_ALLOWLIST = new Set([
   'log', 'plugins.changed', 'providers.changed', 'settings.changed',
   'dependencies.changed', 'memory.changed', 'scheduler.changed', 'scheduler.ran',
   'voice.wake', 'voice.command', 'voice.command.ready', 'voice.command.timeout',
-  'voice.status', 'pairing.changed',
+  'voice.status', 'pairing.changed', 'remote-link.changed',
 ]);
 
 export function serverEventAudience(event: string): ServerEventAudience {
@@ -169,6 +171,8 @@ export class AgentServer {
   private readonly activeHttpTransfers = new Set<AbortController>();
   private hub: WsHub | null = null;
   private pinLimiter = new PinLimiter();
+  /** Explicitly-created, memory-only enrollment code for an unattended handoff. */
+  private remoteHandoff: { pin: string; expiresAt: number } | null = null;
   private startedAt = 0;
   private boundHost = '127.0.0.1';
   private boundPort = 0;
@@ -294,13 +298,20 @@ export class AgentServer {
   exchangePin(pin: string, deviceName = '연결된 기기', permissionCap: PermissionMode = 'ask', clientKey = 'unknown'): { ok: boolean; secret?: string; linkId?: string; error?: string } {
     const check = this.pinLimiter.check(clientKey);
     if (!check.allowed) return { ok: false, error: `too many attempts, retry in ${Math.ceil((check.retryAfterMs ?? 0) / 1000)}s` };
-    if (Date.now() - this.config.pinCreatedAt > PAIRING_PIN_TTL_MS) {
+    const now = Date.now();
+    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) this.remoteHandoff = null;
+    const remoteHandoffMatch = Boolean(
+      this.remoteHandoff
+      && now <= this.remoteHandoff.expiresAt
+      && safeEqual(pin, this.remoteHandoff.pin),
+    );
+    if (!remoteHandoffMatch && now - this.config.pinCreatedAt > PAIRING_PIN_TTL_MS) {
       this.config.regeneratePin();
       this.pinLimiter.reset();
       this.bus.emit('pairing.changed', { at: Date.now() });
       return { ok: false, error: 'pairing pin expired; refresh the PC pairing screen' };
     }
-    if (pin !== this.config.pin) {
+    if (!remoteHandoffMatch && !safeEqual(pin, this.config.pin)) {
       this.pinLimiter.recordFailure(clientKey);
       return { ok: false, error: 'invalid pin' };
     }
@@ -316,12 +327,40 @@ export class AgentServer {
     // this device explicitly after reviewing it in Connected devices.
     const cap = effectiveMode(this.config.settings.safety.mode, effectiveMode(requested, 'ask'));
     const created = this.config.createDeviceLink(deviceName, cap);
-    // A displayed PIN enrolls exactly one device. Rotate after successful
-    // exchange so screenshots and shoulder-surfed codes cannot be replayed.
+    // Every displayed enrollment code is single-use. Consuming either the
+    // short QR PIN or the explicit remote handoff code invalidates both.
+    this.remoteHandoff = null;
     this.config.regeneratePin();
     this.pinLimiter.reset();
     this.bus.emit('pairing.changed', { at: Date.now() });
     return { ok: true, secret: created.token, linkId: created.link.id };
+  }
+
+  /**
+   * Create a stronger unattended enrollment credential without extending the
+   * ordinary six-digit QR PIN. It is never persisted, dies with the agent,
+   * and is consumed together with the normal pairing epoch after one success.
+   */
+  createRemoteHandoff(ttlMinutes = REMOTE_HANDOFF_TTL_MAX_MINUTES): { pin: string; expiresAt: number } {
+    const requested = Number.isFinite(ttlMinutes) ? Math.floor(ttlMinutes) : REMOTE_HANDOFF_TTL_MAX_MINUTES;
+    const boundedMinutes = Math.max(REMOTE_HANDOFF_TTL_MINUTES, Math.min(REMOTE_HANDOFF_TTL_MAX_MINUTES, requested));
+    let pin = '';
+    do pin = String(randomInt(100_000_000_000, 1_000_000_000_000));
+    while (pin === this.config.pin || pin === this.remoteHandoff?.pin);
+    const expiresAt = Date.now() + boundedMinutes * 60_000;
+    this.remoteHandoff = { pin, expiresAt };
+    this.pinLimiter.reset();
+    this.bus.emit('pairing.changed', { at: Date.now() });
+    this.logger.info(`remote handoff code created (expires in ${boundedMinutes} minutes; memory-only)`);
+    return { pin, expiresAt };
+  }
+
+  revokeRemoteHandoff(reason = 'administrator request'): boolean {
+    if (!this.remoteHandoff) return false;
+    this.remoteHandoff = null;
+    this.bus.emit('pairing.changed', { at: Date.now() });
+    this.logger.info(`remote handoff code revoked (${reason})`);
+    return true;
   }
 
   // -- network info -------------------------------------------------------
@@ -383,7 +422,7 @@ export class AgentServer {
       host,
       hosts,
       port,
-      maskedSecret: maskSecret(this.secret),
+      ...(includeLocalSecret || includePairingCode ? { maskedSecret: maskSecret(this.secret) } : {}),
       ...(includePairingCode ? {
         pin: this.config.pin,
         pinExpiresAt: this.config.pinCreatedAt + PAIRING_PIN_TTL_MS,
@@ -614,14 +653,19 @@ export class AgentServer {
       'routing.changed', 'routing.presets.changed', 'conversations.changed',
       'memory.changed', 'scheduler.changed', 'scheduler.ran', 'workspaces.changed',
       'calendar.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
-      'voice.command.timeout', 'voice.status', 'pairing.changed',
+      'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed',
     ].forEach(forward);
+    this.busSubscriptions.push(this.bus.on('remote-link.changed', (data) => {
+      const status = data as { running?: unknown };
+      if (status?.running === false) this.revokeRemoteHandoff('remote link stopped');
+    }));
 
     this.logger.info(`listening on http://${this.boundHost}:${this.boundPort}`);
     return { host: this.boundHost, port: this.boundPort };
   }
 
   async stop(): Promise<void> {
+    this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
     for (const run of this.activeRuns.values()) run.session.cancel();
     for (const transfer of this.activeHttpTransfers) {
@@ -749,6 +793,7 @@ export class AgentServer {
     });
     h.set('pairing.regenerate', (_params, client) => {
       assertAdmin(client);
+      this.remoteHandoff = null;
       const secret = this.config.regenerateSecret();
       const pin = this.config.regeneratePin();
       this.pinLimiter.reset();
@@ -766,11 +811,21 @@ export class AgentServer {
     });
     h.set('pairing.regeneratePin', (_params, client) => {
       assertAdmin(client);
+      this.remoteHandoff = null;
       const pin = this.config.regeneratePin();
       this.pinLimiter.reset();
       this.bus.emit('pairing.changed', { at: Date.now() });
       this.logger.info('pairing pin rotated');
       return { pin };
+    });
+    h.set('pairing.createRemoteHandoff', (params, client) => {
+      assertAdmin(client);
+      const ttlMinutes = Number(p(params).ttlMinutes);
+      return this.createRemoteHandoff(ttlMinutes);
+    });
+    h.set('pairing.revokeRemoteHandoff', (_params, client) => {
+      assertAdmin(client);
+      return { ok: this.revokeRemoteHandoff() };
     });
 
     h.set('settings.get', () => this.getSettings());

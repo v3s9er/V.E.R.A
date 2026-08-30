@@ -70,6 +70,11 @@ try {
 } catch { byteLimitBlocked = true; }
 check('stream byte limit counts actual bytes', byteLimitBlocked);
 check('quick tunnel URL parser', parseQuickTunnelUrl('INF route https://quiet-tree.trycloudflare.com ready') === 'https://quiet-tree.trycloudflare.com');
+const cloudflared2026QuickOutput = [
+  '2026-08-30T22:37:45Z INF | Your quick Tunnel has been created! Visit it at (it may take some time to be reachable): |',
+  '2026-08-30T22:37:45Z INF | https://paradise-motorola-absorption-colony.trycloudflare.com |',
+].join('\n');
+check('quick tunnel URL parser accepts cloudflared 2026.8 boxed output', parseQuickTunnelUrl(cloudflared2026QuickOutput) === 'https://paradise-motorola-absorption-colony.trycloudflare.com');
 check('named tunnel readiness parser', namedTunnelReady('INF Registered tunnel connection connIndex=0'));
 check('named tunnel hostname normalizer', normalizeNamedTunnelHostname('https://PC1.Example.com/') === 'pc1.example.com');
 let unsafeNamedHostBlocked = false;
@@ -268,8 +273,12 @@ const pairingWithoutAuth = await fetch(`${base}/api/pairing`);
 check('pairing info requires auth even on loopback', pairingWithoutAuth.status === 401);
 const pairingResponse = await fetch(`${base}/api/pairing`, { headers: { 'x-mr-robot-token': server.secret } });
 const pairing = await pairingResponse.json();
-check('pairing HTTP info omits ephemeral pairing code', pairingResponse.status === 200 && !Object.hasOwn(pairing, 'pin') && !Object.hasOwn(pairing, 'qrPayload') && pairing.maskedSecret && pairing.hosts?.includes(pairing.host));
-check('pairing HTTP response never exposes localSecret', !Object.hasOwn(pairing, 'localSecret'));
+check('pairing HTTP info omits every administrator credential hint', pairingResponse.status === 200
+  && !Object.hasOwn(pairing, 'pin')
+  && !Object.hasOwn(pairing, 'qrPayload')
+  && !Object.hasOwn(pairing, 'maskedSecret')
+  && !Object.hasOwn(pairing, 'localSecret')
+  && pairing.hosts?.includes(pairing.host));
 const localPairing = server.pairingInfo(false, true);
 check('local administrator can request a short-lived pairing code', typeof localPairing.pin === 'string' && localPairing.pin.length === 6 && typeof localPairing.qrPayload === 'string' && Number(localPairing.pinExpiresAt) > Date.now());
 const proxiedPairingResponse = await fetch(`${base}/api/pairing`, {
@@ -482,12 +491,14 @@ server.bus.emit('scheduler.changed', [{ id: 'private-job', prompt: 'PRIVATE_PROM
 server.bus.emit('log', { ts: Date.now(), level: 'error', scope: 'private', message: 'PRIVATE_LOG' });
 server.bus.emit('voice.command', { text: 'PRIVATE_VOICE_TRANSCRIPT' });
 server.bus.emit('providers.changed', [{ id: 'private-provider', label: 'PRIVATE_PROVIDER' }]);
+server.bus.emit('remote-link.changed', { running: true, publicUrl: 'https://private-route.trycloudflare.com' });
+server.bus.emit('pairing.changed', { at: Date.now() });
 server.bus.emit('future.unreviewed.secret', { secret: 'PRIVATE_FUTURE_EVENT' });
 await new Promise((resolveTimer) => setTimeout(resolveTimer, 30));
 ws.off('message', collectPaired);
 adminEventWs.off('message', collectAdmin);
-const sensitiveEvents = new Set(['scheduler.changed', 'log', 'voice.command', 'providers.changed']);
-check('non-admin WS receives no scheduler prompt/command/result, log, voice transcript, or provider-admin events', !pairedEvents.some((message) => sensitiveEvents.has(message.event)));
+const sensitiveEvents = new Set(['scheduler.changed', 'log', 'voice.command', 'providers.changed', 'remote-link.changed', 'pairing.changed']);
+check('non-admin WS receives no scheduler, log, voice, provider, or remote-link administrator events', !pairedEvents.some((message) => sensitiveEvents.has(message.event)));
 check('administrator WS receives reviewed sensitive events', [...sensitiveEvents].every((event) => adminEvents.some((message) => message.event === event)));
 check('unreviewed event types fail closed for every WS client', !pairedEvents.some((message) => message.event === 'future.unreviewed.secret') && !adminEvents.some((message) => message.event === 'future.unreviewed.secret'));
 adminEventWs.close();

@@ -29,6 +29,7 @@ interface OrcaStatus {
 }
 interface VoiceConfig { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number }
 interface QuickPairingInfo { pin?: string; pinExpiresAt?: number }
+interface RemoteHandoffInfo { pin: string; expiresAt: number }
 const KIND_LABEL: Record<string, string> = { integration: '연동', transport: '연결', tool: '도구', workflow: '워크플로', input: '입력' };
 const DEFAULT_REMOTE_CONFIG: RemoteLinkConfig = {
   provider: 'cloudflare-quick',
@@ -60,6 +61,7 @@ export function PluginsView() {
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteStage, setRemoteStage] = useState('');
   const [remotePairing, setRemotePairing] = useState<{ pin: string; expiresAt?: number; qrUrl: string } | null>(null);
+  const [remoteHandoff, setRemoteHandoff] = useState<RemoteHandoffInfo | null>(null);
   const [quickLinkConfirm, setQuickLinkConfirm] = useState<PluginInfo | null>(null);
   const remoteActionRef = useRef(false);
   const remoteStatusRef = useRef<RemoteLinkStatus | null>(null);
@@ -93,12 +95,12 @@ export function PluginsView() {
       app: 'mr-robot',
       version: 3,
       host: status.publicUrl,
-      hosts: [status.publicUrl],
+      hosts: [...new Set([status.publicUrl])],
       protocol: 'https',
       port: 443,
       pin: pairing.pin,
     });
-    const qrUrl = await QRCode.toDataURL(payload, { width: 220, margin: 1 });
+    const qrUrl = await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' });
     if (mountedRef.current) setRemotePairing({ pin: pairing.pin, expiresAt: pairing.pinExpiresAt, qrUrl });
   }, [client]);
 
@@ -153,10 +155,19 @@ export function PluginsView() {
     void refresh();
     const off = client.on('plugins.changed', (data) => setPlugins(data as PluginInfo[]));
     const offPairing = client.on('pairing.changed', () => {
+      setRemoteHandoff(null);
       if (canManage) void refreshRemotePairing(remoteStatusRef.current).catch(() => setRemotePairing(null));
     });
-    return () => { off(); offPairing(); };
-  }, [canManage, client, refresh, refreshRemotePairing]);
+    const offRemoteLink = client.on('remote-link.changed', (data) => {
+      if (!canManage) return;
+      const status = data as RemoteLinkStatus;
+      commitRemoteStatus(status);
+      if (status.running) setRemoteConfig(status.config);
+      else setRemoteHandoff(null);
+      void refreshRemotePairing(status).catch(() => setRemotePairing(null));
+    });
+    return () => { off(); offPairing(); offRemoteLink(); };
+  }, [canManage, client, commitRemoteStatus, refresh, refreshRemotePairing]);
 
   useEffect(() => {
     if (!canManage) return;
@@ -469,11 +480,47 @@ export function PluginsView() {
       const status = await client.call('plugins.call', { name: 'remote-link.stop', params: {} }) as RemoteLinkStatus;
       commitRemoteStatus(status);
       setRemotePairing(null);
+      setRemoteHandoff(null);
       setCallResult('원격 링크를 닫았습니다. 저장된 고정 주소와 암호화 토큰은 유지됩니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRemoteBusy(false);
+    }
+  };
+
+  const createRemoteHandoff = async (): Promise<void> => {
+    if (remoteBusy || !remoteStatus?.running || !remoteStatus.publicUrl) return;
+    setRemoteBusy(true);
+    setError('');
+    try {
+      const handoff = await client.call('pairing.createRemoteHandoff', { ttlMinutes: 24 * 60 }) as RemoteHandoffInfo;
+      setRemoteHandoff(handoff);
+      setCallResult('24시간·1회용 외출 코드를 만들었습니다. 한 기기가 연결되거나 앱이 재시작되면 즉시 폐기됩니다.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const copyRemoteHandoffPin = async (): Promise<void> => {
+    if (!remoteHandoff) return;
+    try {
+      await navigator.clipboard.writeText(remoteHandoff.pin);
+      setCallResult('12자리 외출 코드를 클립보드에 복사했습니다.');
+    } catch {
+      setCallResult('클립보드 복사에 실패했습니다. 화면의 코드를 직접 입력하세요.');
+    }
+  };
+
+  const revokeRemoteHandoff = async (): Promise<void> => {
+    try {
+      await client.call('pairing.revokeRemoteHandoff', {});
+      setRemoteHandoff(null);
+      setCallResult('외출용 일회용 코드를 폐기했습니다.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -587,6 +634,11 @@ export function PluginsView() {
                 제거
               </Button>}
             </div>
+            {p.id === 'remote-link' && remoteStatus?.publicUrl && expanded !== p.id && <div className="plugin-live-route">
+              <span>HTTPS</span>
+              <b title={remoteStatus.publicUrl}>{remoteStatus.publicUrl}</b>
+              <Button variant="ghost" onClick={() => void copyRemoteAddress(remoteStatus.publicUrl as string)}>복사</Button>
+            </div>}
             {expanded === p.id && <div className="plugin-detail">
             <div className="plugin-detail-facts"><span><b>상태</b>{p.status === 'loaded' ? '정상 로드됨' : p.status}</span><span><b>이벤트</b>구독 {p.subscriptions} · 타이머 {p.timers}</span><span title={p.source}><b>소스</b>{p.source}</span></div>
             {p.capabilities.length > 0 && <div className="plugin-capabilities">{p.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
@@ -630,6 +682,7 @@ export function PluginsView() {
                 {!cloudflared?.installed && <Button variant="accent" onClick={() => void installCloudflared()} disabled={remoteBusy}>{remoteBusy ? `${remoteStage || '설치 준비 중'}…` : 'cloudflared 설치'}</Button>}
                 <Button variant="ghost" onClick={() => void saveRemoteLink()} disabled={remoteBusy || remoteStatus?.running}>설정 저장</Button>
                 <Button variant="accent" onClick={() => setQuickLinkConfirm(p)} disabled={remoteBusy || remoteStatus?.running || (remoteConfig.provider === 'cloudflare-named' && (!remoteConfig.hostname?.trim() || (!remoteConfig.hasTunnelToken && !remoteTunnelToken.trim())))}>{remoteBusy ? `${remoteStage || '연결 준비 중'}…` : remoteConfig.provider === 'cloudflare-named' ? '고정 Tunnel 연결' : 'Quick Link 빠른 연결'}</Button>
+                {remoteStatus?.running && remoteStatus.publicUrl && <Button variant="ghost" onClick={() => void createRemoteHandoff()} disabled={remoteBusy}>24시간·1회용 외출 코드 생성</Button>}
                 <Button variant="ghost" onClick={() => void verifyRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>외부 연결 검사</Button>
                 <Button variant="danger" onClick={() => void stopRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>링크 중지</Button>
               </div>
@@ -637,8 +690,14 @@ export function PluginsView() {
                 <span>HTTPS <b>{remoteStatus.publicUrl}</b> <Button variant="ghost" onClick={() => void copyRemoteAddress(remoteStatus.publicUrl as string)}>복사</Button></span>
                 {remoteStatus.websocketUrl && <span>WSS <b>{remoteStatus.websocketUrl}</b> <Button variant="ghost" onClick={() => void copyRemoteAddress(remoteStatus.websocketUrl as string)}>복사</Button></span>}
               </div>}
+              {remoteStatus?.publicUrl && remoteHandoff && <div className="remote-handoff">
+                <div><span>12자리 외출 코드</span><b>{remoteHandoff.pin}</b></div>
+                <small>만료 {new Date(remoteHandoff.expiresAt).toLocaleString()} · 한 기기 연결 후 즉시 폐기 · 앱 재시작 시 폐기</small>
+                <Button variant="ghost" onClick={() => void copyRemoteHandoffPin()}>코드 복사</Button>
+                <Button variant="danger" onClick={() => void revokeRemoteHandoff()}>즉시 폐기</Button>
+              </div>}
               {remoteStatus?.publicUrl && remotePairing && <div className="pairing-grid quick-link-pairing">
-                <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Cloudflare 모바일 연결 QR" width={220} height={220} /></div>
+                <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Cloudflare 모바일 연결 QR" width={300} height={300} /></div>
                 <div className="pairing-info">
                   <b>모바일 원탭 연결</b>
                   <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. HTTPS 주소와 1회용 PIN이 함께 들어 있습니다.</p>

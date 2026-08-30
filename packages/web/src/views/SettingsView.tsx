@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import type { AppSettings, DeviceCapability, MemoryItem, ProviderInfo, ProviderSource, ProviderType, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
+import type { AppSettings, DeviceCapability, MemoryItem, ProviderInfo, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
@@ -13,11 +13,12 @@ interface PairingInfo {
   port: number;
   pin: string;
   pinExpiresAt?: number;
-  maskedSecret: string;
+  maskedSecret?: string;
   qrPayload: string;
 }
 
 interface DeviceLink { id: string; name: string; permissionCap: AppSettings['safety']['mode']; capabilities: DeviceCapability[]; createdAt: number; revokedAt?: number }
+interface RemoteHandoffInfo { pin: string; expiresAt: number }
 interface VoiceConfig {
   enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number;
   replyPreset: 'neon-runner' | 'system' | 'custom'; voiceName: string; replyText: string; replyRate: number; replyVolume: number;
@@ -120,6 +121,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [telemetry, setTelemetry] = useState<TelemetrySummary | null>(null);
   const [memoryText, setMemoryText] = useState('');
   const [qrUrl, setQrUrl] = useState('');
+  const [remoteStatus, setRemoteStatus] = useState<RemoteLinkStatus | null>(null);
+  const [remoteHandoff, setRemoteHandoff] = useState<RemoteHandoffInfo | null>(null);
+  const [remoteHandoffBusy, setRemoteHandoffBusy] = useState(false);
+  const [remoteHandoffMessage, setRemoteHandoffMessage] = useState('');
 
   // provider add form
   const [preset, setPreset] = useState('deepseek');
@@ -182,10 +187,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       setTelemetry(stats);
       if (canManage) {
         void client.call('pairing.info', {}).then((value) => setPairing(value as PairingInfo)).catch(() => setPairing(null));
+        void client.call('plugins.call', { name: 'remote-link.status', params: {} }).then((value) => setRemoteStatus(value as RemoteLinkStatus)).catch(() => setRemoteStatus(null));
         void refreshVoice();
         void client.call('pairing.links', {}).then((links) => setDeviceLinks(links as DeviceLink[])).catch(() => setDeviceLinks([]));
       } else {
         setPairing(null);
+        setRemoteStatus(null);
+        setRemoteHandoff(null);
         setDeviceLinks([]);
         setVoiceConfig(null);
         setVoiceStatus(null);
@@ -215,7 +223,14 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       ...(d as Partial<VoiceStatus>),
     } as VoiceStatus)));
     const offPairing = client.on('pairing.changed', () => {
+      setRemoteHandoff(null);
       if (canManage) void client.call('pairing.info', {}).then((value) => setPairing(value as PairingInfo)).catch(() => setPairing(null));
+    });
+    const offRemoteLink = client.on('remote-link.changed', (data) => {
+      if (!canManage) return;
+      const status = data as RemoteLinkStatus;
+      setRemoteStatus(status);
+      if (!status.running) setRemoteHandoff(null);
     });
     return () => {
       offP();
@@ -225,6 +240,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       offM();
       offV();
       offPairing();
+      offRemoteLink();
     };
   }, [client, refresh]);
 
@@ -250,8 +266,15 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
 
   useEffect(() => {
     let alive = true;
-    if (pairing?.qrPayload) {
-      void QRCode.toDataURL(pairing.qrPayload, { width: 220, margin: 1 })
+    const remoteOrigin = remoteStatus?.running ? remoteStatus.publicUrl : undefined;
+    const payload = remoteOrigin && pairing?.pin
+      ? JSON.stringify({ app: 'mr-robot', version: 3, host: remoteOrigin, hosts: [...new Set([remoteOrigin])], protocol: 'https', port: 443, pin: pairing.pin })
+      : pairing?.host !== '127.0.0.1'
+        ? pairing?.qrPayload
+        : undefined;
+    setQrUrl('');
+    if (payload) {
+      void QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' })
         .then((url) => {
           if (alive) setQrUrl(url);
         })
@@ -260,7 +283,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     return () => {
       alive = false;
     };
-  }, [pairing]);
+  }, [pairing, remoteStatus]);
 
   const applyPreset = (id: string): void => {
     setPreset(id);
@@ -310,6 +333,41 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       await client.call('settings.set', patch);
     } catch {
       /* ignore */
+    }
+  };
+
+  const createRemoteHandoff = async (): Promise<void> => {
+    if (remoteHandoffBusy || !remoteStatus?.running || !remoteStatus.publicUrl) return;
+    setRemoteHandoffBusy(true);
+    setRemoteHandoffMessage('');
+    try {
+      const handoff = await client.call('pairing.createRemoteHandoff', { ttlMinutes: 24 * 60 }) as RemoteHandoffInfo;
+      setRemoteHandoff(handoff);
+      setRemoteHandoffMessage('24시간·1회용 외출 코드를 만들었습니다.');
+    } catch (error) {
+      setRemoteHandoffMessage(`외출 코드 생성 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRemoteHandoffBusy(false);
+    }
+  };
+
+  const copyRemoteHandoff = async (): Promise<void> => {
+    if (!remoteHandoff) return;
+    try {
+      await navigator.clipboard.writeText(remoteHandoff.pin);
+      setRemoteHandoffMessage('12자리 외출 코드를 복사했습니다.');
+    } catch {
+      setRemoteHandoffMessage('클립보드 복사에 실패했습니다. 화면의 코드를 직접 입력하세요.');
+    }
+  };
+
+  const revokeRemoteHandoff = async (): Promise<void> => {
+    try {
+      await client.call('pairing.revokeRemoteHandoff', {});
+      setRemoteHandoff(null);
+      setRemoteHandoffMessage('외출용 일회용 코드를 폐기했습니다.');
+    } catch (error) {
+      setRemoteHandoffMessage(`외출 코드 폐기 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -531,6 +589,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const selectedRoutingPreset = routingPresets.find((item) => item.id === selectedRoutingPresetId);
+  const remotePairingUrl = remoteStatus?.running ? remoteStatus.publicUrl : undefined;
   const settingsSections = [
     { id: 'models', title: '모델 및 연결', adminOnly: false },
     { id: 'routing', title: '모델 라우팅', adminOnly: false },
@@ -906,31 +965,40 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         </div>
         {pairing && (
           <div className="pairing-grid">
-            <div className="pairing-qr">
-              {qrUrl ? <img src={qrUrl} alt="페어링 QR" width={220} height={220} /> : <div className="qr-empty">QR 생성 중…</div>}
-            </div>
+            {!remotePairingUrl && pairing.host === '127.0.0.1' ? <div className="pairing-remote-required">
+              <span>☁</span>
+              <b>Quick Link를 먼저 시작하세요</b>
+              <p>현재 주소는 이 PC 안에서만 열립니다. 플러그인에서 Quick Link를 켜면 휴대폰이 인식할 HTTPS QR이 여기에 자동으로 표시됩니다.</p>
+            </div> : <div className="pairing-qr">
+              {qrUrl ? <img src={qrUrl} alt={remotePairingUrl ? 'Quick Link 페어링 QR' : '페어링 QR'} width={300} height={300} /> : <div className="qr-empty">QR 생성 중…</div>}
+            </div>}
             <div className="pairing-info">
               <div className="pairing-host">
-                📡 <b>{pairing.host}:{pairing.port}</b>
+                📡 <b>{remotePairingUrl ?? `${pairing.host}:${pairing.port}`}</b>
               </div>
               <div className="pairing-routes">
-                <span>보안 접속 주소 <b>{pairing.host}:{pairing.port}</b></span>
+                {remotePairingUrl && <span>Quick Link HTTPS <b>{remotePairingUrl}</b></span>}
+                {remoteStatus?.websocketUrl && <span>Quick Link WSS <b>{remoteStatus.websocketUrl}</b></span>}
+                <span>{remotePairingUrl ? 'PC 보조 접속 주소' : '보안 접속 주소'} <b>{pairing.host}:{pairing.port}</b></span>
                 {pairing.hosts.filter((host) => host !== pairing.host).map((host) => <span key={host}>보조 접속 주소 <b>{host}:{pairing.port}</b></span>)}
-                {pairing.host === '127.0.0.1' && <span className="warn">원격 보안 주소 없음 · VPN 없이 연결하려면 플러그인에서 Quick Link를 시작하세요.</span>}
+                {pairing.host === '127.0.0.1' && !remotePairingUrl && <span className="warn">원격 보안 주소 없음 · VPN 없이 연결하려면 플러그인에서 Quick Link를 시작하세요.</span>}
               </div>
               <div className="pairing-pin">
                 PIN <b>{pairing.pin}</b> <span>· 5분 / 1회용</span>
               </div>
-              <div className="pairing-secret">
+              {pairing.maskedSecret && <div className="pairing-secret">
                 시크릿 {pairing.maskedSecret}
-              </div>
+              </div>}
               <p className="panel-hint">
-                폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다. 원격 주소가 없으면 플러그인에서 Quick Link를 먼저 시작하세요.
+                {remotePairingUrl || pairing.host !== '127.0.0.1'
+                  ? <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. {remotePairingUrl ? '실행 중인 Quick Link HTTPS 주소가 QR에 자동으로 포함됐습니다. ' : ''}PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다.</>
+                  : <>휴대폰에서 사용할 수 있는 보안 주소가 아직 없습니다. 플러그인에서 Quick Link를 시작하면 QR과 원격 주소가 자동으로 나타납니다.</>}
               </p>
               <div className="plugin-actions">
                 <Button variant="ghost" onClick={() => void client.call('pairing.regeneratePin', {}).then(() => void refresh())}>
                   PIN 재생성
                 </Button>
+                {remotePairingUrl && <Button variant="ghost" disabled={remoteHandoffBusy} onClick={() => void createRemoteHandoff()}>{remoteHandoffBusy ? '생성 중…' : '24시간·1회용 외출 코드 생성'}</Button>}
                 <Button
                   variant="danger"
                   onClick={() => setDangerConfirm({ title: '모든 기기 연결을 초기화할까요?', message: '관리자 시크릿을 새로 만들면 현재 연결된 모바일과 다른 PC가 즉시 해제됩니다. 새 QR로 다시 연결해야 합니다.', confirmLabel: '시크릿 회전', action: async () => { await client.call('pairing.regenerate', {}); await refresh(); } })}
@@ -938,6 +1006,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                   시크릿 회전 (모든 연결 해제)
                 </Button>
               </div>
+              {remotePairingUrl && remoteHandoff && <div className="remote-handoff">
+                <div><span>12자리 외출 코드</span><b>{remoteHandoff.pin}</b></div>
+                <small>만료 {new Date(remoteHandoff.expiresAt).toLocaleString()} · 한 기기 연결 후 즉시 폐기 · 앱 재시작 시 폐기</small>
+                <Button variant="ghost" onClick={() => void copyRemoteHandoff()}>코드 복사</Button>
+                <Button variant="danger" onClick={() => void revokeRemoteHandoff()}>즉시 폐기</Button>
+              </div>}
+              {remoteHandoffMessage && <p className="panel-hint">{remoteHandoffMessage}</p>}
               <div className="linked-devices">
                 <h4>연결된 기기</h4>
                 {deviceLinks.filter((link) => !link.revokedAt).map((link) => <div className="linked-device" key={link.id}>

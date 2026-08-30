@@ -58,7 +58,7 @@ console.log('1c. server event visibility is fail-closed');
 {
   check('conversation summaries remain available to paired clients', serverEventAudience('conversations.changed') === 'paired');
   check('scheduler/log/voice/provider events require administrator', [
-    'scheduler.changed', 'scheduler.ran', 'log', 'voice.command', 'voice.status', 'providers.changed', 'plugins.changed', 'dependencies.changed',
+    'scheduler.changed', 'scheduler.ran', 'log', 'voice.command', 'voice.status', 'providers.changed', 'plugins.changed', 'dependencies.changed', 'remote-link.changed',
   ].every((event) => serverEventAudience(event) === 'admin'));
   check('new unreviewed event types are not broadcast', serverEventAudience('future.unreviewed.secret') === 'none');
 }
@@ -504,6 +504,54 @@ console.log('7c. distributed PIN guessing hits a global bound');
   const rotated = handlers.get('pairing.regeneratePin')({}, admin);
   const recovered = server.exchangePin(rotated.pin, 'legitimate', 'ask', 'fresh-address');
   check('local PIN rotation clears a distributed lockout for a new enrollment epoch', recovered.ok === true);
+}
+
+console.log('7d. unattended remote handoff is admin-only, strong, memory-only and single-use');
+{
+  const server = new AgentServer();
+  const handlers = server.handlers();
+  const admin = { id: 'admin', state: { auth: { isAdmin: true, permissionCap: 'full' }, chat: new ChatSession() } };
+  const paired = { id: 'paired', state: { auth: { isAdmin: false, linkId: 'paired-link', permissionCap: 'ask' }, chat: new ChatSession() } };
+  let pairedBlocked = false;
+  try { handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, paired); } catch { pairedBlocked = true; }
+  check('only the local administrator can mint an unattended handoff code', pairedBlocked);
+  const pairedInfo = handlers.get('pairing.info')({}, paired);
+  check('paired clients receive no PIN, QR, local secret or administrator-secret fingerprint', ['pin', 'qrPayload', 'localSecret', 'maskedSecret'].every((field) => !Object.hasOwn(pairedInfo, field)));
+
+  const shortPinBefore = server.config.pin;
+  const before = Date.now();
+  const handoff = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  const ttl = handoff.expiresAt - before;
+  check('remote handoff uses a separate 12-digit code capped at 24 hours', /^\d{12}$/.test(handoff.pin) && handoff.pin !== shortPinBefore && ttl > 23 * 60 * 60_000 && ttl <= 24 * 60 * 60_000 + 1_000);
+  check('creating a remote handoff does not weaken or extend the ordinary QR PIN', server.config.pin === shortPinBefore);
+  check('remote handoff plaintext is never persisted', !readFileSync(join(home, 'config.json'), 'utf8').includes(handoff.pin));
+
+  const accepted = server.exchangePin(handoff.pin, 'remote phone', 'full', 'remote-handoff-client');
+  const auth = accepted.secret ? server.authenticate(accepted.secret) : null;
+  const replay = server.exchangePin(handoff.pin, 'replay phone', 'ask', 'remote-handoff-replay');
+  check('remote handoff grants at most ask and is consumed exactly once', accepted.ok === true && auth?.isAdmin === false && auth?.permissionCap === 'ask' && replay.ok === false);
+  check('consuming the handoff rotates the ordinary PIN too', server.config.pin !== shortPinBefore);
+
+  const handoffBeforeShortPair = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  const acceptedShort = server.exchangePin(server.config.pin, 'nearby phone', 'ask', 'nearby-client');
+  const handoffAfterShortPair = server.exchangePin(handoffBeforeShortPair.pin, 'late remote phone', 'ask', 'late-remote-client');
+  check('consuming the ordinary QR PIN also invalidates a pending remote handoff', acceptedShort.ok === true && handoffAfterShortPair.ok === false);
+
+  const handoffBeforeRotation = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  handlers.get('pairing.regeneratePin')({}, admin);
+  check('explicit PIN rotation revokes a pending remote handoff', server.exchangePin(handoffBeforeRotation.pin, 'stale handoff', 'ask', 'stale-rotation-client').ok === false);
+
+  const handoffBeforeRevoke = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  const revoked = handlers.get('pairing.revokeRemoteHandoff')({}, admin);
+  check('administrator can explicitly revoke a remote handoff', revoked.ok === true && server.exchangePin(handoffBeforeRevoke.pin, 'revoked handoff', 'ask', 'revoked-handoff-client').ok === false);
+
+  await server.start({ port: 0 });
+  const handoffBeforeLinkStop = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  server.bus.emit('remote-link.changed', { running: false });
+  check('stopping the public remote link revokes its remote handoff', server.exchangePin(handoffBeforeLinkStop.pin, 'link-stop replay', 'ask', 'link-stop-client').ok === false);
+  const handoffBeforeAgentStop = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
+  await server.stop();
+  check('stopping and reusing the same agent object cannot retain a handoff', server.exchangePin(handoffBeforeAgentStop.pin, 'agent-stop replay', 'ask', 'agent-stop-client').ok === false);
 }
 
 console.log('8. stored conversation permissions cannot exceed the linked device cap');

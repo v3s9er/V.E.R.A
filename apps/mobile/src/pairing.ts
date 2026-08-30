@@ -38,7 +38,7 @@ export function parsePairingPayload(raw: string): PairingPayload | null {
     if (obj?.app !== 'mr-robot' || obj.version !== 3) return null;
     if (typeof obj.host !== 'string' || !obj.host.trim() || obj.host.length > 2_048) return null;
     if (!Number.isInteger(obj.port) || Number(obj.port) < 1 || Number(obj.port) > 65_535) return null;
-    if (typeof obj.pin !== 'string' || !/^\d{6}$/.test(obj.pin)) return null;
+    if (typeof obj.pin !== 'string' || !/^(?:\d{6}|\d{12})$/.test(obj.pin)) return null;
     if (obj.protocol !== undefined && obj.protocol !== 'http' && obj.protocol !== 'https') return null;
     if (obj.hosts !== undefined && (!Array.isArray(obj.hosts)
       || obj.hosts.length > 8

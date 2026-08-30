@@ -113,7 +113,9 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       try {
         // The Electron shell contains the local agent. It always opens this
         // loopback session directly and never needs pairing or registry I/O.
-        if (window.mrRobotDesktop && !preferredPc) {
+        // Opening the optional connection manager must bypass the automatic
+        // loopback connection so its PC registry screen remains mounted.
+        if (desktopLocalMode) {
           const serving = await detectServingPc();
           if (!serving) throw new Error('내장 로컬 에이전트를 찾을 수 없습니다.');
           const localPc: SavedPc = { ...serving, id: DESKTOP_LOCAL_PC_ID, addedAt: 0 };
@@ -172,7 +174,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
   };
 
   const addPc = async (): Promise<void> => {
-    if (!hostPort.trim() || pin.length !== 6 || addBusy) return;
+    if (!hostPort.trim() || !/^(?:\d{6}|\d{12})$/.test(pin) || addBusy) return;
     setAddBusy(true);
     setError('');
     try {
@@ -313,11 +315,11 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
             <Field label="PC 주소" hint="해당 PC의 설정 → 모바일 연결 탭에 표시되는 주소">
               <Input value={hostPort} onChange={(e) => setHostPort(e.target.value)} placeholder="https://example.trycloudflare.com" />
             </Field>
-            <Field label="PIN 코드" hint="해당 PC 화면에 표시되는 6자리 숫자">
+            <Field label="연결 코드" hint="해당 PC의 6자리 PIN 또는 외출용 12자리 일회용 코드">
               <Input
                 value={pin}
-                onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="123456"
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                placeholder="6자리 또는 12자리"
                 inputMode="numeric"
               />
             </Field>
@@ -325,7 +327,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
               <Button variant="ghost" onClick={() => setShowAdd(false)} disabled={addBusy}>
                 취소
               </Button>
-              <Button onClick={() => void addPc()} disabled={addBusy || !hostPort.trim() || pin.length !== 6}>
+              <Button onClick={() => void addPc()} disabled={addBusy || !hostPort.trim() || !/^(?:\d{6}|\d{12})$/.test(pin)}>
                 {addBusy ? '등록 중…' : '등록 및 연결'}
               </Button>
             </div>
