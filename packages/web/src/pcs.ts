@@ -37,6 +37,7 @@ export interface ParsedPcEndpoint {
 
 const KEY = 'mr-robot.pcs';
 const LAST_KEY = 'mr-robot.lastPcId';
+export const DESKTOP_LOCAL_PC_ID = 'desktop-local';
 
 export function loadPcs(): SavedPc[] {
   try {
@@ -75,17 +76,25 @@ export async function loadPcsForEnvironment(): Promise<SavedPc[]> {
     ? { ok: true, value: loaded }
     : loaded;
   if (!result.ok) throw new Error(result.error || '암호화된 PC 연결 정보를 읽지 못했습니다.');
-  const encrypted = result.value.filter(isSavedPcLike).map(normalizePc);
+  const normalizedEncrypted = result.value.filter(isSavedPcLike).map(normalizePc);
+  // The desktop owns its embedded loopback agent and must never depend on a
+  // persisted pairing record for it. Keep only optional remote PCs here.
+  const encrypted = window.mrRobotDesktop
+    ? normalizedEncrypted.filter((pc) => !isLoopbackHost(pc.host))
+    : normalizedEncrypted;
+  if (JSON.stringify(result.value) !== JSON.stringify(encrypted)) await window.mrRobotDesktop.savePcs(encrypted);
   if (encrypted.length) {
-    if (JSON.stringify(result.value) !== JSON.stringify(encrypted)) await window.mrRobotDesktop.savePcs(encrypted);
     return encrypted;
   }
   const legacy = loadPcs();
+  const migratable = window.mrRobotDesktop
+    ? legacy.filter((pc) => !isLoopbackHost(pc.host))
+    : legacy;
   if (legacy.length) {
-    await window.mrRobotDesktop.savePcs(legacy);
+    if (migratable.length) await window.mrRobotDesktop.savePcs(migratable);
     try { localStorage.removeItem(KEY); } catch { /* best effort migration */ }
   }
-  return legacy;
+  return migratable;
 }
 
 export async function savePcsForEnvironment(pcs: SavedPc[]): Promise<void> {

@@ -142,7 +142,9 @@ function readPcRegistryFile(file) {
 }
 
 function syncFile(file) {
-  const fd = openSync(file, 'r');
+  // FlushFileBuffers on Windows requires a handle opened with write access.
+  // A read-only descriptor can fail with EPERM even for a file we just wrote.
+  const fd = openSync(file, 'r+');
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { SavedPc } from '../pcs';
+import { DESKTOP_LOCAL_PC_ID, type SavedPc } from '../pcs';
 import type { ViewKey } from './Sidebar';
 
 const LABELS: Record<ViewKey, string> = {
@@ -13,7 +13,7 @@ const SHORTCUTS: Array<{ key: Exclude<ViewKey, 'chat'>; icon: string; label: str
 ];
 
 export function ProfileMenu({
-  view, onChange, deviceName, connected, pcs, activePcId, onSwitchPc, onDisconnect, embedded = false, header = false, standalone = false,
+  view, onChange, deviceName, connected, pcs, activePcId, onSwitchPc, onDisconnect, onManagePcs, embedded = false, header = false, standalone = false,
 }: {
   view: ViewKey;
   onChange: (v: ViewKey) => void;
@@ -23,11 +23,13 @@ export function ProfileMenu({
   activePcId?: string;
   onSwitchPc: (id: string) => void;
   onDisconnect: () => void;
+  onManagePcs: () => void;
   embedded?: boolean;
   header?: boolean;
   standalone?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const desktopLocal = standalone && activePcId === DESKTOP_LOCAL_PC_ID;
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent): void => {
@@ -47,11 +49,13 @@ export function ProfileMenu({
         <div className="profile-section-label">연결된 PC</div>
         {pcs.map((pc) => <button key={pc.id} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}</button>)}
       </div>}
-      <button className="profile-action danger" onClick={() => { onDisconnect(); setOpen(false); }}>연결 관리</button>
+      {desktopLocal
+        ? <button className="profile-action" onClick={() => { onManagePcs(); setOpen(false); }}>원격 PC 추가·관리</button>
+        : <button className="profile-action danger" onClick={() => { onDisconnect(); setOpen(false); }}>{standalone ? '로컬 PC로 돌아가기' : '연결 관리'}</button>}
     </div>}
     <button className="profile-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
       <span className="profile-avatar">N</span>
-      <span className="profile-copy"><b>{deviceName || 'Mr.Robot'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (standalone ? '데스크톱 앱 · 연결됨' : '연결됨') : '연결 끊김'}</small></span>
+      <span className="profile-copy"><b>{deviceName || 'Mr.Robot'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (desktopLocal ? '로컬 에이전트 · 준비됨' : '연결됨') : '연결 끊김'}</small></span>
       <span className="profile-more">•••</span>
     </button>
   </div>;

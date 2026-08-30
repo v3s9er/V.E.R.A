@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { DependencyReport, SystemStatus } from '@mr-robot/shared';
 import { MrRobotClient } from './rpc';
 import { MrRobotContext } from './state';
-import { loadPcsForEnvironment, setLastPcId, type SavedPc } from './pcs';
+import { DESKTOP_LOCAL_PC_ID, loadPcsForEnvironment, setLastPcId, type SavedPc } from './pcs';
 import { ConnectGate } from './components/ConnectGate';
 import type { ViewKey } from './components/Sidebar';
 import { ProfileMenu } from './components/ProfileMenu';
@@ -22,14 +22,19 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [activePc, setActivePc] = useState<SavedPc | null>(null);
   const [pcList, setPcList] = useState<SavedPc[]>([]);
+  const [preferredPc, setPreferredPc] = useState<SavedPc | null>(null);
+  const [managingConnections, setManagingConnections] = useState(false);
   const [showDependencySetup, setShowDependencySetup] = useState(false);
   const [voiceCommands, setVoiceCommands] = useState<Array<{ id: number; text: string }>>([]);
   const voiceCommandId = useRef(0);
   const desktopStandalone = Boolean(window.mrRobotDesktop);
+  const desktopLocalActive = desktopStandalone && activePc?.id === DESKTOP_LOCAL_PC_ID;
 
   useEffect(() => {
     let active = true;
-    void loadPcsForEnvironment().then((items) => { if (active) setPcList(items); });
+    void loadPcsForEnvironment()
+      .then((items) => { if (active) setPcList(items); })
+      .catch(() => { if (active) setPcList([]); });
     return () => { active = false; };
   }, []);
 
@@ -104,7 +109,10 @@ export function App() {
   const switchPc = (id: string): void => {
     const pc = pcList.find((p) => p.id === id);
     if (!pc || pc.id === activePc?.id) return;
-    setLastPcId(pc.id);
+    const local = pc.id === DESKTOP_LOCAL_PC_ID;
+    setManagingConnections(false);
+    setPreferredPc(local ? null : pc);
+    setLastPcId(local ? null : pc.id);
     client.close();
     setConnected(false);
     setStatus(null);
@@ -112,7 +120,18 @@ export function App() {
   };
 
   const disconnect = (): void => {
+    setManagingConnections(false);
+    setPreferredPc(null);
     setLastPcId(null);
+    client.close();
+    setConnected(false);
+    setStatus(null);
+    setReady(false);
+  };
+
+  const openConnectionManager = (): void => {
+    setManagingConnections(true);
+    setPreferredPc(null);
     client.close();
     setConnected(false);
     setStatus(null);
@@ -130,9 +149,20 @@ export function App() {
     return (
       <ConnectGate
         client={client}
+        preferredPc={preferredPc}
+        manageConnections={managingConnections}
+        onCancel={desktopStandalone ? () => setManagingConnections(false) : undefined}
         onConnected={(pc) => {
+          setManagingConnections(false);
           setActivePc(pc);
-          void loadPcsForEnvironment().then(setPcList);
+          void loadPcsForEnvironment()
+            .then((items) => setPcList((current) => {
+              const local = pc.id === DESKTOP_LOCAL_PC_ID
+                ? pc
+                : current.find((item) => item.id === DESKTOP_LOCAL_PC_ID);
+              return local ? [local, ...items.filter((item) => item.id !== local.id)] : items;
+            }))
+            .catch(() => setPcList([pc]));
           setConnected(true);
           setReady(true);
         }}
@@ -179,10 +209,10 @@ export function App() {
                 </>
               )}
               {!client.isAdmin && <span className="topbar-chip locked" title="PC 관리 설정은 데스크톱 관리자 연결에서만 변경할 수 있습니다.">🔒 연결 기기 · 관리 제한</span>}
-              <button className="btn btn-ghost" onClick={disconnect} title="연결 해제 / PC 관리">
-                연결 해제
+              <button className="btn btn-ghost" onClick={desktopLocalActive ? openConnectionManager : disconnect} title={desktopLocalActive ? '선택 기능: 원격 PC 추가·관리' : '현재 원격 연결을 닫고 로컬 PC로 돌아가기'}>
+                {desktopLocalActive ? '원격 PC' : desktopStandalone ? '로컬 PC로' : '연결 해제'}
               </button>
-                <ProfileMenu standalone={desktopStandalone} header view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} />
+                <ProfileMenu standalone={desktopStandalone} header view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} />
               </div>
             </div>
             <nav className="workspace-nav" aria-label="주요 화면">
@@ -191,7 +221,7 @@ export function App() {
           </header>}
           {view === 'chat' && <ChatView
             activePc={activePc}
-            profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} />}
+            profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} />}
             voiceCommand={voiceCommands[0] ?? null}
             onVoiceCommandHandled={(id) => setVoiceCommands((queued) => queued.filter((command) => command.id !== id))}
           />}

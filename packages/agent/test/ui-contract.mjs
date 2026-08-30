@@ -44,6 +44,7 @@ const dependencySetup = read('packages/web/src/components/DependencySetup.tsx');
 const routingGraph = read('packages/web/src/components/RoutingGraphEditor.tsx');
 const pcsRegistry = read('packages/web/src/pcs.ts');
 const connectGate = read('packages/web/src/components/ConnectGate.tsx');
+const profileMenu = read('packages/web/src/components/ProfileMenu.tsx');
 const remoteLink = read('packages/agent/src/plugins/remote-link.ts');
 const mobileChat = read('apps/mobile/src/screens/ChatScreen.tsx');
 const mobileHome = read('apps/mobile/src/screens/HomeScreen.tsx');
@@ -77,6 +78,9 @@ if (!css.includes('.routing-group-bubble') || !css.includes('.graph-edge.selecte
 if (!pcsRegistry.includes('connectionOrigins') || !pcsRegistry.includes('activeOrigin') || !pcsRegistry.includes('originForDiscoveredHost')) throw new Error('desktop registry does not preserve per-address origins for LAN/HTTPS fallback');
 if (!pcsRegistry.includes('if (!result.ok) throw') || pcsRegistry.includes("loadPcs().catch(() => []")) throw new Error('secure desktop registry failures can be mistaken for an empty registry');
 if (!connectGate.includes('clientOwner') || !connectGate.includes('ownsClient()') || !connectGate.includes('if (!isCurrent() || !ownsClient()) return false')) throw new Error('connection gate lacks attempt-scoped client ownership guards');
+if (!connectGate.includes('window.mrRobotDesktop && !preferredPc') || !connectGate.includes('await connectTo(localPc, false)') || !connectGate.includes('로컬 에이전트를 준비하는 중')) throw new Error('desktop startup can regress into the remote PC pairing gate');
+if (!connectGate.includes('if (manageConnections)') || !profileMenu.includes('원격 PC 추가·관리') || !profileMenu.includes('로컬 에이전트 · 준비됨')) throw new Error('desktop optional remote-PC management is not separated from local startup');
+if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
 if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
 if (!pluginsView.includes('refreshRemotePairing(status)') || !pluginsView.includes('host: status.publicUrl') || !pluginsView.includes("QRCode.toDataURL(payload") || !pluginsView.includes('모바일 원탭 연결')) throw new Error('Quick Link does not refresh a one-tap HTTPS+PIN QR after starting');
 if (!pluginsView.includes('Quick Link 공개 연결 승인') || !pluginsView.includes('위험을 이해했으며 연결') || !pluginsView.includes('사용 후 반드시 링크를 중지')) throw new Error('Quick Link can expose the agent publicly without explicit informed confirmation');

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MrRobotClient, wsUrlFor } from '../rpc';
 import {
   connectionOrigins,
+  DESKTOP_LOCAL_PC_ID,
   detectServingPc,
   exchangePin,
   getLastPcId,
@@ -25,7 +26,7 @@ type Phase = 'auto' | 'list' | 'connecting' | 'error';
  *  - auto-connects to the last used PC (or the only one),
  *  - lets the user register more PCs by host + PIN and switch between them.
  */
-export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobotClient; onConnected: (pc: SavedPc) => void; onCancel?: () => void }) {
+export function ConnectGate({ client, onConnected, onCancel, preferredPc = null, manageConnections = false }: { client: MrRobotClient; onConnected: (pc: SavedPc) => void; onCancel?: () => void; preferredPc?: SavedPc | null; manageConnections?: boolean }) {
   const [phase, setPhase] = useState<Phase>('auto');
   const [error, setError] = useState('');
   const [pcs, setPcs] = useState<SavedPc[]>([]);
@@ -37,9 +38,10 @@ export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobot
   const [addBusy, setAddBusy] = useState(false);
   const connectAttempt = useRef(0);
   const clientOwner = useRef<number | null>(null);
+  const desktopLocalMode = Boolean(window.mrRobotDesktop && !preferredPc && !manageConnections);
 
   const connectTo = useCallback(
-    async (pc: SavedPc): Promise<boolean> => {
+    async (pc: SavedPc, persist = true): Promise<boolean> => {
       const attempt = ++connectAttempt.current;
       setPhase('connecting');
       setConnectingPc(pc);
@@ -73,13 +75,17 @@ export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobot
           if (!isCurrent() || !ownsClient()) return false;
           const endpoint = parsePcEndpoint(candidate, pc.port, pc.protocol ?? 'http');
           const connectedPc = { ...pc, hosts: refreshedHosts, origins: refreshedOrigins, activeHost: endpoint.host, activeOrigin: endpoint.origin };
-          const registry = await loadPcsForEnvironment();
-          if (!isCurrent() || !ownsClient()) return false;
-          const updated = registry.map((item) => item.id === pc.id ? connectedPc : item);
-          await savePcsForEnvironment(updated);
-          if (!isCurrent() || !ownsClient()) return false;
-          setPcs(updated);
-          setLastPcId(pc.id);
+          if (persist) {
+            const registry = await loadPcsForEnvironment();
+            if (!isCurrent() || !ownsClient()) return false;
+            const updated = registry.some((item) => item.id === pc.id)
+              ? registry.map((item) => item.id === pc.id ? connectedPc : item)
+              : [...registry, connectedPc];
+            await savePcsForEnvironment(updated);
+            if (!isCurrent() || !ownsClient()) return false;
+            setPcs(updated);
+            setLastPcId(pc.id);
+          }
           if (!isCurrent() || !ownsClient()) return false;
           onConnected(connectedPc);
           return true;
@@ -105,21 +111,38 @@ export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobot
     let cancelled = false;
     const boot = async (): Promise<void> => {
       try {
-        // 1. Refresh the serving PC's credentials (cheap; loopback only).
+        // The Electron shell contains the local agent. It always opens this
+        // loopback session directly and never needs pairing or registry I/O.
+        if (window.mrRobotDesktop && !preferredPc) {
+          const serving = await detectServingPc();
+          if (!serving) throw new Error('내장 로컬 에이전트를 찾을 수 없습니다.');
+          const localPc: SavedPc = { ...serving, id: DESKTOP_LOCAL_PC_ID, addedAt: 0 };
+          await connectTo(localPc, false);
+          return;
+        }
+
+        // Browser/mobile-style clients and explicitly selected remote PCs use
+        // the encrypted registry and normal reconnect flow.
         let next = await loadPcsForEnvironment();
         if (cancelled) return;
-        const serving = await detectServingPc();
-        if (cancelled) return;
-        if (serving) {
-          next = upsertPc(next, serving);
-          await savePcsForEnvironment(next);
+        if (!window.mrRobotDesktop) {
+          const serving = await detectServingPc();
           if (cancelled) return;
+          if (serving) {
+            next = upsertPc(next, serving);
+            await savePcsForEnvironment(next);
+            if (cancelled) return;
+          }
         }
         setPcs(next);
+        if (manageConnections) {
+          setPhase('list');
+          return;
+        }
 
-        // 2. Auto-connect: last used PC, or the only registered one.
+        // Auto-connect the explicit choice, last used PC, or sole registry PC.
         const lastId = getLastPcId();
-        const target = next.find((p) => p.id === lastId) ?? (next.length === 1 ? next[0] : null);
+        const target = preferredPc ?? next.find((p) => p.id === lastId) ?? (next.length === 1 ? next[0] : null);
         if (target) {
           const ok = await connectTo(target);
           if (cancelled || ok) return;
@@ -137,7 +160,7 @@ export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobot
       cancelled = true;
       connectAttempt.current += 1;
     };
-  }, [connectTo]);
+  }, [connectTo, manageConnections, preferredPc]);
 
   const cancelConnect = (): void => {
     connectAttempt.current += 1;
@@ -186,6 +209,30 @@ export function ConnectGate({ client, onConnected, onCancel }: { client: MrRobot
     setPcs(next);
     if (getLastPcId() === id) setLastPcId(null);
   };
+
+  if (desktopLocalMode && (phase === 'auto' || phase === 'connecting')) {
+    return (
+      <div className="gate">
+        <div className="gate-card">
+          <div className="gate-brand"><Spinner size={26} /></div>
+          <p className="gate-sub">로컬 에이전트를 준비하는 중…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (desktopLocalMode && phase === 'list') {
+    return (
+      <div className="gate">
+        <Card className="gate-card wide">
+          <div className="gate-brand"><h1>Mr.Robot</h1></div>
+          <p className="gate-sub">로컬 에이전트를 시작하지 못했습니다.</p>
+          {error && <div className="gate-error">{error}</div>}
+          <Button variant="accent" onClick={() => window.location.reload()}>다시 시도</Button>
+        </Card>
+      </div>
+    );
+  }
 
   if (phase === 'connecting') {
     return (
