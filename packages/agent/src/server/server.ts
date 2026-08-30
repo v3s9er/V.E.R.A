@@ -56,7 +56,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.3.1';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
