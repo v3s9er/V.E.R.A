@@ -70,7 +70,27 @@ if (!chat.includes('aria-label={`${c.title} 메뉴`}') || !chat.includes('setCon
 if (!app.includes("client.on('voice.command'") || !app.includes("setView('chat')") || !chat.includes('executeCommand(voiceCommand.text)')) throw new Error('recognized wake commands are not globally queued and connected to chat execution');
 if (!chat.includes('finally {') || !chat.includes('busyRef.current = false')) throw new Error('chat busy state has no request-completion fallback');
 if (!chat.includes('signal: uploadController.signal') || !chat.includes("uploadAbortReason.current = 'timeout'") || !chat.includes('업로드 취소')) throw new Error('chat drag-and-drop uploads lack cancellation and timeout UX');
-if (!chat.includes("updateConversation({ routingPresetId: null, providerId, providerModel })")) throw new Error('model picker cannot switch directly from a routing preset to single-model mode');
+if (!chat.includes('routingPresetId: null,') || !chat.includes('providerId,') || !chat.includes('providerModel,')) throw new Error('model picker cannot switch directly from a routing preset to single-model mode');
+if (!chat.includes("const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])")
+  || !chat.includes('provider?.supportedReasoning.length')
+  || !chat.includes("value === 'auto' || supported.has(value)")) throw new Error('desktop reasoning choices can lose provider capabilities, auto, or the common fallback');
+const desktopComposerInput = chat.indexOf('<textarea className="chat-input"');
+const desktopReasoningControl = chat.indexOf('className="composer-reasoning"');
+if (desktopComposerInput < 0 || desktopReasoningControl < desktopComposerInput
+  || !chat.includes('aria-label="입력창 추론 강도"')
+  || !chat.includes('disabled={executionControlsDisabled}')) throw new Error('desktop reasoning selector is not accessible, composer-local, or locked during a run or settings save');
+if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g) ?? []).length < 2
+  || !chat.includes('selectedRef.current = optimistic')
+  || !chat.includes('executionConfigSavingRef.current = true')
+  || !chat.includes('rollbackMatchingFields')
+  || !chat.includes('Object.is(currentRecord[key], patchRecord[key])')
+  || !chat.includes('if (executionConfigSavingRef.current)')) throw new Error('desktop execution settings do not share rollback-safe persistence and a synchronous send lock');
+if (!chat.includes('updateExecutionConfig({ workspaceId:')
+  || !chat.includes('updateExecutionConfig({ permissionMode:')
+  || !chat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')) throw new Error('desktop workspace, access, or default-provider settings can race command execution');
+if (!css.includes('.composer-options { min-width: 0; flex: 1 1 250px;')
+  || !css.includes('.composer-options { width: 100%; flex-basis: 100%; }')
+  || !css.includes('.composer-reasoning-label { display: none; }')) throw new Error('desktop reasoning selector can clip or crowd compact chat layouts');
 if (!routingGraph.includes('graph-port-in') || !routingGraph.includes('graph-port-out') || !routingGraph.includes('edge-preview')) throw new Error('routing graph lacks intuitive directional drag connection ports');
 if (!routingGraph.includes('previewColumnStep') || !routingGraph.includes('graph-content-sizer')) throw new Error('read-only routing preview can overlap nodes instead of scrolling on narrow screens');
 if (!routingGraph.includes('removeEdge') || !routingGraph.includes('reverseEdge') || !routingGraph.includes('edge-inspector')) throw new Error('routing edges cannot be selected, reversed and deleted');
@@ -115,6 +135,27 @@ if (!desktopMain.includes('assertTrustedRenderer(event)') || !desktopMain.includ
 if (!remoteLink.includes('normalizeNamedTunnelHostname') || !remoteLink.includes('readSmallJson') || !remoteLink.includes("redirect: 'error'")) throw new Error('named Tunnel hostname or verification response is not tightly validated');
 if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"') || !mobileAppConfig.includes('"softwareKeyboardLayoutMode": "resize"') || !mobileHome.includes('!keyboardVisible') || !mobileChat.includes("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}") || !mobileChat.includes('paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
 if (!mobileChat.includes('controlBar') || !mobileChat.includes('🤖 단일 모델 선택') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
+if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
+  || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
+  || !mobileChat.includes('provider?.supportedReasoning')
+  || !mobileChat.includes("effort === 'auto' || supportedSet.has(effort)")) throw new Error('mobile reasoning choices can lose provider capabilities, none support, auto, or the common fallback');
+const mobileInputBar = mobileChat.indexOf('<View style={[styles.inputBar');
+const mobileReasoningBar = mobileChat.indexOf('<View style={styles.reasoningBar}>');
+const mobileModelModal = mobileChat.indexOf('<Modal visible={showModels}');
+if (mobileInputBar < 0 || mobileReasoningBar < mobileInputBar || mobileReasoningBar > mobileModelModal
+  || !mobileChat.includes('keyboardShouldPersistTaps="always"')
+  || mobileChat.includes('cycleEffort')) throw new Error('mobile reasoning control is not a compact explicit selector at the keyboard-safe composer bottom');
+if (!mobileChat.includes("client.call('conversations.update', { id: conversationId, reasoningEffort })")
+  || !mobileChat.includes('const reasoningLocked = !conversation || busy || savingConfiguration')
+  || !mobileChat.includes('configurationSaveInFlightRef.current')
+  || !mobileChat.includes('beginConfigurationSave()')
+  || !mobileChat.includes('finishConfigurationSave()')
+  || !mobileChat.includes('disabled={reasoningLocked}')
+  || !mobileChat.includes('accessibilityState={{ selected, disabled: reasoningLocked }}')) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or change during a run');
+if (!mobileChat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')
+  || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider)')
+  || !mobileChat.includes('applyConversationConfiguration(conversationId')
+  || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile model, preset, workspace, access, or default-provider settings can race command execution');
 if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyboardShouldPersistTaps="handled"')) throw new Error('mobile PC setup form cannot scroll above the keyboard');
 if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 보안 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
 if (mobileRpc.includes('obj.secret') || mobilePcList.includes('payload.secret') || webRpc.includes('obj.secret')) throw new Error('legacy QR payloads can still import a long-lived device secret');

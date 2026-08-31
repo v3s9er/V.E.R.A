@@ -9,6 +9,16 @@ interface UiTool { key: string; name: string; summary: string; status: 'start' |
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
 interface RouteInfo { providerLabel: string; model: string; role: string; effort: ReasoningEffort; reason: string; advisor?: { providerLabel: string; model: string } }
 interface ConversationMenu { conversation: ConversationSummary; x: number; y: number }
+type ExecutionConfigPatch = {
+  reasoningEffort?: ReasoningEffort;
+  providerId?: string | null;
+  providerModel?: string | null;
+  routingPresetId?: string | null;
+  workspaceId?: string | null;
+  permissionMode?: PermissionMode;
+};
+
+const EXECUTION_CONFIG_SAVE_MESSAGE = '모델 실행 설정을 저장하고 있습니다. 저장이 끝난 뒤 명령을 보내주세요.';
 
 declare global {
   interface Window {
@@ -55,6 +65,14 @@ const EFFORTS: Array<{ value: ReasoningEffort; label: string }> = [
   { value: 'auto', label: '자동' }, { value: 'none', label: '없음' }, { value: 'low', label: '낮음' },
   { value: 'medium', label: '보통' }, { value: 'high', label: '높음' }, { value: 'xhigh', label: '매우 높음' }, { value: 'max', label: '최대' },
 ];
+const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max']);
+const reasoningEffortsForProvider = (provider?: ProviderInfo): typeof EFFORTS => {
+  const supported = provider?.supportedReasoning.length ? new Set(provider.supportedReasoning) : COMMON_REASONING_EFFORTS;
+  return EFFORTS.filter(({ value }) => value === 'auto' || supported.has(value));
+};
+const compatibleReasoningEffort = (current: ReasoningEffort, provider?: ProviderInfo): ReasoningEffort => (
+  reasoningEffortsForProvider(provider).some(({ value }) => value === current) ? current : 'auto'
+);
 const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detail: string }> = [
   { value: 'read-only', label: '읽기 전용', short: '읽기', detail: '파일과 상태를 읽을 수 있지만 변경하지 않습니다.' },
   { value: 'ask', label: '변경 전 확인', short: '확인', detail: '변경이나 실행 전에 대화 안에서 승인받습니다.' },
@@ -95,6 +113,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [workspaceAdding, setWorkspaceAdding] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [composerError, setComposerError] = useState('');
+  const [executionConfigSaving, setExecutionConfigSaving] = useState(false);
   const [voiceAck, setVoiceAck] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(160);
@@ -107,6 +126,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const selectedId = useRef<string | null>(null);
   const selectedRef = useRef<ConversationDetail | null>(null);
   const busyRef = useRef(false);
+  const executionConfigSavingRef = useRef(false);
   const runningConversationRef = useRef<string | null>(null);
   const toolCounter = useRef(0);
   const dragDepth = useRef(0);
@@ -167,6 +187,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const executeCommand = useCallback(async (rawText: string): Promise<void> => {
     const text = rawText.trim();
     if (!text) return;
+    if (executionConfigSavingRef.current) {
+      setComposerError(EXECUTION_CONFIG_SAVE_MESSAGE);
+      return;
+    }
     setComposerError('');
 
     let conversation = selectedRef.current;
@@ -410,7 +434,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const created = await client.call('conversations.create', {}) as ConversationDetail;
     setConversations((list) => [created, ...list]); selectedId.current = created.id; selectedRef.current = created; setSelected(created); setMessages([]); setShowArchived(false);
   };
-  const updateConversation = (patch: Record<string, unknown>): Promise<void> => {
+  const updateConversation = (patch: Record<string, unknown>, onError?: () => void): Promise<void> => {
     const target = selectedRef.current;
     if (!target) return Promise.resolve();
     const task = conversationUpdateQueue.current
@@ -425,9 +449,65 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       });
     const safeTask = task.catch((error) => {
       setComposerError(error instanceof Error ? error.message : String(error));
+      onError?.();
     });
     conversationUpdateQueue.current = safeTask;
     return safeTask;
+  };
+  const updateExecutionConfig = (patch: ExecutionConfigPatch): Promise<void> => {
+    const target = selectedRef.current;
+    if (!target || busyRef.current || executionConfigSavingRef.current || target.status === 'archived') return Promise.resolve();
+
+    const keys = Object.keys(patch) as Array<keyof ExecutionConfigPatch>;
+    if (keys.length === 0 || keys.every((key) => Object.is(target[key], patch[key]))) return Promise.resolve();
+
+    const targetRecord = target as ConversationDetail & Record<string, unknown>;
+    const patchRecord = patch as Record<string, unknown>;
+    const previousValues = Object.fromEntries(keys.map((key) => [key, targetRecord[key]])) as Record<string, unknown>;
+    const optimistic = { ...target, ...patch } as ConversationDetail;
+
+    // Set the ref before React can render again so a second selector event or
+    // send action cannot overtake this queued persistence request.
+    executionConfigSavingRef.current = true;
+    setExecutionConfigSaving(true);
+    setComposerError('');
+    selectedRef.current = optimistic;
+    setSelected(optimistic);
+    setConversations((list) => list.map((conversation) => conversation.id === target.id ? { ...conversation, ...patch } as ConversationSummary : conversation));
+
+    const rollbackMatchingFields = <T extends ConversationSummary>(conversation: T): T => {
+      if (conversation.id !== target.id) return conversation;
+      const currentRecord = conversation as T & Record<string, unknown>;
+      let rolledBack: (T & Record<string, unknown>) | null = null;
+      for (const key of keys) {
+        if (!Object.is(currentRecord[key], patchRecord[key])) continue;
+        if (!rolledBack) rolledBack = { ...conversation } as T & Record<string, unknown>;
+        (rolledBack as Record<string, unknown>)[key] = previousValues[key];
+      }
+      return (rolledBack ?? conversation) as T;
+    };
+
+    return updateConversation(patch, () => {
+      const current = selectedRef.current;
+      if (current?.id === target.id) {
+        const rolledBack = rollbackMatchingFields(current);
+        if (rolledBack !== current) {
+          selectedRef.current = rolledBack;
+          setSelected(rolledBack);
+        }
+      }
+      // Roll back only fields that still hold this failed optimistic value.
+      // The sidebar is repaired even if the user switched conversations.
+      setConversations((list) => list.map(rollbackMatchingFields));
+    }).finally(() => {
+      executionConfigSavingRef.current = false;
+      if (mountedRef.current) setExecutionConfigSaving(false);
+    });
+  };
+  const setReasoningEffort = (reasoningEffort: ReasoningEffort): void => {
+    const target = selectedRef.current;
+    if (!target || target.reasoningEffort === reasoningEffort) return;
+    void updateExecutionConfig({ reasoningEffort });
   };
   const archive = async (): Promise<void> => { if (!selected) return; await updateConversation({ status: selected.status === 'archived' ? 'active' : 'archived' }); selectedId.current = null; await refresh(); };
   const remove = async (): Promise<void> => { if (selected) setDeleteTarget(selected); };
@@ -475,7 +555,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     try {
       const workspace = await client.call('workspaces.add', { path: cleanPath }) as WorkspaceInfo;
       setWorkspaces((items) => [...items.filter((item) => item.id !== workspace.id), workspace]);
-      await updateConversation({ workspaceId: workspace.id });
+      await updateExecutionConfig({ workspaceId: workspace.id });
       setWorkspaceDialogOpen(false);
       setWorkspacePath('');
       setContextOpen(true);
@@ -569,6 +649,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const send = async (): Promise<void> => {
     const text = input.trim();
     if (!text) return;
+    if (executionConfigSavingRef.current) {
+      setComposerError(EXECUTION_CONFIG_SAVE_MESSAGE);
+      return;
+    }
     setInput('');
     await executeCommand(text);
   };
@@ -599,9 +683,14 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   const selectedPreset = routingPresets.find((preset) => preset.id === selected?.routingPresetId);
   const selectedProvider = providers.find((provider) => provider.id === selected?.providerId);
+  const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
+  const reasoningProvider = selected?.routingPresetId ? undefined : selectedProvider ?? defaultProvider;
+  const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider);
+  const displayedReasoningEffort = availableReasoningEfforts.some(({ value }) => value === selected?.reasoningEffort) ? selected?.reasoningEffort ?? 'auto' : 'auto';
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selected?.workspaceId) ?? workspaces.find((workspace) => workspace.isDefault);
   const selectedAccess = ACCESS.find((access) => access.value === selected?.permissionMode) ?? ACCESS[1];
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
+  const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
 
@@ -646,10 +735,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           <header className="chat-commandbar">
             <div className="chat-title-group">
               <input aria-label="대화 이름" className="conversation-title-input" value={selected.title} onChange={(e) => setSelected({ ...selected, title: e.target.value })} onBlur={() => void updateConversation({ title: selected.title })} />
-              <span className={`agent-state ${busy ? 'working' : ''}`}><i />{busy ? (status || '작업 준비 중') : activeModeLabel}</span>
+              <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? (status || '작업 준비 중') : activeModeLabel}</span>
             </div>
             <div className="chat-quick-controls">
-              <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => void updateConversation({ routingPresetId: event.target.value || null })} disabled={busy}>
+              <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => {
+                const target = selectedRef.current;
+                if (!target) return;
+                const routingPresetId = event.target.value || null;
+                const nextProvider = routingPresetId ? undefined : selectedProvider ?? defaultProvider;
+                void updateExecutionConfig({
+                  routingPresetId,
+                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider),
+                });
+              }} disabled={executionControlsDisabled}>
                 <option value="">단일 모델</option>
                 {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
               </Select>
@@ -658,11 +756,25 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 aria-label="대화 모델"
                 value={selected.routingPresetId ? '' : selected.providerId ? modelChoiceValue(selected.providerId, selected.providerModel ?? providers.find((provider) => provider.id === selected.providerId)?.model ?? '') : ''}
                 onChange={(event) => {
-                  if (!event.target.value) { if (!selected.routingPresetId) void updateConversation({ providerId: null, providerModel: null }); return; }
+                  const target = selectedRef.current;
+                  if (!target) return;
+                  if (!event.target.value) {
+                    if (!target.routingPresetId) void updateExecutionConfig({
+                      providerId: null,
+                      providerModel: null,
+                      reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, defaultProvider),
+                    });
+                    return;
+                  }
                   const [providerId, providerModel] = JSON.parse(event.target.value) as [string, string];
-                  void updateConversation({ routingPresetId: null, providerId, providerModel });
+                  void updateExecutionConfig({
+                    routingPresetId: null,
+                    providerId,
+                    providerModel,
+                    reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, providers.find((provider) => provider.id === providerId)),
+                  });
                 }}
-                disabled={busy}
+                disabled={executionControlsDisabled}
               >
                 <option value="">{selected.routingPresetId ? '시나리오 자동 배정' : '기본 모델'}</option>
                 {providers.map((provider) => <optgroup key={provider.id} label={provider.label}>
@@ -678,9 +790,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {contextOpen && <section className="chat-context-panel" aria-label="대화 컨텍스트 설정">
             <div className="context-panel-head"><div><b>이 대화의 실행 컨텍스트</b><span>모델이 볼 작업 범위와 실행 권한을 대화별로 저장합니다.</span></div><button type="button" onClick={() => setContextOpen(false)} aria-label="컨텍스트 닫기">×</button></div>
             <div className="context-settings-grid">
-              <label className="context-field"><span>추론 강도</span><Select aria-label="추론 강도" value={selected.reasoningEffort} onChange={(event) => void updateConversation({ reasoningEffort: event.target.value })} disabled={busy}>{EFFORTS.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}</Select></label>
-              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateConversation({ workspaceId: event.target.value || null })} disabled={busy}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={busy}>폴더 추가</Button></div></label>
-              <div className="context-field access-field"><span>액세스 권한</span><div className="access-options">{ACCESS.map((access) => <button type="button" key={access.value} className={selected.permissionMode === access.value ? 'active' : ''} onClick={() => void updateConversation({ permissionMode: access.value })} disabled={busy}><b>{access.label}</b><small>{access.detail}</small></button>)}</div><small className="context-help">연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></div>
+              <label className="context-field"><span>추론 강도</span><Select aria-label="컨텍스트 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>{availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}</Select></label>
+              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
+              <div className="context-field access-field"><span>액세스 권한</span><div className="access-options">{ACCESS.map((access) => <button type="button" key={access.value} className={selected.permissionMode === access.value ? 'active' : ''} onClick={() => void updateExecutionConfig({ permissionMode: access.value })} disabled={executionControlsDisabled}><b>{access.label}</b><small>{access.detail}</small></button>)}</div><small className="context-help">연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></div>
             </div>
             <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
           </section>}
@@ -693,17 +805,26 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
 
         <div className="chat-inputbar">
-          {(status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
+          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           <textarea className="chat-input" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
-            {selected?.compactedMessages ? <span className="compaction-note">이전 메시지 {selected.compactedMessages}개 압축됨</span> : null}
+            <div className="composer-options">
+              <label className="composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '이 대화에 사용할 추론 강도'}>
+                <span className="composer-reasoning-icon" aria-hidden="true">✦</span>
+                <span className="composer-reasoning-label">추론</span>
+                <Select className="composer-reasoning-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>
+                  {availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}
+                </Select>
+              </label>
+              {selected?.compactedMessages ? <span className="compaction-note">이전 메시지 {selected.compactedMessages}개 압축됨</span> : null}
+            </div>
             <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />
             <Button variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '업로드 취소' : '＋ 파일'}</Button>
             <Button variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '듣는 중…' : '🎙 음성'}</Button>
-            {busy && <Button onClick={() => void send()} disabled={!input.trim()}>명령 끼워넣기</Button>}
-            {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected}>보내기</Button>}
+            {busy && <Button onClick={() => void send()} disabled={!input.trim() || executionConfigSaving}>명령 끼워넣기</Button>}
+            {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
           </div>
         </div>
       </section>

@@ -40,6 +40,16 @@ interface UiMsg {
 let uid = 1;
 const nextId = (): string => `m${uid++}`;
 
+const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
+const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+function reasoningEffortsFor(provider?: ProviderInfo): ReasoningEffort[] {
+  const supported = provider?.supportedReasoning;
+  if (!supported?.length) return [...FALLBACK_REASONING_EFFORTS];
+  const supportedSet = new Set(supported);
+  return ORDERED_REASONING_EFFORTS.filter((effort) => effort === 'auto' || supportedSet.has(effort));
+}
+
 function describe(input: unknown): string {
   try {
     const s = JSON.stringify(input);
@@ -69,6 +79,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   const [showAccess, setShowAccess] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [savingReasoning, setSavingReasoning] = useState(false);
+  const [savingConfiguration, setSavingConfiguration] = useState(false);
+  const [reasoningSaveFailed, setReasoningSaveFailed] = useState(false);
+  const [configurationSaveFailed, setConfigurationSaveFailed] = useState(false);
+  const configurationSaveInFlightRef = useRef(false);
+  const conversationRef = useRef<ConversationDetail | null>(null);
   const uploadTaskRef = useRef<FileSystem.UploadTask | null>(null);
   const uploadStopReason = useRef<'user' | 'timeout' | null>(null);
   const mountedRef = useRef(true);
@@ -93,12 +109,50 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
     };
   }, []);
 
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
+
   const activeRun = conversation ? runs[conversation.id] : undefined;
   const busy = Boolean(activeRun?.running);
+  const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
+  const reasoningProvider = conversation?.routingPresetId
+    ? undefined
+    : providers.find((provider) => provider.id === conversation?.providerId) ?? defaultProvider;
+  const reasoningEfforts = reasoningEffortsFor(reasoningProvider);
+  const selectedReasoningEffort = conversation && reasoningEfforts.includes(conversation.reasoningEffort)
+    ? conversation.reasoningEffort
+    : 'auto';
+  const reasoningLocked = !conversation || busy || savingConfiguration;
+  const configurationLocked = busy || savingConfiguration;
+
+  const beginConfigurationSave = (): boolean => {
+    if (configurationSaveInFlightRef.current) return false;
+    configurationSaveInFlightRef.current = true;
+    setSavingConfiguration(true);
+    setConfigurationSaveFailed(false);
+    return true;
+  };
+
+  const finishConfigurationSave = (): void => {
+    configurationSaveInFlightRef.current = false;
+    if (mountedRef.current) setSavingConfiguration(false);
+  };
+
+  const applyConversationConfiguration = (id: string, patch: Partial<Pick<ConversationDetail,
+    'reasoningEffort' | 'providerId' | 'providerModel' | 'routingPresetId' | 'workspaceId' | 'permissionMode'
+  >>): void => {
+    if (conversationRef.current?.id === id) conversationRef.current = { ...conversationRef.current, ...patch };
+    setConversation((current) => current?.id === id ? { ...current, ...patch } : current);
+    setConversations((list) => list.map((item) => item.id === id ? { ...item, ...patch } : item));
+  };
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
+    if (configurationSaveInFlightRef.current) return;
     const generation = ++loadGeneration.current;
     activeId.current = id;
+    setReasoningSaveFailed(false);
+    setConfigurationSaveFailed(false);
     pendingDelta.current = '';
     if (deltaTimer.current) clearTimeout(deltaTimer.current);
     deltaTimer.current = null;
@@ -134,6 +188,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
       setConversations([created]);
       activeId.current = created.id;
       setConversation(created);
+      setReasoningSaveFailed(false);
       setMessages([]);
     }
   }, [client, loadConversation]);
@@ -283,11 +338,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
 
   const send = async (): Promise<void> => {
     const text = input.trim();
-    if (!text || !conversation) return;
+    const currentConversation = conversationRef.current;
+    if (!text || !currentConversation || configurationSaveInFlightRef.current) return;
     if (busy) {
       try {
-        const result = await client.call('chat.steer', { conversationId: conversation.id, text }) as { queued?: number };
-        setRuns((current) => ({ ...current, [conversation.id]: { ...current[conversation.id], conversationId: conversation.id, running: true, steeringQueued: result.queued ?? current[conversation.id]?.steeringQueued ?? 0, status: '추가 명령 전달됨' } }));
+        const result = await client.call('chat.steer', { conversationId: currentConversation.id, text }) as { queued?: number };
+        setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: true, steeringQueued: result.queued ?? current[currentConversation.id]?.steeringQueued ?? 0, status: '추가 명령 전달됨' } }));
         setInput('');
       } catch (error) {
         setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: error instanceof Error ? error.message : String(error) }]);
@@ -295,7 +351,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
       return;
     }
     setInput('');
-    setRuns((current) => ({ ...current, [conversation.id]: { conversationId: conversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
+    setRuns((current) => ({ ...current, [currentConversation.id]: { conversationId: currentConversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
     stickToBottom.current = true;
     setUnseenMessages(false);
     setMessages((msgs) => [
@@ -304,7 +360,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
       { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
     ]);
     try {
-      await client.call('chat.start', { text, conversationId: conversation.id, reasoningEffort: conversation.reasoningEffort, providerId: conversation.providerId, providerModel: conversation.providerModel, routingPresetId: commandMode === 'scenario' ? conversation.routingPresetId : undefined, workspaceId: conversation.workspaceId, permissionMode: conversation.permissionMode }, 10 * 60_000);
+      await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode }, 10 * 60_000);
     } catch (err) {
       setMessages((msgs) => {
         const last = msgs[msgs.length - 1];
@@ -313,7 +369,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
         }
         return msgs;
       });
-      setRuns((current) => ({ ...current, [conversation.id]: { ...current[conversation.id], conversationId: conversation.id, running: false, cancelling: false, steeringQueued: 0, status: '' } }));
+      setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, cancelling: false, steeringQueued: 0, status: '' } }));
     } finally {
       void refreshRuns();
     }
@@ -331,22 +387,57 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   };
 
   const createConversation = async (): Promise<void> => {
+    if (configurationSaveInFlightRef.current) return;
     const created = await client.call('conversations.create', {}) as ConversationDetail;
     setConversations((list) => [created, ...list]);
     activeId.current = created.id;
     setConversation(created);
+    setReasoningSaveFailed(false);
+    setConfigurationSaveFailed(false);
     setMessages([]);
   };
 
-  const cycleEffort = async (): Promise<void> => {
-    if (!conversation || busy) return;
-    const efforts: ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
-    const next = efforts[(efforts.indexOf(conversation.reasoningEffort) + 1) % efforts.length];
-    const updated = await client.call('conversations.update', { id: conversation.id, reasoningEffort: next }) as ConversationDetail;
-    setConversation(updated);
+  const selectReasoningEffort = async (reasoningEffort: ReasoningEffort): Promise<void> => {
+    const currentConversation = conversationRef.current;
+    if (!currentConversation || busy || !reasoningEfforts.includes(reasoningEffort) || currentConversation.reasoningEffort === reasoningEffort || !beginConfigurationSave()) return;
+    const conversationId = currentConversation.id;
+    const previousReasoningEffort = currentConversation.reasoningEffort;
+    setSavingReasoning(true);
+    setReasoningSaveFailed(false);
+    conversationRef.current = { ...currentConversation, reasoningEffort };
+    setConversation((current) => current?.id === conversationId ? { ...current, reasoningEffort } : current);
+    setConversations((list) => list.map((item) => item.id === conversationId ? { ...item, reasoningEffort } : item));
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, reasoningEffort }) as ConversationDetail;
+      if (!mountedRef.current) return;
+      if (activeId.current === conversationId) {
+        if (conversationRef.current?.id === conversationId) conversationRef.current = { ...conversationRef.current, reasoningEffort: updated.reasoningEffort };
+        setConversation((current) => current?.id === conversationId ? { ...current, reasoningEffort: updated.reasoningEffort } : current);
+      }
+      setConversations((list) => list.map((item) => item.id === conversationId ? { ...item, reasoningEffort: updated.reasoningEffort } : item));
+    } catch {
+      if (!mountedRef.current) return;
+      if (activeId.current === conversationId) {
+        if (conversationRef.current?.id === conversationId && conversationRef.current.reasoningEffort === reasoningEffort) {
+          conversationRef.current = { ...conversationRef.current, reasoningEffort: previousReasoningEffort };
+        }
+        setConversation((current) => current?.id === conversationId && current.reasoningEffort === reasoningEffort
+          ? { ...current, reasoningEffort: previousReasoningEffort }
+          : current);
+        setReasoningSaveFailed(true);
+        setConfigurationSaveFailed(true);
+      }
+      setConversations((list) => list.map((item) => item.id === conversationId && item.reasoningEffort === reasoningEffort
+        ? { ...item, reasoningEffort: previousReasoningEffort }
+        : item));
+    } finally {
+      if (mountedRef.current) setSavingReasoning(false);
+      finishConfigurationSave();
+    }
   };
 
   const openModelPicker = (): void => {
+    if (configurationSaveInFlightRef.current) return;
     const selectedProvider = providers.find((provider) => provider.id === conversation?.providerId)
       ?? providers.find((provider) => provider.isDefault)
       ?? providers[0];
@@ -356,52 +447,111 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   };
 
   const selectModel = async (providerId?: string, providerModel?: string): Promise<void> => {
-    if (!conversation || busy) return;
-    const updated = await client.call('conversations.update', {
-      id: conversation.id,
-      providerId: providerId ?? null,
-      providerModel: providerModel ?? null,
-      routingPresetId: null,
-    }) as ConversationDetail;
-    setConversation(updated);
-    setConversations((list) => list.map((item) => item.id === updated.id ? updated : item));
-    setCommandMode(providerId ? 'scenario' : 'pc');
-    setShowModels(false);
-    setShowScenarios(false);
+    if (!conversation || busy || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    const provider = providerId ? providers.find((item) => item.id === providerId) : defaultProvider;
+    const supportedEfforts = reasoningEffortsFor(provider);
+    const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
+    try {
+      const updated = await client.call('conversations.update', {
+        id: conversationId,
+        providerId: providerId ?? null,
+        providerModel: providerModel ?? null,
+        routingPresetId: null,
+        reasoningEffort,
+      }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, {
+        providerId: updated.providerId,
+        providerModel: updated.providerModel,
+        routingPresetId: updated.routingPresetId,
+        reasoningEffort: updated.reasoningEffort,
+      });
+      setReasoningSaveFailed(false);
+      setCommandMode(providerId ? 'scenario' : 'pc');
+      setShowModels(false);
+      setShowScenarios(false);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
+    }
   };
 
   const switchCommandMode = async (mode: 'pc' | 'scenario'): Promise<void> => {
-    setCommandMode(mode);
-    if (mode === 'pc' && conversation?.routingPresetId) {
-      const updated = await client.call('conversations.update', { id: conversation.id, routingPresetId: null }) as ConversationDetail;
-      setConversation(updated);
+    if (!conversation || busy || configurationSaveInFlightRef.current) return;
+    if (mode !== 'pc' || !conversation.routingPresetId) { setCommandMode(mode); return; }
+    if (!beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
+    const reasoningEffort = reasoningEffortsFor(provider).includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: null, reasoningEffort }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, {
+        routingPresetId: updated.routingPresetId,
+        reasoningEffort: updated.reasoningEffort,
+      });
+      setReasoningSaveFailed(false);
+      setCommandMode(mode);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
     }
   };
 
   const selectScenario = async (routingPresetId?: string): Promise<void> => {
-    if (!conversation || busy) return;
-    const updated = await client.call('conversations.update', { id: conversation.id, routingPresetId: routingPresetId ?? null }) as ConversationDetail;
-    setConversation(updated);
-    setConversations((list) => list.map((item) => item.id === updated.id ? updated : item));
-    setCommandMode('scenario');
-    setShowScenarios(false);
-    if (!routingPresetId) setShowModels(true);
+    if (!conversation || busy || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
+    const supportedEfforts = reasoningEffortsFor(routingPresetId ? undefined : provider);
+    const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: routingPresetId ?? null, reasoningEffort }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, {
+        routingPresetId: updated.routingPresetId,
+        reasoningEffort: updated.reasoningEffort,
+      });
+      setCommandMode('scenario');
+      setReasoningSaveFailed(false);
+      setShowScenarios(false);
+      if (!routingPresetId) setShowModels(true);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
+    }
   };
 
   const selectWorkspace = async (workspaceId?: string): Promise<void> => {
-    if (!conversation || busy) return;
-    const updated = await client.call('conversations.update', { id: conversation.id, workspaceId: workspaceId ?? null }) as ConversationDetail;
-    setConversation(updated); setShowWorkspaces(false);
+    if (!conversation || busy || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, workspaceId: workspaceId ?? null }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, { workspaceId: updated.workspaceId });
+      setShowWorkspaces(false);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
+    }
   };
 
   const selectAccess = async (permissionMode: PermissionMode): Promise<void> => {
-    if (!conversation || busy) return;
-    const updated = await client.call('conversations.update', { id: conversation.id, permissionMode }) as ConversationDetail;
-    setConversation(updated); setShowAccess(false);
+    if (!conversation || busy || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, permissionMode }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, { permissionMode: updated.permissionMode });
+      setShowAccess(false);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
+    }
   };
 
   const togglePin = async (target: ConversationSummary): Promise<void> => {
-    if (busy) return;
+    if (busy || configurationSaveInFlightRef.current) return;
     const updated = await client.call('conversations.update', { id: target.id, pinned: !target.pinned }) as ConversationDetail;
     if (conversation?.id === updated.id) setConversation(updated);
     await refreshConversations();
@@ -448,7 +598,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   };
 
   const archiveConversation = async (): Promise<void> => {
-    if (!conversation || busy) return;
+    if (!conversation || busy || configurationSaveInFlightRef.current) return;
     await client.call('conversations.update', { id: conversation.id, status: 'archived' });
     activeId.current = null;
     await refreshConversations();
@@ -501,13 +651,13 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
 
   const singleModelChoices = (includeAutomatic: boolean) => (
     <>
-      {includeAutomatic && <TouchableOpacity style={styles.modelChoice} onPress={() => void selectModel()}>
+      {includeAutomatic && <TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel()}>
         <Text style={styles.modelProvider}>{!conversation?.providerId ? '✓ ' : ''}자동 라우팅</Text>
         <Text style={styles.faintChoice}>PC의 기본 라우팅이 요청에 맞는 모델을 선택</Text>
       </TouchableOpacity>}
       {providers.flatMap((provider) => (providerModels[provider.id] ?? [provider.model]).map((modelName) => {
         const selected = conversation?.providerId === provider.id && conversation.providerModel === modelName && !conversation.routingPresetId;
-        return <TouchableOpacity key={`${provider.id}:${modelName}`} style={[styles.modelChoice, selected && styles.modelChoiceOn]} onPress={() => void selectModel(provider.id, modelName)}>
+        return <TouchableOpacity key={`${provider.id}:${modelName}`} style={[styles.modelChoice, selected && styles.modelChoiceOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel(provider.id, modelName)}>
           <Text style={styles.modelProvider}>{selected ? '✓ ' : ''}{provider.label}</Text>
           <Text style={styles.modelName}>{modelName}</Text>
         </TouchableOpacity>;
@@ -517,7 +667,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
         <Text style={styles.modelProvider}>모델 ID 직접 지정</Text>
         <Text style={styles.faintChoice}>목록에 없는 모델도 공급자를 고른 뒤 정확한 모델 ID를 입력할 수 있습니다.</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.customProviderList} keyboardShouldPersistTaps="handled">
-          {providers.map((provider) => <TouchableOpacity key={provider.id} style={[styles.customProviderChip, customProviderId === provider.id && styles.customProviderChipOn]} onPress={() => { setCustomProviderId(provider.id); setCustomModel(provider.model); }}>
+          {providers.map((provider) => <TouchableOpacity key={provider.id} style={[styles.customProviderChip, customProviderId === provider.id && styles.customProviderChipOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => { setCustomProviderId(provider.id); setCustomModel(provider.model); }}>
             <Text style={styles.customProviderText}>{provider.label}</Text>
           </TouchableOpacity>)}
         </ScrollView>
@@ -529,10 +679,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
           placeholderTextColor={colors.faint}
           autoCapitalize="none"
           autoCorrect={false}
+          editable={!savingConfiguration}
           returnKeyType="done"
           onSubmitEditing={() => { if (customProviderId && customModel.trim()) void selectModel(customProviderId, customModel.trim()); }}
         />
-        <TouchableOpacity style={[styles.bigBtn, (!customProviderId || !customModel.trim()) && styles.disabledBtn]} disabled={!customProviderId || !customModel.trim()} onPress={() => void selectModel(customProviderId, customModel.trim())}>
+        <TouchableOpacity style={[styles.bigBtn, (!customProviderId || !customModel.trim() || savingConfiguration) && styles.disabledBtn]} disabled={!customProviderId || !customModel.trim() || savingConfiguration} onPress={() => void selectModel(customProviderId, customModel.trim())}>
           <Text style={styles.bigBtnText}>이 모델 사용</Text>
         </TouchableOpacity>
       </View>}
@@ -542,31 +693,30 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
       <View style={styles.modeBar}>
-        <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn]} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn]} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
       </View>
       <ScrollView horizontal style={styles.conversationBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationBarContent} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity style={styles.newChat} onPress={() => void createConversation()}><Text style={styles.newChatText}>＋</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.newChat, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.newChatText}>＋</Text></TouchableOpacity>
           {conversations.map((c) => (
-            <TouchableOpacity key={c.id} style={[styles.conversationChip, conversation?.id === c.id && styles.conversationChipOn]} onPress={() => void loadConversation(c.id)} onLongPress={() => void togglePin(c)}>
+            <TouchableOpacity key={c.id} style={[styles.conversationChip, conversation?.id === c.id && styles.conversationChipOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void loadConversation(c.id)} onLongPress={() => void togglePin(c)}>
               <Text style={styles.conversationChipText} numberOfLines={1}>{c.pinned ? '📌 ' : ''}{c.title}</Text>
             </TouchableOpacity>
           ))}
       </ScrollView>
       <ScrollView horizontal style={styles.controlBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlBarContent} keyboardShouldPersistTaps="handled">
-        <TouchableOpacity style={[styles.effortBtn, !conversation?.routingPresetId && conversation?.providerId && styles.effortBtnOn]} onPress={openModelPicker} disabled={busy}>
+        <TouchableOpacity style={[styles.effortBtn, !conversation?.routingPresetId && conversation?.providerId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
           <Text style={styles.effortText} numberOfLines={1}>
             {conversation?.providerId
               ? `🤖 단일 모델 · ${providers.find((provider) => provider.id === conversation.providerId)?.label ?? '모델'} · ${conversation.providerModel ?? '기본'}`
               : '🤖 단일 모델 선택'}
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, conversation?.routingPresetId && styles.effortBtnOn]} onPress={() => setShowScenarios(true)} disabled={busy}><Text style={styles.effortText} numberOfLines={1}>🧩 {routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '복합 트리 선택'}</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.effortBtn} onPress={() => setShowWorkspaces(true)} disabled={busy}><Text style={styles.effortText} numberOfLines={1}>📁 {workspaces.find((workspace) => workspace.id === conversation?.workspaceId)?.name ?? workspaces.find((workspace) => workspace.isDefault)?.name ?? '작업 폴더'}</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.effortBtn} onPress={() => setShowAccess(true)} disabled={busy}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.effortBtn} onPress={() => void cycleEffort()}><Text style={styles.effortText}>추론 {conversation?.reasoningEffort ?? 'auto'}</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.effortBtn} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.effortBtn} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.effortBtn, conversation?.routingPresetId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={() => setShowScenarios(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>🧩 {routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '복합 트리 선택'}</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowWorkspaces(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>📁 {workspaces.find((workspace) => workspace.id === conversation?.workspaceId)?.name ?? workspaces.find((workspace) => workspace.isDefault)?.name ?? '작업 폴더'}</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowAccess(true)} disabled={configurationLocked}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
+        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
       </ScrollView>
       <FlatList
         ref={listRef}
@@ -614,58 +764,81 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
       <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom) }]}>
-        <TouchableOpacity accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
-        <TextInput
-          style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder={busy ? '실행 중인 작업에 추가 명령…' : 'PC에 시킬 일을 입력하세요…'}
-          placeholderTextColor={colors.faint}
-          multiline
-        />
-        {busy ? (
-          <View style={styles.busyActions}><TouchableOpacity style={styles.sendBtn} onPress={() => void send()} disabled={!input.trim()}><Text style={styles.sendText}>끼워넣기</Text></TouchableOpacity><TouchableOpacity style={[styles.sendBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '중지'}</Text></TouchableOpacity></View>
-        ) : (
-          <TouchableOpacity style={[styles.sendBtn, !input.trim() && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim()}>
-            <Text style={styles.sendText}>보내기</Text>
-          </TouchableOpacity>
-        )}
+        <View style={styles.inputRow}>
+          <TouchableOpacity accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+          <TextInput
+            style={styles.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder={busy ? '실행 중인 작업에 추가 명령…' : 'PC에 시킬 일을 입력하세요…'}
+            placeholderTextColor={colors.faint}
+            multiline
+          />
+          {busy ? (
+            <View style={styles.busyActions}><TouchableOpacity style={styles.sendBtn} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>끼워넣기</Text></TouchableOpacity><TouchableOpacity style={[styles.sendBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '중지'}</Text></TouchableOpacity></View>
+          ) : (
+            <TouchableOpacity style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
+              <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <View style={styles.reasoningBar}>
+          <Text style={[styles.reasoningLabel, (reasoningSaveFailed || configurationSaveFailed) && styles.reasoningLabelError]}>{configurationSaveFailed ? '설정 · 저장 실패' : savingReasoning ? '추론 · 저장 중' : savingConfiguration ? '설정 저장 중' : busy ? '추론 · 실행 중 잠김' : '추론'}</Text>
+          <ScrollView horizontal style={styles.reasoningScroll} contentContainerStyle={styles.reasoningChoices} showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always">
+            {reasoningEfforts.map((effort) => {
+              const selected = selectedReasoningEffort === effort;
+              return <TouchableOpacity
+                key={effort}
+                accessibilityRole="button"
+                accessibilityLabel={`추론 강도 ${effort}`}
+                accessibilityState={{ selected, disabled: reasoningLocked }}
+                style={[styles.reasoningChip, selected && styles.reasoningChipOn, reasoningLocked && styles.reasoningChipDisabled]}
+                disabled={reasoningLocked}
+                onPress={() => void selectReasoningEffort(effort)}
+              ><Text style={[styles.reasoningChipText, selected && styles.reasoningChipTextOn]}>{effort}</Text></TouchableOpacity>;
+            })}
+          </ScrollView>
+        </View>
       </View>
 
       <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
-            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
-              {singleModelChoices(true)}
-            </ScrollView>
-            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowModels(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
+          <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+            <View style={styles.modal}>
+              <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
+              <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+                {singleModelChoices(true)}
+              </ScrollView>
+              <TouchableOpacity style={styles.bigBtn} onPress={() => setShowModels(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={showScenarios} transparent animationType="fade" onRequestClose={() => setShowScenarios(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>모바일 실행 방식</Text>
-            <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
-            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
-              <Text style={styles.modelSectionTitle}>단일 모델</Text>
-              {singleModelChoices(true)}
-              <Text style={styles.modelSectionTitle}>복합 트리</Text>
-              {routingPresets.map((preset) => <TouchableOpacity key={preset.id} style={styles.modelChoice} onPress={() => void selectScenario(preset.id)}>
-                <Text style={styles.modelProvider}>{preset.name}</Text>
-                <Text style={styles.modelName}>{preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
-                <Text style={styles.faintChoice}>{preset.description}</Text>
-              </TouchableOpacity>)}
-            </ScrollView>
-            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowScenarios(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
+          <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+            <View style={styles.modal}>
+              <Text style={styles.modalTitle}>모바일 실행 방식</Text>
+              <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
+              <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+                <Text style={styles.modelSectionTitle}>단일 모델</Text>
+                {singleModelChoices(true)}
+                <Text style={styles.modelSectionTitle}>복합 트리</Text>
+                {routingPresets.map((preset) => <TouchableOpacity key={preset.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectScenario(preset.id)}>
+                  <Text style={styles.modelProvider}>{preset.name}</Text>
+                  <Text style={styles.modelName}>{preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
+                  <Text style={styles.faintChoice}>{preset.description}</Text>
+                </TouchableOpacity>)}
+              </ScrollView>
+              <TouchableOpacity style={styles.bigBtn} onPress={() => setShowScenarios(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={showWorkspaces} transparent animationType="fade" onRequestClose={() => setShowWorkspaces(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>작업 폴더</Text><Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text><ScrollView style={styles.modelList}><TouchableOpacity style={styles.modelChoice} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={styles.modelChoice} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}</ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>작업 폴더</Text><Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text><ScrollView style={styles.modelList}><TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}</ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
       </Modal>
 
       <Modal visible={showAccess} transparent animationType="fade" onRequestClose={() => setShowAccess(false)}>
@@ -675,7 +848,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
             ['ask', '변경 전 확인', '파일·명령 변경 직전에 모바일에서 승인'],
             ['workspace', '작업 폴더 자동', '선택한 작업 폴더 안 변경만 자동 실행'],
             ['full', '전체 허용', '이 기기 권한 상한 안에서 확인 없이 실행'],
-          ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={styles.modelChoice} onPress={() => void selectAccess(value)}><Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
+          ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectAccess(value)}><Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
         </ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowAccess(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
       </Modal>
 
@@ -764,7 +937,8 @@ const styles = StyleSheet.create({
   latestText: { color: colors.accent2, fontSize: 11.5, fontWeight: '800' },
   runStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 7, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: 'rgba(34,211,238,.05)' },
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
-  inputBar: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
+  inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   toolBtn: { width: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
   toolBtnCancel: { borderColor: 'rgba(248,113,113,.5)', backgroundColor: 'rgba(248,113,113,.16)' },
   toolBtnText: { color: colors.text, fontSize: 17, fontWeight: '800' },
@@ -784,6 +958,17 @@ const styles = StyleSheet.create({
   cancelBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },
   busyActions: { flexDirection: 'row', gap: 5 },
   sendText: { color: '#fff', fontWeight: '700' },
+  reasoningBar: { minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  reasoningLabel: { color: colors.faint, fontSize: 10.5, fontWeight: '800', flexShrink: 0 },
+  reasoningLabelError: { color: colors.err },
+  reasoningScroll: { flex: 1 },
+  reasoningChoices: { alignItems: 'center', gap: 5, paddingRight: 4 },
+  reasoningChip: { minHeight: 26, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: 999, backgroundColor: colors.inputBg, paddingHorizontal: 9, paddingVertical: 4 },
+  reasoningChipOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.22)' },
+  reasoningChipDisabled: { opacity: 0.5 },
+  reasoningChipText: { color: colors.dim, fontSize: 10.5, fontWeight: '700' },
+  reasoningChipTextOn: { color: colors.text },
+  modalKeyboardAvoiding: { flex: 1 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', padding: 24 },
   modal: { width: '100%', maxHeight: '92%', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 22, gap: 12 },
   modalTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },

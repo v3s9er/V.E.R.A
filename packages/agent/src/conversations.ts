@@ -622,6 +622,10 @@ export class ConversationStore {
 
   update(id: string, patch: { title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode }): ConversationDetail {
     const item = this.require(id);
+    // update() mutates the live object so existing server-side references keep
+    // observing the same conversation. Preserve a complete detached copy first
+    // because save() can fail after sync metadata and optional fields changed.
+    const previous = structuredClone(item);
     ensureSyncMetadata(item);
     const previousRevision = item.syncRevision as string;
     const previousAncestors = [...(item.syncAncestors ?? [])];
@@ -639,7 +643,17 @@ export class ConversationStore {
     if (patch.permissionMode) item.permissionMode = patch.permissionMode;
     item.updatedAt = Date.now();
     advanceSyncRevision(item, previousRevision, previousAncestors);
-    this.save();
+    try {
+      this.save();
+    } catch (error) {
+      // Object.assign alone would leave newly-added optional fields behind.
+      // Clear every own field before restoring the snapshot, retaining only the
+      // root object identity expected by callers that already hold a reference.
+      const mutableItem = item as unknown as Record<string, unknown>;
+      for (const key of Object.keys(mutableItem)) delete mutableItem[key];
+      Object.assign(item, previous);
+      throw error;
+    }
     return this.detail(item);
   }
 

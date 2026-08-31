@@ -258,7 +258,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.3.5',
+      version: '0.3.6',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',

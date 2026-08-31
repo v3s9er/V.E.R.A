@@ -1294,6 +1294,15 @@ select.input option {
   gap: 8px;
 }
 .chat-actions .btn { padding: 8px 12px; border-radius: 11px; }
+.composer-options { min-width: 0; flex: 1 1 250px; display: flex; align-items: center; gap: 8px; }
+.composer-reasoning { min-width: 0; max-width: 100%; min-height: 36px; flex: 0 0 auto; display: inline-grid; grid-template-columns: auto auto minmax(78px, auto); align-items: center; gap: 6px; padding: 3px 3px 3px 8px; border: 1px solid var(--border); border-radius: 11px; color: var(--text-dim); background: rgba(8,12,23,.68); transition: border-color .15s, background .15s; }
+.composer-reasoning:focus-within { border-color: rgba(139,116,255,.62); background: rgba(124,92,255,.1); }
+.composer-reasoning-icon { color: #a995ff; font-size: 11px; line-height: 1; }
+.composer-reasoning-label { font-size: 10.5px; font-weight: 700; white-space: nowrap; }
+.composer-reasoning .composer-reasoning-select { width: auto; min-width: 78px; max-width: 116px; height: 28px; padding: 4px 24px 4px 8px; border-color: transparent; border-radius: 8px; background: rgba(255,255,255,.045); font-size: 11px; }
+.composer-reasoning .composer-reasoning-select:focus { border-color: transparent; box-shadow: none; }
+.composer-reasoning .composer-reasoning-select:disabled { opacity: .52; cursor: not-allowed; }
+.composer-options .compaction-note { min-width: 0; margin-right: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-dialog { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 14px; }
 .workspace-dialog-icon { width: 50px; height: 50px; display: grid; place-items: center; border: 1px solid rgba(139,116,255,.35); border-radius: 16px; color: #c4b5fd; background: rgba(124,92,255,.12); font-size: 22px; }
 .workspace-dialog > div:nth-child(2) { min-width: 0; }
@@ -2317,9 +2326,12 @@ body::before {
   .prompt-suggestions button { padding: 9px 11px; }
   .chat-inputbar { border-radius: 16px; padding: 7px; }
   .chat-input { padding: 10px 11px; font-size: 12.5px; }
+  .composer-options { width: 100%; flex-basis: 100%; }
 }
 @media (max-width: 430px) {
   .prompt-suggestions { grid-template-columns: 1fr; }
+  .composer-reasoning { grid-template-columns: auto minmax(74px, auto); }
+  .composer-reasoning-label { display: none; }
 }
 
 .view-loading { min-height: 240px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); }

@@ -132,6 +132,56 @@ console.log('5. conversations recover from backup and keep corrupt source bytes'
   check('normal saves continue after recovery', JSON.parse(readFileSync(join(dir, 'conversations.json'), 'utf8')).length === 2);
 }
 
+console.log('6. failed conversation updates roll back every in-memory field');
+{
+  const dir = join(home, 'conversation-update-rollback');
+  const store = new ConversationStore(dir);
+  const created = store.create({
+    title: 'stable title',
+    pinned: false,
+    reasoningEffort: 'low',
+    providerId: 'stable-provider',
+    providerModel: 'stable-model',
+    routingPresetId: 'stable-preset',
+    workspaceId: 'stable-workspace',
+    permissionMode: 'ask',
+  });
+  const beforeDetail = store.get(created.id);
+  const beforeSnapshot = store.exportSnapshot().find((item) => item.id === created.id);
+  const persistedBefore = readFileSync(join(dir, 'conversations.json'), 'utf8');
+  const liveBefore = store.require(created.id);
+  const originalSave = store.save;
+  store.save = () => { throw new Error('injected save failure'); };
+
+  let rejected = false;
+  try {
+    store.update(created.id, {
+      title: 'must not survive',
+      status: 'archived',
+      pinned: true,
+      reasoningEffort: 'max',
+      providerId: null,
+      providerModel: 'new-model',
+      routingPresetId: null,
+      workspaceId: null,
+      permissionMode: 'full',
+    });
+  } catch (error) {
+    rejected = error instanceof Error && error.message === 'injected save failure';
+  } finally {
+    store.save = originalSave;
+  }
+
+  const recoveredDetail = store.get(created.id);
+  const recoveredSnapshot = store.exportSnapshot().find((item) => item.id === created.id);
+  const liveAfter = store.require(created.id);
+  check('injected save failure propagates to the caller', rejected);
+  check('get returns the complete pre-update conversation', JSON.stringify(recoveredDetail) === JSON.stringify(beforeDetail));
+  check('sync revision and ancestry are restored with the payload', JSON.stringify(recoveredSnapshot) === JSON.stringify(beforeSnapshot));
+  check('rollback preserves the live conversation object identity', liveAfter === liveBefore);
+  check('failed update leaves the persisted conversation unchanged', readFileSync(join(dir, 'conversations.json'), 'utf8') === persistedBefore);
+}
+
 rmSync(home, { recursive: true, force: true });
 console.log(failures === 0 ? '\nSTORAGE RECOVERY TESTS PASSED' : `\n${failures} STORAGE RECOVERY FAILURES`);
 process.exitCode = failures === 0 ? 0 : 1;
