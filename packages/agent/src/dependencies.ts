@@ -98,6 +98,7 @@ const DEFINITIONS: Definition[] = [
     wingetId: 'Cloudflare.cloudflared',
     candidates: () => [
       join(localAppData(), 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),
+      join(localAppData(), 'Microsoft', 'WinGet', 'Packages', 'Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe', 'cloudflared.exe'),
       join(programFiles(), 'cloudflared', 'cloudflared.exe'),
       join(programFilesX86(), 'cloudflared', 'cloudflared.exe'),
     ],

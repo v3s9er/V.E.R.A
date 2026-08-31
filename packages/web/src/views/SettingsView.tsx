@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import type { AppSettings, DeviceCapability, MemoryItem, ProviderInfo, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
+import type { AppSettings, DependencyInstallResult, DependencyReport, DeviceCapability, MemoryItem, PluginInfo, ProviderInfo, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
@@ -125,6 +125,8 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [remoteHandoff, setRemoteHandoff] = useState<RemoteHandoffInfo | null>(null);
   const [remoteHandoffBusy, setRemoteHandoffBusy] = useState(false);
   const [remoteHandoffMessage, setRemoteHandoffMessage] = useState('');
+  const [pairingLinkBusy, setPairingLinkBusy] = useState(false);
+  const [pairingLinkMessage, setPairingLinkMessage] = useState('');
 
   // provider add form
   const [preset, setPreset] = useState('deepseek');
@@ -333,6 +335,59 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       await client.call('settings.set', patch);
     } catch {
       /* ignore */
+    }
+  };
+
+  const startPairingQuickLink = async (): Promise<void> => {
+    if (!canManage || pairingLinkBusy) return;
+    setPairingLinkBusy(true);
+    setPairingLinkMessage('Quick Link와 새 연결 QR을 준비하는 중입니다…');
+    try {
+      const [plugins, dependencyReport] = await Promise.all([
+        client.call('plugins.list', {}) as Promise<PluginInfo[]>,
+        client.call('dependencies.status', {}) as Promise<DependencyReport>,
+      ]);
+      const remotePlugin = plugins.find((plugin) => plugin.id === 'remote-link');
+      if (!remotePlugin) throw new Error('Cloudflare Remote Link 플러그인을 찾지 못했습니다.');
+
+      let cloudflared = dependencyReport.items.find((item) => item.id === 'cloudflared');
+      if (!cloudflared?.installed) {
+        setPairingLinkMessage('cloudflared를 설치하는 중입니다…');
+        const installed = await client.call('dependencies.install', { id: 'cloudflared' }, 20 * 60_000) as DependencyInstallResult;
+        if (!installed.ok || !installed.item.installed) throw new Error(installed.output || 'cloudflared 설치에 실패했습니다.');
+        cloudflared = installed.item;
+      }
+      if (!remotePlugin.enabled) await client.call('plugins.setEnabled', { id: remotePlugin.id, enabled: true });
+
+      let status = await client.call('plugins.call', { name: 'remote-link.status', params: {} }) as RemoteLinkStatus;
+      if (!status.running || !status.publicUrl) {
+        setPairingLinkMessage('암호화 Quick Link 주소를 만드는 중입니다…');
+        await client.call('plugins.call', {
+          name: 'remote-link.config.set',
+          params: {
+            provider: 'cloudflare-quick',
+            localUrl: `http://127.0.0.1:${settings?.network.port ?? pairing?.port ?? 8787}`,
+            autoStart: false,
+          },
+        });
+        status = await client.call('plugins.call', { name: 'remote-link.start', params: {} }, 90_000) as RemoteLinkStatus;
+      }
+      if (!status.running || !status.publicUrl) throw new Error(status.lastError || 'Quick Link가 공개 HTTPS 주소를 반환하지 않았습니다.');
+
+      await client.call('pairing.regeneratePin', {});
+      const nextPairing = await client.call('pairing.info', {}) as PairingInfo;
+      setRemoteStatus(status);
+      setPairing(nextPairing);
+      try {
+        await client.call('plugins.call', { name: 'remote-link.verify', params: {} }, 30_000);
+        setPairingLinkMessage('✓ Quick Link와 5분·1회용 모바일 QR을 만들었습니다.');
+      } catch {
+        setPairingLinkMessage('Quick Link와 QR은 만들었습니다. 주소가 막 생성되어 외부 확인은 잠시 뒤 다시 시도될 수 있습니다.');
+      }
+    } catch (error) {
+      setPairingLinkMessage(`QR 준비 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPairingLinkBusy(false);
     }
   };
 
@@ -969,6 +1024,12 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
               <span>☁</span>
               <b>Quick Link를 먼저 시작하세요</b>
               <p>현재 주소는 이 PC 안에서만 열립니다. 플러그인에서 Quick Link를 켜면 휴대폰이 인식할 HTTPS QR이 여기에 자동으로 표시됩니다.</p>
+              <Button variant="accent" disabled={pairingLinkBusy} onClick={() => setDangerConfirm({
+                title: 'Quick Link를 열고 QR을 만들까요?',
+                message: '임시 Cloudflare HTTPS 주소로 이 PC를 외부에 공개합니다. 모든 요청에는 일회용 PIN 또는 등록 기기 인증이 필요하며, 사용 후 링크를 중지해야 합니다.',
+                confirmLabel: 'Quick Link 시작·QR 만들기',
+                action: startPairingQuickLink,
+              })}>{pairingLinkBusy ? 'QR 준비 중…' : 'Quick Link 시작·QR 만들기'}</Button>
             </div> : <div className="pairing-qr">
               {qrUrl ? <img src={qrUrl} alt={remotePairingUrl ? 'Quick Link 페어링 QR' : '페어링 QR'} width={300} height={300} /> : <div className="qr-empty">QR 생성 중…</div>}
             </div>}
@@ -994,6 +1055,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                   ? <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. {remotePairingUrl ? '실행 중인 Quick Link HTTPS 주소가 QR에 자동으로 포함됐습니다. ' : ''}PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다.</>
                   : <>휴대폰에서 사용할 수 있는 보안 주소가 아직 없습니다. 플러그인에서 Quick Link를 시작하면 QR과 원격 주소가 자동으로 나타납니다.</>}
               </p>
+              {pairingLinkMessage && <p className="panel-hint">{pairingLinkMessage}</p>}
               <div className="plugin-actions">
                 <Button variant="ghost" onClick={() => void client.call('pairing.regeneratePin', {}).then(() => void refresh())}>
                   PIN 재생성

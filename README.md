@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.3.4**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.3.4.md](docs/RELEASE_NOTES_0.3.4.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.3.5**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.3.5.md](docs/RELEASE_NOTES_0.3.5.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -78,7 +78,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.3.4-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.3.5-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -97,7 +97,7 @@ npx expo run:android
 3. 하단 탭에서 **대화 / 예약 / 설정** 전환. 대화 상단에서 여러 대화와 추론 강도 선택
 4. PC 여러 대 등록 가능 — 상단 `PC 전환` 버튼으로 전환
 
-완성 APK는 `release/mobile/Mr.Robot-Mobile-0.3.4.apk`입니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 이미 Tailscale을 쓰는 경우에는 해당 사설 주소도 사용할 수 있습니다. 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
+Android 0.3.5 소스는 versionCode 10으로 준비돼 있습니다. 기존 릴리스 키가 있는 환경에서 `release/mobile/Mr.Robot-Mobile-0.3.5.apk`를 생성할 수 있으며, 이 체크아웃에는 업데이트 호환 서명키가 없어 APK 바이너리를 포함하지 않습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 이미 Tailscale을 쓰는 경우에는 해당 사설 주소도 사용할 수 있습니다. 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
 
 ## 모델 모듈과 라우팅 설정
 

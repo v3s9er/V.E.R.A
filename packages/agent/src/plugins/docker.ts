@@ -282,7 +282,7 @@ function imageDir(): string {
 export function createDockerPlugin(): MrRobotPlugin {
   return {
     manifest: {
-      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.4', kind: 'tool', enabledByDefault: true,
+      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.5', kind: 'tool', enabledByDefault: true,
       description: 'CTF와 위험한 분석 명령을 호스트와 격리된 제한 컨테이너에서 실행합니다.',
       capabilities: ['container.health', 'container.image.build', 'container.ctf.exec'],
       permissions: ['container.execute', 'process.execute', 'filesystem.read', 'filesystem.write'],

@@ -62,6 +62,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
   const [runs, setRuns] = useState<Record<string, ChatRunState & { cancelling?: boolean }>>({});
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [showModels, setShowModels] = useState(false);
+  const [customProviderId, setCustomProviderId] = useState('');
+  const [customModel, setCustomModel] = useState('');
   const [showScenarios, setShowScenarios] = useState(false);
   const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [showAccess, setShowAccess] = useState(false);
@@ -344,6 +346,15 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
     setConversation(updated);
   };
 
+  const openModelPicker = (): void => {
+    const selectedProvider = providers.find((provider) => provider.id === conversation?.providerId)
+      ?? providers.find((provider) => provider.isDefault)
+      ?? providers[0];
+    setCustomProviderId(selectedProvider?.id ?? '');
+    setCustomModel(conversation?.providerModel ?? selectedProvider?.model ?? '');
+    setShowModels(true);
+  };
+
   const selectModel = async (providerId?: string, providerModel?: string): Promise<void> => {
     if (!conversation || busy) return;
     const updated = await client.call('conversations.update', {
@@ -354,7 +365,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
     }) as ConversationDetail;
     setConversation(updated);
     setConversations((list) => list.map((item) => item.id === updated.id ? updated : item));
+    setCommandMode(providerId ? 'scenario' : 'pc');
     setShowModels(false);
+    setShowScenarios(false);
   };
 
   const switchCommandMode = async (mode: 'pc' | 'scenario'): Promise<void> => {
@@ -486,8 +499,48 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
     listRef.current?.scrollToEnd({ animated: true });
   };
 
+  const singleModelChoices = (includeAutomatic: boolean) => (
+    <>
+      {includeAutomatic && <TouchableOpacity style={styles.modelChoice} onPress={() => void selectModel()}>
+        <Text style={styles.modelProvider}>{!conversation?.providerId ? '✓ ' : ''}자동 라우팅</Text>
+        <Text style={styles.faintChoice}>PC의 기본 라우팅이 요청에 맞는 모델을 선택</Text>
+      </TouchableOpacity>}
+      {providers.flatMap((provider) => (providerModels[provider.id] ?? [provider.model]).map((modelName) => {
+        const selected = conversation?.providerId === provider.id && conversation.providerModel === modelName && !conversation.routingPresetId;
+        return <TouchableOpacity key={`${provider.id}:${modelName}`} style={[styles.modelChoice, selected && styles.modelChoiceOn]} onPress={() => void selectModel(provider.id, modelName)}>
+          <Text style={styles.modelProvider}>{selected ? '✓ ' : ''}{provider.label}</Text>
+          <Text style={styles.modelName}>{modelName}</Text>
+        </TouchableOpacity>;
+      }))}
+      {providers.length === 0 && <Text style={styles.modalText}>PC에 등록된 모델 공급자가 없습니다. PC 앱의 설정 → 모델에서 먼저 공급자를 추가하세요.</Text>}
+      {providers.length > 0 && <View style={styles.customModelBox}>
+        <Text style={styles.modelProvider}>모델 ID 직접 지정</Text>
+        <Text style={styles.faintChoice}>목록에 없는 모델도 공급자를 고른 뒤 정확한 모델 ID를 입력할 수 있습니다.</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.customProviderList} keyboardShouldPersistTaps="handled">
+          {providers.map((provider) => <TouchableOpacity key={provider.id} style={[styles.customProviderChip, customProviderId === provider.id && styles.customProviderChipOn]} onPress={() => { setCustomProviderId(provider.id); setCustomModel(provider.model); }}>
+            <Text style={styles.customProviderText}>{provider.label}</Text>
+          </TouchableOpacity>)}
+        </ScrollView>
+        <TextInput
+          style={styles.customModelInput}
+          value={customModel}
+          onChangeText={setCustomModel}
+          placeholder="예: gpt-5.6-terra"
+          placeholderTextColor={colors.faint}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="done"
+          onSubmitEditing={() => { if (customProviderId && customModel.trim()) void selectModel(customProviderId, customModel.trim()); }}
+        />
+        <TouchableOpacity style={[styles.bigBtn, (!customProviderId || !customModel.trim()) && styles.disabledBtn]} disabled={!customProviderId || !customModel.trim()} onPress={() => void selectModel(customProviderId, customModel.trim())}>
+          <Text style={styles.bigBtnText}>이 모델 사용</Text>
+        </TouchableOpacity>
+      </View>}
+    </>
+  );
+
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
       <View style={styles.modeBar}>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn]} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn]} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
@@ -499,14 +552,16 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
               <Text style={styles.conversationChipText} numberOfLines={1}>{c.pinned ? '📌 ' : ''}{c.title}</Text>
             </TouchableOpacity>
           ))}
-        <TouchableOpacity style={styles.effortBtn} onPress={() => setShowModels(true)} disabled={busy}>
+      </ScrollView>
+      <ScrollView horizontal style={styles.controlBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlBarContent} keyboardShouldPersistTaps="handled">
+        <TouchableOpacity style={[styles.effortBtn, !conversation?.routingPresetId && conversation?.providerId && styles.effortBtnOn]} onPress={openModelPicker} disabled={busy}>
           <Text style={styles.effortText} numberOfLines={1}>
             {conversation?.providerId
-              ? `${providers.find((provider) => provider.id === conversation.providerId)?.label ?? '모델'} · ${conversation.providerModel ?? '기본'}`
-              : '자동 모델'}
+              ? `🤖 단일 모델 · ${providers.find((provider) => provider.id === conversation.providerId)?.label ?? '모델'} · ${conversation.providerModel ?? '기본'}`
+              : '🤖 단일 모델 선택'}
           </Text>
         </TouchableOpacity>
-        {commandMode === 'scenario' && <TouchableOpacity style={styles.effortBtn} onPress={() => setShowScenarios(true)} disabled={busy}><Text style={styles.effortText} numberOfLines={1}>{routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '단일 모델'}</Text></TouchableOpacity>}
+        <TouchableOpacity style={[styles.effortBtn, conversation?.routingPresetId && styles.effortBtnOn]} onPress={() => setShowScenarios(true)} disabled={busy}><Text style={styles.effortText} numberOfLines={1}>🧩 {routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '복합 트리 선택'}</Text></TouchableOpacity>
         <TouchableOpacity style={styles.effortBtn} onPress={() => setShowWorkspaces(true)} disabled={busy}><Text style={styles.effortText} numberOfLines={1}>📁 {workspaces.find((workspace) => workspace.id === conversation?.workspaceId)?.name ?? workspaces.find((workspace) => workspace.isDefault)?.name ?? '작업 폴더'}</Text></TouchableOpacity>
         <TouchableOpacity style={styles.effortBtn} onPress={() => setShowAccess(true)} disabled={busy}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
         <TouchableOpacity style={styles.effortBtn} onPress={() => void cycleEffort()}><Text style={styles.effortText}>추론 {conversation?.reasoningEffort ?? 'auto'}</Text></TouchableOpacity>
@@ -558,7 +613,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
-      <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? Math.max(12, insets.bottom) : 10 }]}>
+      <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom) }]}>
         <TouchableOpacity accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
         <TextInput
           style={styles.input}
@@ -581,17 +636,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
         <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
-            <ScrollView style={styles.modelList}>
-              <TouchableOpacity style={styles.modelChoice} onPress={() => void selectModel()}>
-                <Text style={styles.modelProvider}>자동 라우팅</Text>
-                <Text style={styles.faintChoice}>요청에 맞춰 Mr.Robot이 선택</Text>
-              </TouchableOpacity>
-              {providers.flatMap((provider) => (providerModels[provider.id] ?? [provider.model]).map((modelName) => (
-                <TouchableOpacity key={`${provider.id}:${modelName}`} style={styles.modelChoice} onPress={() => void selectModel(provider.id, modelName)}>
-                  <Text style={styles.modelProvider}>{provider.label}</Text>
-                  <Text style={styles.modelName}>{modelName}</Text>
-                </TouchableOpacity>
-              )))}
+            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+              {singleModelChoices(true)}
             </ScrollView>
             <TouchableOpacity style={styles.bigBtn} onPress={() => setShowModels(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
           </View>
@@ -603,10 +649,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>모바일 실행 방식</Text>
             <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
-            <ScrollView style={styles.modelList}>
-              <TouchableOpacity style={styles.modelChoice} onPress={() => void selectScenario()}>
-                <Text style={styles.modelProvider}>단일 모델</Text><Text style={styles.faintChoice}>모델을 하나 선택해 바로 실행</Text>
-              </TouchableOpacity>
+            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+              <Text style={styles.modelSectionTitle}>단일 모델</Text>
+              {singleModelChoices(true)}
+              <Text style={styles.modelSectionTitle}>복합 트리</Text>
               {routingPresets.map((preset) => <TouchableOpacity key={preset.id} style={styles.modelChoice} onPress={() => void selectScenario(preset.id)}>
                 <Text style={styles.modelProvider}>{preset.name}</Text>
                 <Text style={styles.modelName}>{preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
@@ -667,12 +713,15 @@ const styles = StyleSheet.create({
   modeTextOn: { color: colors.text },
   conversationBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.border },
   conversationBarContent: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 8 },
+  controlBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: 'rgba(124,92,255,.04)' },
+  controlBarContent: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7 },
   newChat: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   newChatText: { color: '#fff', fontWeight: '800', fontSize: 18 },
   conversationChip: { maxWidth: 130, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: colors.inputBg },
   conversationChipOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.22)' },
   conversationChipText: { color: colors.dim, fontSize: 11.5, fontWeight: '600' },
-  effortBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 8 },
+  effortBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg, paddingHorizontal: 9, paddingVertical: 8, maxWidth: 240 },
+  effortBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.16)' },
   effortText: { color: colors.dim, fontSize: 10.5, fontWeight: '700' },
   scroll: { flex: 1 },
   scrollContent: { padding: 16, gap: 14 },
@@ -741,9 +790,18 @@ const styles = StyleSheet.create({
   modalText: { color: colors.dim, fontSize: 14 },
   modelList: { maxHeight: 420, flexShrink: 1 },
   modelChoice: { backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, marginBottom: 8 },
+  modelChoiceOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.16)' },
   modelProvider: { color: colors.text, fontWeight: '700', fontSize: 13 },
   modelName: { color: colors.accent2, fontSize: 12.5, marginTop: 3 },
   faintChoice: { color: colors.faint, fontSize: 12, marginTop: 3 },
+  modelSectionTitle: { color: colors.accent2, fontSize: 12, fontWeight: '800', marginTop: 4, marginBottom: 8, letterSpacing: 0.4 },
+  customModelBox: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, marginTop: 4, marginBottom: 8, gap: 9, backgroundColor: 'rgba(255,255,255,.025)' },
+  customProviderList: { flexDirection: 'row', gap: 6, paddingVertical: 2 },
+  customProviderChip: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: colors.inputBg },
+  customProviderChipOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.18)' },
+  customProviderText: { color: colors.dim, fontSize: 11.5, fontWeight: '700' },
+  customModelInput: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, backgroundColor: colors.inputBg, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 13 },
+  disabledBtn: { opacity: 0.5 },
   confirmCmd: { backgroundColor: colors.inputBg, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 4 },
   confirmTool: { color: '#a78bfa', fontWeight: '700', fontSize: 13 },
   confirmSummary: { color: colors.text, fontSize: 13, lineHeight: 19 },

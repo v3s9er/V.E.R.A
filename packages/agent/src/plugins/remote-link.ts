@@ -102,6 +102,7 @@ function candidateExecutables(): string[] {
   return [
     ...fromPath,
     join(localAppData, 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),
+    join(localAppData, 'Microsoft', 'WinGet', 'Packages', 'Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe', 'cloudflared.exe'),
     join(programFiles, 'cloudflared', 'cloudflared.exe'),
     join(programFilesX86, 'cloudflared', 'cloudflared.exe'),
   ];
@@ -257,7 +258,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.3.4',
+      version: '0.3.5',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',
