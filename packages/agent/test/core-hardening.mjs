@@ -16,7 +16,7 @@ const { OpenAICompatibleProvider } = await import(pathToFileURL(join(dist, 'ai',
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
 const { serverEventAudience } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
-const { requiresSecureApiTransport } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
+const { isEncryptedTailnetTransport, requiresSecureApiTransport } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
 const { ConfigStore } = await import(pathToFileURL(join(dist, 'config.js')).href);
 const { ConversationStore } = await import(pathToFileURL(join(dist, 'conversations.js')).href);
 
@@ -48,6 +48,10 @@ console.log('1. cancellation settles confirmations and steering');
 console.log('1b. API transport guard is case-variant safe');
 {
   check('normal API credentials require secure transport', requiresSecureApiTransport('/api/status') === true);
+  check('CGNAT source is trusted only when the local socket is on the Tailnet adapter',
+    isEncryptedTailnetTransport('100.90.1.2', '100.101.2.3', new Set(['100.101.2.3'])) === true
+    && isEncryptedTailnetTransport('100.90.1.2', '100.101.2.3', new Set()) === false
+    && isEncryptedTailnetTransport('100.90.1.2', '192.168.1.10', new Set(['100.101.2.3'])) === false);
   check('mixed-case pairing route cannot bypass the guard', requiresSecureApiTransport('/API/pair') === true);
   check('mixed-case protected API route cannot bypass the guard', requiresSecureApiTransport('/Api/status') === true);
   check('only the public health probe is exempt', requiresSecureApiTransport('/API/PING') === false);
@@ -542,13 +546,15 @@ console.log('7d. unattended remote handoff is admin-only, strong, memory-only an
   try { handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, paired); } catch { pairedBlocked = true; }
   check('only the local administrator can mint an unattended handoff code', pairedBlocked);
   const pairedInfo = handlers.get('pairing.info')({}, paired);
-  check('paired clients receive no PIN, QR, local secret or administrator-secret fingerprint', ['pin', 'qrPayload', 'localSecret', 'maskedSecret'].every((field) => !Object.hasOwn(pairedInfo, field)));
+  check('paired clients receive no PIN, QR, remote handoff, local secret or administrator-secret fingerprint', ['pin', 'qrPayload', 'remoteHandoff', 'localSecret', 'maskedSecret'].every((field) => !Object.hasOwn(pairedInfo, field)));
 
   const shortPinBefore = server.config.pin;
   const before = Date.now();
   const handoff = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
   const ttl = handoff.expiresAt - before;
   check('remote handoff uses a separate 12-digit code capped at 24 hours', /^\d{12}$/.test(handoff.pin) && handoff.pin !== shortPinBefore && ttl > 23 * 60 * 60_000 && ttl <= 24 * 60 * 60_000 + 1_000);
+  const adminPairingInfo = handlers.get('pairing.info')({}, admin);
+  check('only the local administrator can recover the active handoff for QR state synchronization', adminPairingInfo.remoteHandoff?.pin === handoff.pin && adminPairingInfo.remoteHandoff?.expiresAt === handoff.expiresAt);
   check('creating a remote handoff does not weaken or extend the ordinary QR PIN', server.config.pin === shortPinBefore);
   check('remote handoff plaintext is never persisted', !readFileSync(join(home, 'config.json'), 'utf8').includes(handoff.pin));
 

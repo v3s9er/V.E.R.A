@@ -17,6 +17,9 @@ import type {
 } from '@mr-robot/shared';
 import { mrRobotHome } from '../config.js';
 import type { AuthContext } from './ws.js';
+import { isEncryptedTailnetTransport, isLoopback, isTailnetAddress } from './transport.js';
+
+export { isEncryptedTailnetTransport, isLoopback, isTailnetAddress } from './transport.js';
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -223,6 +226,7 @@ export interface PairingInfo {
   port: number;
   pin?: string;
   pinExpiresAt?: number;
+  remoteHandoff?: { pin: string; expiresAt: number };
   maskedSecret?: string;
   qrPayload?: string;
   localSecret?: string;
@@ -256,20 +260,6 @@ export interface HttpApiHost {
   sharedFileAccess(secret: string, write: boolean): boolean;
 }
 
-export function isLoopback(remote: string): boolean {
-  const r = remote.replace(/^::ffff:/, '');
-  return r === '127.0.0.1' || r === '::1' || r === 'localhost';
-}
-
-export function isTailnetAddress(remote: string): boolean {
-  const octets = remote.replace(/^::ffff:/, '').split('.').map(Number);
-  return octets.length === 4
-    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    && octets[0] === 100
-    && octets[1] >= 64
-    && octets[1] <= 127;
-}
-
 /**
  * Express routing is case-insensitive unless explicitly configured. Keep the
  * transport boundary independent of that setting so a mixed-case `/API/...`
@@ -283,6 +273,10 @@ export function requiresSecureApiTransport(pathname: string): boolean {
 
 function remoteOf(req: Request): string {
   return String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+}
+
+function localOf(req: Request): string {
+  return String(req.socket.localAddress ?? '').replace(/^::ffff:/, '');
 }
 
 export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfers?: Set<AbortController>): Express {
@@ -387,7 +381,7 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
   app.use((req, res, next) => {
     if (!requiresSecureApiTransport(req.path)) { next(); return; }
     const remote = remoteOf(req);
-    if (isLoopback(remote) || isTailnetAddress(remote)) { next(); return; }
+    if (isLoopback(remote) || isEncryptedTailnetTransport(remote, localOf(req))) { next(); return; }
     res.status(426).json({
       error: '보안 전송이 필요합니다. Cloudflare HTTPS 원격 링크 또는 Tailscale 연결을 사용하세요.',
     });
@@ -421,12 +415,17 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
   };
   const requestAuth = (res: Response): AuthContext => res.locals.mrRobotAuth as AuthContext;
   const pairAttempts = new Map<string, { failures: number; windowStartedAt: number; blockedUntil: number; lastSeen: number }>();
-  const pairClientKey = (req: Request): string => {
+  const cloudflarePairClient = (req: Request): string | undefined => {
     const direct = remoteOf(req);
     const forwarded = String(req.header('cf-connecting-ip') ?? '').trim();
     const ray = String(req.header('cf-ray') ?? '');
-    if (isLoopback(direct) && isIP(forwarded) > 0 && /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray)) return `cloudflare:${forwarded}`;
-    return `direct:${direct || 'unknown'}`;
+    if (isLoopback(direct) && isIP(forwarded) > 0 && /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray)) return forwarded;
+    return undefined;
+  };
+  const pairClientKey = (req: Request): string => {
+    const forwarded = cloudflarePairClient(req);
+    if (forwarded) return `cloudflare:${forwarded}`;
+    return `direct:${remoteOf(req) || 'unknown'}`;
   };
   const pairRetryAfter = (key: string): number => {
     const now = Date.now();
@@ -476,6 +475,16 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
       return;
     }
     const pin = String(req.body?.pin ?? '').trim();
+    // The ordinary six-digit PIN is designed for supervised LAN/Tailnet
+    // enrollment.  A public Cloudflare hostname is continuously reachable,
+    // so exposing that small search space would make distributed guessing
+    // possible even with per-IP throttling.  Remote enrollment must use the
+    // separate 12-digit, memory-only, single-use handoff code instead.
+    if (cloudflarePairClient(req) && !/^\d{12}$/.test(pin)) {
+      recordPairFailure(key);
+      res.status(400).json({ error: '원격 연결에는 PC에서 만든 12자리 1회용 외출 코드가 필요합니다.' });
+      return;
+    }
     const name = String(req.body?.deviceName ?? '연결된 기기').trim().slice(0, 120) || '연결된 기기';
     const rawPermission = String(req.body?.permissionCap ?? 'ask');
     const requested: PermissionMode = ['read-only', 'ask', 'workspace', 'full'].includes(rawPermission)

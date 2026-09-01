@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { delimiter, join } from 'node:path';
 import type { RemoteLinkConfig, RemoteLinkStatus, RemoteTransportProviderInfo } from '@mr-robot/shared';
@@ -13,6 +13,19 @@ const NAMED_TUNNEL_READY = /(?:registered tunnel connection|tunnel connection re
 const MAX_DIAGNOSTIC_CHARS = 12_000;
 const START_TIMEOUT_MS = 35_000;
 const VERIFY_TIMEOUT_MS = 12_000;
+const AUTHENTICODE_TIMEOUT_MS = 10_000;
+const CLOUDFLARE_PUBLISHER = 'Cloudflare, Inc.';
+const AUTHENTICODE_SCRIPT = [
+  '$ErrorActionPreference="Stop"',
+  'Import-Module (Join-Path $PSHOME "Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1") -Force -ErrorAction Stop',
+  '$path=[Console]::In.ReadToEnd().Trim()',
+  '$signature=Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop',
+  '$certificate=$signature.SignerCertificate',
+  '$publisher=if($null -eq $certificate){""}else{$certificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false)}',
+  '$thumbprint=if($null -eq $certificate){""}else{$certificate.Thumbprint}',
+  '[pscustomobject]@{status=[string]$signature.Status;publisher=$publisher;thumbprint=$thumbprint}|ConvertTo-Json -Compress',
+].join(';');
+const AUTHENTICODE_COMMAND = Buffer.from(AUTHENTICODE_SCRIPT, 'utf16le').toString('base64');
 
 const DEFAULT_CONFIG: RemoteLinkConfig = {
   provider: 'cloudflare-quick',
@@ -99,17 +112,92 @@ function candidateExecutables(): string[] {
   const localAppData = process.env.LOCALAPPDATA ?? '';
   const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
   const programFilesX86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
-  return [
-    ...fromPath,
+  return [...new Set([
     join(localAppData, 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),
     join(localAppData, 'Microsoft', 'WinGet', 'Packages', 'Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe', 'cloudflared.exe'),
     join(programFiles, 'cloudflared', 'cloudflared.exe'),
     join(programFilesX86, 'cloudflared', 'cloudflared.exe'),
-  ];
+    ...fromPath,
+  ].filter(Boolean))];
+}
+
+export interface CloudflaredExecutableTrust {
+  trusted: boolean;
+  executable?: string;
+  diagnostic: string;
+}
+
+function canonicalExecutable(candidate: string): string | undefined {
+  try {
+    if (!existsSync(candidate) || !statSync(candidate).isFile()) return undefined;
+    return realpathSync.native(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A tunnel token is only given to an authentic Cloudflare binary. PATH entries
+ * are treated as untrusted input; Windows must validate both Authenticode and
+ * the exact publisher before the process is spawned.
+ */
+export function verifyCloudflaredExecutable(candidate: string): CloudflaredExecutableTrust {
+  const executable = canonicalExecutable(candidate);
+  if (!executable) return { trusted: false, diagnostic: '실행 파일이 없거나 일반 파일이 아닙니다.' };
+  if (process.platform !== 'win32') {
+    return { trusted: true, executable, diagnostic: 'cloudflared canonical file 확인 완료 (non-Windows).' };
+  }
+
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  try {
+    const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', AUTHENTICODE_COMMAND], {
+      input: executable,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: AUTHENTICODE_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    });
+    if (result.error || result.status !== 0) {
+      const stderr = String(result.stderr ?? '').trim().replace(/[\r\n]+/g, ' ').slice(0, 240);
+      const reason = result.error?.message || stderr || `exit ${String(result.status)}`;
+      return { trusted: false, executable, diagnostic: `Authenticode 검사 실패 (${reason.slice(0, 160)})` };
+    }
+    const raw = JSON.parse(result.stdout.trim()) as { status?: unknown; publisher?: unknown; thumbprint?: unknown };
+    const status = String(raw.status ?? 'Unknown').replace(/[\r\n]/g, ' ').slice(0, 40);
+    const publisher = String(raw.publisher ?? '').replace(/[\r\n]/g, ' ').slice(0, 160);
+    const thumbprint = String(raw.thumbprint ?? '').replace(/[^A-Fa-f0-9]/g, '').slice(0, 40).toUpperCase();
+    if (status !== 'Valid' || publisher !== CLOUDFLARE_PUBLISHER) {
+      return {
+        trusted: false,
+        executable,
+        diagnostic: `Authenticode 거부: status=${status}, publisher=${publisher || '없음'}`,
+      };
+    }
+    return {
+      trusted: true,
+      executable,
+      diagnostic: `Authenticode 확인: Valid, publisher=${CLOUDFLARE_PUBLISHER}${thumbprint ? `, certificate=${thumbprint}` : ''}`,
+    };
+  } catch (error) {
+    return {
+      trusted: false,
+      executable,
+      diagnostic: `Authenticode 결과 해석 실패 (${(error instanceof Error ? error.message : String(error)).slice(0, 160)})`,
+    };
+  }
 }
 
 export function findCloudflaredExecutable(): string | undefined {
-  return candidateExecutables().find((candidate) => candidate && existsSync(candidate));
+  for (const candidate of candidateExecutables()) {
+    const trust = verifyCloudflaredExecutable(candidate);
+    if (trust.trusted) return trust.executable;
+  }
+  return undefined;
+}
+
+function findCloudflaredCandidate(): string | undefined {
+  return candidateExecutables().find((candidate) => Boolean(canonicalExecutable(candidate)));
 }
 
 /** Quick links may only publish this agent's loopback listener, never an arbitrary local service. */
@@ -173,13 +261,17 @@ function normalizeTunnelToken(value: unknown): string {
 
 export interface RemoteLinkRuntime {
   findExecutable?: () => string | undefined;
+  verifyExecutable?: (candidate: string) => CloudflaredExecutableTrust;
   spawnProcess?: typeof spawn;
   protectSecret?: (value: string) => string;
   unprotectSecret?: (value: string) => string;
   fetchUrl?: typeof fetch;
 }
 
-function providerInventory(cloudflaredPath?: string): RemoteTransportProviderInfo[] {
+function providerInventory(cloudflaredPath?: string, trustDiagnostic?: string): RemoteTransportProviderInfo[] {
+  const unavailableReason = trustDiagnostic?.startsWith('Authenticode')
+    ? `신뢰 검증된 cloudflared가 필요합니다. (${trustDiagnostic})`
+    : 'cloudflared 설치가 필요합니다.';
   return [
     {
       id: 'cloudflare-quick',
@@ -187,7 +279,7 @@ function providerInventory(cloudflaredPath?: string): RemoteTransportProviderInf
       available: Boolean(cloudflaredPath),
       temporary: true,
       requiresAccount: false,
-      reason: cloudflaredPath ? undefined : 'cloudflared 설치가 필요합니다.',
+      reason: cloudflaredPath ? undefined : unavailableReason,
     },
     {
       id: 'cloudflare-named',
@@ -195,7 +287,7 @@ function providerInventory(cloudflaredPath?: string): RemoteTransportProviderInf
       available: Boolean(cloudflaredPath),
       temporary: false,
       requiresAccount: true,
-      reason: cloudflaredPath ? 'Cloudflare 계정, 도메인, Tunnel 토큰이 필요합니다.' : 'cloudflared 설치가 필요합니다.',
+      reason: cloudflaredPath ? 'Cloudflare 계정, 도메인, Tunnel 토큰이 필요합니다.' : unavailableReason,
     },
     {
       id: 'google-relay',
@@ -237,7 +329,8 @@ function storedConfig(ctx: PluginContext): RemoteLinkConfig {
 }
 
 export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobotPlugin {
-  const detectExecutable = runtime.findExecutable ?? findCloudflaredExecutable;
+  const detectExecutable = runtime.findExecutable ?? findCloudflaredCandidate;
+  const inspectExecutable = runtime.verifyExecutable ?? verifyCloudflaredExecutable;
   const spawnProcess = runtime.spawnProcess ?? spawn;
   const vault = new SecretVault();
   const protectSecret = runtime.protectSecret ?? ((value: string) => vault.protect(value));
@@ -251,8 +344,14 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
   let startedAt: number | undefined;
   let lastError: string | undefined;
   let diagnostics = '';
+  let executableTrustDiagnostic = '';
   let reachable: boolean | undefined;
   let verifiedAt: number | undefined;
+  // The saved provider configuration and the process currently serving traffic
+  // are deliberately separate. A temporary Quick Tunnel must never overwrite a
+  // named tunnel hostname, auto-start preference, or DPAPI-protected token.
+  let activeConfig: RemoteLinkConfig | null = null;
+  let activeTransientQuick = false;
 
   return {
     manifest: {
@@ -267,13 +366,25 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
       dependencies: [{ id: 'cloudflared', name: 'Cloudflare cloudflared', required: true }],
     },
     activate(ctx) {
+      const trustedExecutable = (): string | undefined => {
+        const candidate = detectExecutable();
+        if (!candidate) {
+          executableTrustDiagnostic = 'cloudflared 실행 파일을 찾지 못했습니다.';
+          return undefined;
+        }
+        const trust = inspectExecutable(candidate);
+        executableTrustDiagnostic = trust.diagnostic;
+        return trust.trusted ? (trust.executable ?? candidate) : undefined;
+      };
+
       const status = (): RemoteLinkStatus => {
-        const executable = detectExecutable();
+        const executable = trustedExecutable();
         const running = Boolean(processHandle && processHandle.exitCode === null && !processHandle.killed);
         const config = storedConfig(ctx);
-        const temporary = config.provider !== 'cloudflare-named';
+        const activeProvider = running && activeConfig ? activeConfig.provider : config.provider;
+        const temporary = activeProvider !== 'cloudflare-named';
         return {
-          provider: config.provider,
+          provider: activeProvider,
           config,
           running,
           installed: Boolean(executable),
@@ -287,22 +398,25 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           reachable: running ? reachable : undefined,
           verifiedAt: running ? verifiedAt : undefined,
           warning: temporary
-            ? 'Quick Tunnel은 테스트·개발용 임시 주소입니다. 재시작하면 주소가 바뀝니다.'
+            ? 'Quick Tunnel은 테스트·개발용 임시 주소이며 재시작하면 주소가 바뀝니다. trycloudflare.com 경로에는 사용자 도메인의 Cloudflare WAF·레이트리밋 규칙이 적용되지 않습니다.'
             : '고정 Tunnel은 주소가 유지되지만 PC, Mr.Robot, cloudflared가 실행 중이어야 접속할 수 있습니다.',
           lastError,
-          diagnostics: diagnostics || undefined,
-          providers: providerInventory(executable),
+          diagnostics: [executableTrustDiagnostic, diagnostics].filter(Boolean).join('\n') || undefined,
+          providers: providerInventory(executable, executableTrustDiagnostic),
         };
       };
 
       const emitStatus = (): void => ctx.emit(`${PLUGIN_ID}.changed`, status());
 
-      const stop = async (): Promise<RemoteLinkStatus> => {
+      const stop = async (restoreSavedNamedTunnel = false): Promise<RemoteLinkStatus> => {
         const operation = ++operationGeneration;
         const active = processHandle;
         const pending = pendingStart;
+        const wasTransientQuick = activeTransientQuick;
         pendingStart = null;
         processHandle = null;
+        activeConfig = null;
+        activeTransientQuick = false;
         publicUrl = undefined;
         startedAt = undefined;
         reachable = undefined;
@@ -315,17 +429,30 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         // A newer start may have taken ownership while this old process was
         // shutting down. Its state must never be overwritten by stop(A).
         if (operation === operationGeneration) emitStatus();
+        const saved = storedConfig(ctx);
+        if (restoreSavedNamedTunnel && wasTransientQuick && saved.provider === 'cloudflare-named' && saved.autoStart) {
+          try {
+            return await start();
+          } catch (error) {
+            lastError = `Quick Link는 중지했지만 저장된 고정 Tunnel 복원에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`;
+            emitStatus();
+          }
+        }
         return status();
       };
 
-      const start = async (): Promise<RemoteLinkStatus> => {
+      const start = async (runtimeConfig?: RemoteLinkConfig, transientQuick = false): Promise<RemoteLinkStatus> => {
         if (processHandle && processHandle.exitCode === null && !processHandle.killed) return status();
-        const config = storedConfig(ctx);
+        const config = runtimeConfig ?? storedConfig(ctx);
         if (config.provider === 'google-relay') {
           throw new Error('Google 계정 Relay는 Firebase/OAuth/relay 서버가 구성되기 전에는 활성화할 수 없습니다.');
         }
-        const executable = detectExecutable();
-        if (!executable) throw new Error('cloudflared가 없습니다. 플러그인 화면에서 의존성을 먼저 설치하세요.');
+        const candidate = detectExecutable();
+        if (!candidate) throw new Error('cloudflared가 없습니다. 플러그인 화면에서 의존성을 먼저 설치하세요.');
+        const trust = inspectExecutable(candidate);
+        executableTrustDiagnostic = trust.diagnostic;
+        if (!trust.trusted) throw new Error(`cloudflared 실행 파일 신뢰 검증 실패: ${trust.diagnostic}`);
+        const executable = trust.executable ?? candidate;
 
         const operation = ++operationGeneration;
         diagnostics = '';
@@ -377,6 +504,8 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
             return;
           }
           processHandle = child;
+          activeConfig = config;
+          activeTransientQuick = transientQuick;
           liveChildren.add(child);
           child.once('close', () => liveChildren.delete(child));
           const ownsCurrentProcess = (): boolean => operation === operationGeneration && processHandle === child;
@@ -410,6 +539,8 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
               diagnostics = redactRemoteLinkDiagnostics(childDiagnostics);
               lastError = detail;
               processHandle = null;
+              activeConfig = null;
+              activeTransientQuick = false;
               publicUrl = undefined;
               startedAt = undefined;
               emitStatus();
@@ -445,6 +576,8 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
               return;
             }
             processHandle = null;
+            activeConfig = null;
+            activeTransientQuick = false;
             publicUrl = undefined;
             startedAt = undefined;
             reachable = undefined;
@@ -516,7 +649,25 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         return storedConfig(ctx);
       }, { destructive: true, adminOnly: true });
       ctx.registerCommand('remote-link.start', () => start(), { destructive: true, adminOnly: true });
-      ctx.registerCommand('remote-link.stop', () => stop(), { destructive: true, adminOnly: true });
+      ctx.registerCommand('remote-link.stop', () => stop(activeTransientQuick), { destructive: true, adminOnly: true });
+      ctx.registerCommand('remote-link.quick.start', (raw) => {
+        const current = status();
+        // Never interrupt or downgrade an already healthy named tunnel. Its
+        // stable hostname and zone security controls are strictly stronger.
+        if (current.running && current.provider === 'cloudflare-named') return current;
+        if (current.running) return current;
+        const body = (raw ?? {}) as { localUrl?: unknown };
+        const quickConfig: RemoteLinkConfig = {
+          provider: 'cloudflare-quick',
+          localUrl: normalizeRemoteLinkLocalUrl(body.localUrl ?? storedConfig(ctx).localUrl),
+          autoStart: false,
+        };
+        return start(quickConfig, true);
+      }, { destructive: true, adminOnly: true });
+      ctx.registerCommand('remote-link.quick.stop', () => {
+        if (!activeTransientQuick) return status();
+        return stop(true);
+      }, { destructive: true, adminOnly: true });
       ctx.registerCommand('remote-link.verify', () => verify(), { destructive: false, adminOnly: true });
 
       ctx.on('plugins.changed', (raw) => {
@@ -538,6 +689,8 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
       const pending = pendingStart;
       pendingStart = null;
       processHandle = null;
+      activeConfig = null;
+      activeTransientQuick = false;
       publicUrl = undefined;
       startedAt = undefined;
       pending?.cancel(new Error('원격 링크 플러그인이 비활성화되어 시작이 취소되었습니다.'));

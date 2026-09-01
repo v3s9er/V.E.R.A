@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 
 const ENTROPY = 'Mr.Robot/provider-secrets/v1';
 const PROTECT_SCRIPT = `Add-Type -AssemblyName System.Security;$data=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($data);$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}');$out=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$entropy,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Convert]::ToBase64String($out))`;
@@ -6,36 +7,36 @@ const UNPROTECT_SCRIPT = `Add-Type -AssemblyName System.Security;$data=[Console]
 
 /** Windows DPAPI vault. Ciphertext is bound to the current Windows user. */
 export class SecretVault {
-  private readonly protectedByValue = new Map<string, string>();
-
   protect(value: string): string {
     if (!value) return '';
-    const cached = this.protectedByValue.get(value);
-    if (cached) return cached;
     if (process.platform !== 'win32') throw new Error('Mr.Robot secret storage currently requires Windows DPAPI');
     const encoded = runPowerShell(PROTECT_SCRIPT, value);
-    const result = `dpapi:v1:${encoded}`;
-    this.protectedByValue.set(value, result);
-    return result;
+    return `dpapi:v1:${encoded}`;
   }
 
   unprotect(value: string): string {
     if (!value) return '';
     const prefix = 'dpapi:v1:';
     if (!value.startsWith(prefix)) throw new Error('unsupported protected secret format');
-    const plain = runPowerShell(UNPROTECT_SCRIPT, value.slice(prefix.length));
-    this.protectedByValue.set(plain, value);
-    return plain;
+    return runPowerShell(UNPROTECT_SCRIPT, value.slice(prefix.length));
   }
 }
 
 function runPowerShell(script: string, input: string): string {
-  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
+  const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedCommand], {
     input,
     encoding: 'utf8',
     windowsHide: true,
+    timeout: 15_000,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) throw new Error(`Windows DPAPI operation failed: ${(result.stderr || '').trim() || `exit ${result.status}`}`);
+  if (result.error || result.status !== 0) {
+    const detail = String(result.error?.message || result.stderr || `exit ${String(result.status)}`)
+      .trim().replace(/[\r\n]+/g, ' ').slice(0, 512);
+    throw new Error(`Windows DPAPI operation failed: ${detail}`);
+  }
   return result.stdout.trim();
 }

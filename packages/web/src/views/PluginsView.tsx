@@ -28,8 +28,8 @@ interface OrcaStatus {
   runtimeError?: string;
 }
 interface VoiceConfig { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number }
-interface QuickPairingInfo { pin?: string; pinExpiresAt?: number }
 interface RemoteHandoffInfo { pin: string; expiresAt: number }
+interface RemotePairingInfo { remoteHandoff?: RemoteHandoffInfo }
 const KIND_LABEL: Record<string, string> = { integration: '연동', transport: '연결', tool: '도구', workflow: '워크플로', input: '입력' };
 const DEFAULT_REMOTE_CONFIG: RemoteLinkConfig = {
   provider: 'cloudflare-quick',
@@ -86,8 +86,10 @@ export function PluginsView() {
       if (mountedRef.current) setRemotePairing(null);
       return;
     }
-    const pairing = await client.call('pairing.info', {}) as QuickPairingInfo;
-    if (!pairing.pin) {
+    const pairing = await client.call('pairing.info', {}) as RemotePairingInfo;
+    const handoff = pairing.remoteHandoff;
+    if (!handoff) {
+      if (mountedRef.current) setRemoteHandoff(null);
       if (mountedRef.current) setRemotePairing(null);
       return;
     }
@@ -98,10 +100,13 @@ export function PluginsView() {
       hosts: [...new Set([status.publicUrl])],
       protocol: 'https',
       port: 443,
-      pin: pairing.pin,
+      pin: handoff.pin,
     });
     const qrUrl = await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' });
-    if (mountedRef.current) setRemotePairing({ pin: pairing.pin, expiresAt: pairing.pinExpiresAt, qrUrl });
+    if (mountedRef.current) {
+      setRemoteHandoff(handoff);
+      setRemotePairing({ pin: handoff.pin, expiresAt: handoff.expiresAt, qrUrl });
+    }
   }, [client]);
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -408,7 +413,7 @@ export function PluginsView() {
         commitRemoteStatus(status);
         setRemoteConfig(status.config);
       }
-      advance(5, '모바일 QR 생성');
+      advance(5, '원격 신규 연결 잠금 확인');
       await refreshRemotePairing(status);
       advance(6, '외부 주소 확인');
       await client.call('plugins.call', { name: 'remote-link.verify', params: {} });
@@ -496,6 +501,7 @@ export function PluginsView() {
     try {
       const handoff = await client.call('pairing.createRemoteHandoff', { ttlMinutes: 24 * 60 }) as RemoteHandoffInfo;
       setRemoteHandoff(handoff);
+      await refreshRemotePairing(remoteStatus);
       setCallResult('24시간·1회용 외출 코드를 만들었습니다. 한 기기가 연결되거나 앱이 재시작되면 즉시 폐기됩니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -518,6 +524,7 @@ export function PluginsView() {
     try {
       await client.call('pairing.revokeRemoteHandoff', {});
       setRemoteHandoff(null);
+      setRemotePairing(null);
       setCallResult('외출용 일회용 코드를 폐기했습니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -700,12 +707,12 @@ export function PluginsView() {
                 <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Cloudflare 모바일 연결 QR" width={300} height={300} /></div>
                 <div className="pairing-info">
                   <b>모바일 원탭 연결</b>
-                  <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. HTTPS 주소와 1회용 PIN이 함께 들어 있습니다.</p>
-                  <div className="pairing-pin">PIN <b>{remotePairing.pin}</b> <span>· 5분 / 1회용</span></div>
-                  {remotePairing.expiresAt && <span className="panel-hint">만료 {new Date(remotePairing.expiresAt).toLocaleTimeString()}</span>}
+                  <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. HTTPS 주소와 강한 12자리 외출 코드가 함께 들어 있습니다.</p>
+                  <div className="pairing-pin">외출 코드 <b>{remotePairing.pin}</b> <span>· 최대 24시간 / 1회용</span></div>
+                  {remotePairing.expiresAt && <span className="panel-hint">만료 {new Date(remotePairing.expiresAt).toLocaleString()}</span>}
                 </div>
               </div>}
-              {remoteStatus?.publicUrl && !remotePairing && <p className="panel-hint">모바일 연결 QR을 준비하는 중입니다. 준비되지 않으면 설정 → 모바일 연결에서 PIN 재생성을 누른 뒤 다시 시도하세요.</p>}
+              {remoteStatus?.publicUrl && !remotePairing && <p className="panel-hint">기존 등록 기기는 바로 연결됩니다. 새 기기를 연결할 때만 위의 ‘24시간·1회용 외출 코드 생성’을 눌러 보안 QR을 만드세요. 일반 6자리 PIN은 공개 주소에서 거부됩니다.</p>}
               {remoteStatus?.lastError && <div className="gate-error">{remoteStatus.lastError}</div>}
               <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 Mr.Robot이 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
             </div>}

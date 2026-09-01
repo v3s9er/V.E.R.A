@@ -407,10 +407,12 @@ export class AgentServer {
   }
 
   pairingInfo(includeLocalSecret = false, includePairingCode = false): PairingInfo {
-    if (includePairingCode && Date.now() - this.config.pinCreatedAt > PAIRING_PIN_TTL_MS) {
+    const now = Date.now();
+    if (includePairingCode && now - this.config.pinCreatedAt > PAIRING_PIN_TTL_MS) {
       this.config.regeneratePin();
       this.pinLimiter.reset();
     }
+    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) this.remoteHandoff = null;
     const port = this.boundPort || this.config.settings.network.port;
     const lanShared = this.boundHost === '0.0.0.0' || this.boundHost === '::';
     // Plain LAN credentials are intentionally disabled. The generic pairing
@@ -429,6 +431,7 @@ export class AgentServer {
         pin: this.config.pin,
         pinExpiresAt: this.config.pinCreatedAt + PAIRING_PIN_TTL_MS,
         qrPayload: pairingPayload(host, port, this.config.pin, hosts),
+        ...(this.remoteHandoff ? { remoteHandoff: { ...this.remoteHandoff } } : {}),
       } : {}),
       ...(includeLocalSecret ? { localSecret: this.secret } : {}),
     };

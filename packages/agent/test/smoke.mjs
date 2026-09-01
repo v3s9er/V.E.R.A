@@ -20,6 +20,7 @@ const dist = resolve(here, '..', 'dist');
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
 const { browserOriginAllowed, createByteLimitStream, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
 const { createRemoteLinkPlugin, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
+const { SecretVault } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { screenSize } = await import(pathToFileURL(join(dist, 'computer', 'screen.js')).href);
@@ -93,6 +94,14 @@ let arbitraryLocalServiceBlocked = false;
 try { normalizeRemoteLinkLocalUrl('http://192.168.10.20:8787'); } catch { arbitraryLocalServiceBlocked = true; }
 check('remote link rejects non-loopback targets', arbitraryLocalServiceBlocked);
 check('remote link plugin defaults off', createRemoteLinkPlugin().manifest.enabledByDefault === false);
+if (process.platform === 'win32') {
+  const vault = new SecretVault();
+  const firstCiphertext = vault.protect('smoke-secret-no-plaintext-cache');
+  const secondCiphertext = vault.protect('smoke-secret-no-plaintext-cache');
+  check('DPAPI vault does not retain and reuse a plaintext-keyed process cache', firstCiphertext !== secondCiphertext);
+  check('DPAPI vault still round-trips without a plaintext cache', vault.unprotect(firstCiphertext) === 'smoke-secret-no-plaintext-cache');
+}
+const trustFakeCloudflared = (candidate) => ({ trusted: true, executable: candidate, diagnostic: 'test Authenticode trusted' });
 class FakeTunnelProcess extends EventEmitter {
   constructor(pid) {
     super();
@@ -110,7 +119,7 @@ const tunnelB = new FakeTunnelProcess(102);
 const tunnelQueue = [tunnelA, tunnelB];
 const remoteCommands = new Map();
 const remoteStorage = new Map();
-const racePlugin = createRemoteLinkPlugin({ findExecutable: () => 'fake-cloudflared', spawnProcess: () => tunnelQueue.shift() });
+const racePlugin = createRemoteLinkPlugin({ findExecutable: () => 'fake-cloudflared', verifyExecutable: trustFakeCloudflared, spawnProcess: () => tunnelQueue.shift() });
 const fakePluginContext = {
   pluginId: 'remote-link',
   logger: { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } },
@@ -120,6 +129,19 @@ const fakePluginContext = {
   setInterval, setTimeout, clearInterval, clearTimeout,
   computer: {}, ai: { providerCount: () => 0 },
 };
+let untrustedSpawned = false;
+const untrustedCommands = new Map();
+const untrustedPlugin = createRemoteLinkPlugin({
+  findExecutable: () => 'path-hijacked-cloudflared.exe',
+  verifyExecutable: (candidate) => ({ trusted: false, executable: candidate, diagnostic: 'Authenticode 거부: status=NotSigned, publisher=없음' }),
+  spawnProcess: () => { untrustedSpawned = true; throw new Error('must not spawn'); },
+});
+untrustedPlugin.activate({ ...fakePluginContext, registerCommand: (name, handler) => untrustedCommands.set(name, handler) });
+const untrustedStatus = await untrustedCommands.get('remote-link.status')({});
+let untrustedStartRejected = false;
+try { await untrustedCommands.get('remote-link.start')({}); } catch (error) { untrustedStartRejected = /신뢰 검증 실패/.test(String(error)); }
+check('unsigned PATH cloudflared is unavailable and rejected before spawn', untrustedStatus.installed === false && untrustedStartRejected && !untrustedSpawned);
+await untrustedPlugin.deactivate(fakePluginContext);
 racePlugin.activate(fakePluginContext);
 const startA = Promise.resolve(remoteCommands.get('remote-link.start')({})).catch((error) => error);
 const stopA = Promise.resolve(remoteCommands.get('remote-link.stop')({}));
@@ -145,6 +167,7 @@ let spawnedArgs = [];
 let spawnedToken = '';
 const namedPlugin = createRemoteLinkPlugin({
   findExecutable: () => 'fake-cloudflared',
+  verifyExecutable: trustFakeCloudflared,
   protectSecret: (value) => `protected:${value}`,
   unprotectSecret: (value) => value.replace(/^protected:/, ''),
   spawnProcess: (_executable, args, options) => {
@@ -179,6 +202,83 @@ await namedStop;
 const clearedNamed = await namedCommands.get('remote-link.config.set')({ ...savedNamed, clearTunnelToken: true });
 check('saved tunnel credential can be explicitly cleared', clearedNamed.hasTunnelToken === false && !namedStorage.get('config').tunnelTokenProtected);
 await namedPlugin.deactivate(namedContext);
+
+const transientQuickChild = new FakeTunnelProcess(104);
+const restoredNamedChild = new FakeTunnelProcess(105);
+const transientCommands = new Map();
+const transientStorage = new Map();
+const transientQueue = [transientQuickChild, restoredNamedChild];
+const transientPlugin = createRemoteLinkPlugin({
+  findExecutable: () => 'fake-cloudflared',
+  verifyExecutable: trustFakeCloudflared,
+  protectSecret: (value) => `protected:${value}`,
+  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  spawnProcess: () => transientQueue.shift(),
+});
+const transientContext = {
+  ...fakePluginContext,
+  storage: { get: (key) => transientStorage.get(key), set: (key, value) => transientStorage.set(key, value) },
+  registerCommand: (name, handler) => transientCommands.set(name, handler),
+};
+transientPlugin.activate(transientContext);
+await transientCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc2.example.com', tunnelToken: namedToken, autoStart: true,
+});
+const savedBeforeTransientQuick = JSON.stringify(transientStorage.get('config'));
+const transientQuickStart = transientCommands.get('remote-link.quick.start')({ localUrl: 'http://127.0.0.1:8787' });
+transientQuickChild.stderr.write('INF route https://temporary-safe.trycloudflare.com ready');
+const transientQuickStatus = await transientQuickStart;
+check('transient Quick Link preserves the saved named tunnel credential and auto-start configuration',
+  JSON.stringify(transientStorage.get('config')) === savedBeforeTransientQuick
+  && transientQuickStatus.provider === 'cloudflare-quick'
+  && transientQuickStatus.config.provider === 'cloudflare-named'
+  && transientQuickStatus.config.autoStart === true
+  && /WAF.+레이트리밋/.test(transientQuickStatus.warning));
+const restoreNamed = transientCommands.get('remote-link.quick.stop')({});
+transientQuickChild.close();
+await new Promise((resolve) => setImmediate(resolve));
+restoredNamedChild.stderr.write('INF Registered tunnel connection connIndex=0');
+const restoredNamedStatus = await restoreNamed;
+check('stopping a transient Quick Link restores the saved auto-start named tunnel',
+  restoredNamedStatus.running === true
+  && restoredNamedStatus.provider === 'cloudflare-named'
+  && restoredNamedStatus.publicUrl === 'https://pc2.example.com'
+  && JSON.stringify(transientStorage.get('config')) === savedBeforeTransientQuick);
+const namedNotDowngraded = await transientCommands.get('remote-link.quick.start')({});
+check('Quick Link request never interrupts or downgrades an already-running named tunnel',
+  namedNotDowngraded.provider === 'cloudflare-named'
+  && namedNotDowngraded.processId === restoredNamedStatus.processId
+  && namedNotDowngraded.publicUrl === restoredNamedStatus.publicUrl);
+const stopRestoredNamed = transientCommands.get('remote-link.stop')({});
+restoredNamedChild.close();
+await stopRestoredNamed;
+await transientPlugin.deactivate(transientContext);
+
+const failedQuickCommands = new Map();
+const failedQuickStorage = new Map();
+const failedQuickPlugin = createRemoteLinkPlugin({
+  findExecutable: () => 'fake-cloudflared',
+  verifyExecutable: trustFakeCloudflared,
+  protectSecret: (value) => `protected:${value}`,
+  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  spawnProcess: () => { throw new Error('simulated Quick Link failure'); },
+});
+const failedQuickContext = {
+  ...fakePluginContext,
+  storage: { get: (key) => failedQuickStorage.get(key), set: (key, value) => failedQuickStorage.set(key, value) },
+  registerCommand: (name, handler) => failedQuickCommands.set(name, handler),
+};
+failedQuickPlugin.activate(failedQuickContext);
+await failedQuickCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc3.example.com', tunnelToken: namedToken, autoStart: false,
+});
+const savedBeforeFailedQuick = JSON.stringify(failedQuickStorage.get('config'));
+const failedQuickStart = Promise.resolve(failedQuickCommands.get('remote-link.quick.start')({})).catch((error) => error);
+const failedQuickError = await failedQuickStart;
+check('failed transient Quick Link leaves the saved named tunnel security configuration untouched',
+  failedQuickError instanceof Error && JSON.stringify(failedQuickStorage.get('config')) === savedBeforeFailedQuick);
+await failedQuickPlugin.deactivate(failedQuickContext);
+
 const confineBase = mkdtempSync(join(tmpdir(), 'mr-robot-confine-'));
 const confineRoot = join(confineBase, 'root');
 const confineOutside = join(confineBase, 'outside');
@@ -292,6 +392,18 @@ const proxiedPairingResponse = await fetch(`${base}/api/pairing`, {
 const proxiedPairing = await proxiedPairingResponse.json();
 check('proxied loopback pairing response also omits localSecret', proxiedPairingResponse.status === 200 && !Object.hasOwn(proxiedPairing, 'localSecret'));
 
+const proxiedShortPin = await fetch(`${base}/api/pair`, {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'cf-ray': 'abcd1234ef567891-icn',
+    'cf-connecting-ip': '203.0.113.11',
+  },
+  body: JSON.stringify({ pin: localPairing.pin }),
+});
+check('public Cloudflare enrollment rejects the ordinary six-digit PIN', proxiedShortPin.status === 400
+  && /12자리/.test((await proxiedShortPin.json()).error ?? ''));
+
 const bad = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: '000000' }) });
 check('wrong pin rejected', bad.status === 400);
 
@@ -311,6 +423,21 @@ const readOnlyPaired = await (
   await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: readOnlyPin, permissionCap: 'read-only' }) })
 ).json();
 check('read-only pin exchange returns scoped secret', typeof readOnlyPaired.secret === 'string' && readOnlyPaired.secret.length > 32);
+
+const remoteHandoff = server.createRemoteHandoff(60);
+const remoteHandoffResponse = await fetch(`${base}/api/pair`, {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'cf-ray': 'abcd1234ef567892-icn',
+    'cf-connecting-ip': '203.0.113.12',
+  },
+  body: JSON.stringify({ pin: remoteHandoff.pin, permissionCap: 'full', deviceName: 'remote-smoke' }),
+});
+const remoteHandoffPaired = await remoteHandoffResponse.json();
+check('public Cloudflare enrollment accepts only the strong one-use handoff and caps it at ask', remoteHandoffResponse.status === 200
+  && typeof remoteHandoffPaired.secret === 'string'
+  && server.authenticate(remoteHandoffPaired.secret)?.permissionCap === 'ask');
 
 const noAuth = await fetch(`${base}/api/status`);
 check('status requires auth', noAuth.status === 401);
@@ -463,8 +590,62 @@ const rpc = (socket, method, params) =>
     socket.send(JSON.stringify({ id, method, params }));
   });
 
-const unauthStatus = await rpc(ws, 'status', {});
-check('ws rejects before auth', unauthStatus.ok === false && unauthStatus.error?.code === 1001);
+const foreignOriginClosed = await new Promise((resolveClose, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin: 'https://foreign.example' });
+  const timer = setTimeout(() => resolveClose(0), 1_000);
+  socket.once('close', (code) => { clearTimeout(timer); resolveClose(code); });
+  socket.once('error', (error) => { if (socket.readyState !== WebSocket.CLOSED) reject(error); });
+});
+check('WS rejects an explicit foreign browser Origin before authentication', foreignOriginClosed === 1008);
+
+const oversizedPreAuthWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+const oversizedPreAuthClosed = new Promise((resolveClose) => {
+  const timer = setTimeout(() => resolveClose(0), 1_000);
+  oversizedPreAuthWs.once('close', (code) => { clearTimeout(timer); resolveClose(code); });
+});
+oversizedPreAuthWs.send(JSON.stringify({ id: 1, method: 'auth', params: { secret: 'x'.repeat(5_000) } }));
+check('WS accepts only one small text authentication frame before auth', await oversizedPreAuthClosed === 1008);
+
+const cloudflareNativeWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+    origin: 'https://robot.v3s9er.com:443',
+    headers: { Host: 'robot.v3s9er.com:443', 'CF-Ray': 'abcd1234ef567893-icn', 'CF-Connecting-IP': '203.0.113.13' },
+  });
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+const cloudflareNativeAuth = await rpc(cloudflareNativeWs, 'auth', { secret: paired.secret });
+check('WS normalizes an explicit Cloudflare HTTPS default port', cloudflareNativeAuth.result?.ok === true);
+cloudflareNativeWs.close();
+
+const desktopControllerWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+    origin: 'http://127.0.0.1:8787',
+    headers: { Host: 'robot.v3s9er.com', 'CF-Ray': 'abcd1234ef567894-icn', 'CF-Connecting-IP': '203.0.113.14' },
+  });
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+const desktopControllerAuth = await rpc(desktopControllerWs, 'auth', { secret: paired.secret });
+check('registered desktop controller may use an authenticated remote Cloudflare hop from loopback UI', desktopControllerAuth.result?.ok === true);
+desktopControllerWs.close();
+
+const rejectedAuthWs = await new Promise((resolveWs, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  socket.on('open', () => resolveWs(socket));
+  socket.on('error', reject);
+});
+const rejectedAuthClosed = new Promise((resolveClose) => {
+  const timer = setTimeout(() => resolveClose(0), 1_000);
+  rejectedAuthWs.once('close', (code) => { clearTimeout(timer); resolveClose(code); });
+});
+const rejectedAuth = await rpc(rejectedAuthWs, 'auth', { secret: 'not-a-valid-secret' });
+check('failed WS authentication is answered once and the socket is closed', rejectedAuth.result?.ok === false
+  && await rejectedAuthClosed === 4003);
 
 const authRes = await rpc(ws, 'auth', { secret: paired.secret });
 check('ws auth', authRes.ok === true && authRes.result?.ok === true);
