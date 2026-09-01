@@ -83,7 +83,7 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-const supportedDeviceCapabilities = new Set<DeviceCapability>(['work-sync']);
+const supportedDeviceCapabilities = new Set<DeviceCapability>(['work-sync', 'private-calendar']);
 const supportedDevicePermissions = new Set<PermissionMode>(['read-only', 'ask', 'workspace', 'full']);
 
 function normalizeDevicePermission(value: unknown): PermissionMode {

@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // even though the packaged application itself uses ESM.
 contextBridge.exposeInMainWorld('mrRobotDesktop', Object.freeze({
   chooseDirectory: () => ipcRenderer.invoke('mr-robot:choose-directory'),
+  chooseCalendarWorkbook: () => ipcRenderer.invoke('mr-robot:choose-calendar-workbook'),
   getLocalConnection: () => ipcRenderer.invoke('mr-robot:local-connection'),
   loadPcs: () => ipcRenderer.invoke('mr-robot:pcs.load'),
   savePcs: (pcs) => ipcRenderer.invoke('mr-robot:pcs.save', pcs),

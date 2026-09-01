@@ -180,8 +180,18 @@ if (!mobileChat.includes('FileSystem.createUploadTask') || !mobileChat.includes(
 if (!app.includes('!client.isAdmin') || !app.includes('관리 제한')) throw new Error('paired-device admin scope is not visible in the workspace header');
 if (!settings.includes('const canManage = client.isAdmin') || !settings.includes('access-scope-banner') || !settings.includes('disabled={locked}')) throw new Error('settings do not expose and enforce paired-device read-only management scope');
 if (!settings.includes('readOnly={!canManage}') || !settings.includes('disabled={!canManage || !selectedRoutingPreset}')) throw new Error('routing graph and preset apply remain mutable for paired non-admin devices');
+if (!settings.includes("client.call('pairing.link.capability.set'")
+  || settings.includes("pairing.link.update', { id: link.id, capabilities:")) throw new Error('device capability toggles can replay a stale full capability array');
+if (!schedulesView.includes('clearNaverCredentials: true')
+  || !schedulesView.includes('open={clearNaverConfirmOpen}')
+  || !schedulesView.includes('집 주소와 근무 일정은 유지됩니다.')) throw new Error('NAVER credential removal lacks an explicit scoped confirmation dialog');
 if (!dependencySetup.includes('const canManage = client.isAdmin') || !dependencySetup.includes('disabled={!canManage')) throw new Error('dependency setup is not safely read-only for paired devices');
 if (!pluginsView.includes('if (!canManage)') || !pluginsView.includes('플러그인 관리는 PC 전용입니다') || !pluginsView.includes('if (!canManage) return;')) throw new Error('plugin management is not replaced by a read-only catalog for paired devices');
 if (!schedulesView.includes('Promise.allSettled') || !schedulesView.includes('canManageJobs ? client.call(\'scheduler.list\'') || !schedulesView.includes('일정 보기 모드')) throw new Error('paired-device scheduler denial can still block general calendar use');
+if (!schedulesView.includes('disabled={busy || !importPerson.trim()}')
+  || schedulesView.includes('disabled={busy || !importPerson.trim() || !importTeam.trim()}')) throw new Error('optional workbook team filter is incorrectly required by the UI');
+if (!schedulesView.includes("client.on('calendar.work.changed', () => void refreshSelectedWorkDay())")
+  || !schedulesView.includes('await refreshSelectedWorkDay();')
+  || !schedulesView.includes('setDestinationAddress(event.target.value); setRoutePreview(null);')) throw new Error('work-day edits can leave stale selected fields or route results visible');
 
 console.log(`UI CONTRACT TEST PASSED · ${uiCalls.size} RPC calls matched · menus + model controls + paired permission UX + run lifecycle + transport ownership verified`);

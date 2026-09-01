@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.3.6**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.3.6.md](docs/RELEASE_NOTES_0.3.6.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.3.7**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.3.7.md](docs/RELEASE_NOTES_0.3.7.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -37,7 +37,7 @@ PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에
 - ☁️ **VPN 없는 Cloudflare 연결** — 계정 없는 임시 Quick Link 또는 사용자 도메인의 자동 재연결 고정 Tunnel, Tailscale은 기본 OFF 선택 플러그인
 - 📌 **상용 앱형 대화 UX** — 대화 고정/고정 우선 정렬, 우클릭 이름 변경·보관·삭제, 다중 파일 드래그앤드롭
 - 🔐 **대화별 액세스** — 모델·시나리오·작업 폴더 옆에서 읽기/승인/폴더/전체 권한을 바로 선택하고 대화에 저장
-- 📅 **캘린더 플러그인** — 로컬 일정 추가·삭제·목록·ICS 내보내기와 예약 실행을 한 화면에서 관리
+- 📅 **개인 근무 캘린더** — 읽기 전용 `.xlsx` 가져오기, 서울 기준 월간 달력·공휴일·수동 근무지 수정, 동의 기반 NAVER 경로 연결을 DPAPI 암호화 상태로 관리
 - 🧪 **CTF + Docker 플러그인** — 네트워크 차단·읽기 전용·권한 제거·자원 제한 샌드박스와 재사용 도구 이미지
 - 🔗 **MCP 호스트 플러그인** — stdio MCP 서버를 필요할 때만 연결하고 도구별 승인을 거쳐 호출
 - ♻️ **장시간 작업·저장 복원력** — 연결이 끊겨도 작업은 계속되고 같은 기기가 상태·승인을 복구하며, 손상된 설정·대화는 원본 격리 후 마지막 정상 백업으로 복원
@@ -78,7 +78,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.3.6-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.3.7-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -97,7 +97,7 @@ npx expo run:android
 3. 하단 탭에서 **대화 / 예약 / 설정** 전환. 대화 입력창 아래에서 현재 모델이 지원하는 추론 강도 선택
 4. PC 여러 대 등록 가능 — 상단 `PC 전환` 버튼으로 전환
 
-Android 0.3.6은 versionCode 11이며 `release/mobile/Mr.Robot-Mobile-0.3.6.apk`로 배포됩니다. 0.3.0 이후와 동일한 Mr.Robot 전용 릴리스 인증서로 서명되어 0.3.0~0.3.4에서 바로 업데이트할 수 있습니다. 0.3.5는 APK가 공개되지 않았으므로 별도 마이그레이션이 필요하지 않습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 이미 Tailscale을 쓰는 경우에는 해당 사설 주소도 사용할 수 있습니다. 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
+Android 0.3.7은 versionCode 12로 준비합니다. 0.3.6과 같은 Mr.Robot 전용 릴리스 인증서로 `release/mobile/Mr.Robot-Mobile-0.3.7.apk`를 만들면 기존 0.3.x 앱에서 바로 업데이트할 수 있습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 이미 Tailscale을 쓰는 경우에는 해당 사설 주소도 사용할 수 있습니다. 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
 
 ## 모델 모듈과 라우팅 설정
 
@@ -177,6 +177,7 @@ export const plugin = {
 - 직접 PC 조작 RPC는 `전체 허용` 모드가 아니면 차단되고, 일반 작업은 에이전트 도구 권한 정책을 통과
 - 외부 접속은 기본 OFF인 Cloudflare Quick Link 또는 선택형 Tailscale 플러그인을 사용하며, 어떤 전송에서도 기기별 토큰 인증은 유지됩니다
 - `~/.mr-robot/` 에 설정·대화·기억·예약·라우팅 통계가 저장됩니다. API 키 값은 Windows 사용자 계정에 묶인 DPAPI 암호문으로만 기록됩니다.
+- 개인 근무표는 원본 Excel을 읽기 전용으로만 열고 필요한 날짜·근무지 값만 `~/.mr-robot/private/work-calendar/state.bin`의 DPAPI 암호문에 저장합니다. 원본 파일·행 식별값·NAVER 키는 Git이나 일반 기기 동기화에 넣지 않습니다.
 
 ## 구조
 

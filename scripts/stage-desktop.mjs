@@ -42,11 +42,12 @@ execFileSync(process.execPath, [
 ], { stdio: 'inherit' });
 
 copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
+copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
 const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.3.6', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs',
+  name: 'mr-robot-desktop', version: '0.3.7', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs',
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

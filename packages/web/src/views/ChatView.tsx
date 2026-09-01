@@ -24,6 +24,7 @@ declare global {
   interface Window {
     mrRobotDesktop?: {
       chooseDirectory(): Promise<string | null>;
+      chooseCalendarWorkbook(): Promise<string | null>;
       getLocalConnection(): Promise<{ name: string; host: string; port: number; secret: string }>;
       loadPcs(): Promise<DesktopPcLoadResult>;
       savePcs(pcs: SavedPc[]): Promise<{ ok: boolean }>;

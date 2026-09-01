@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import type { AppSettings, DependencyInstallResult, DependencyReport, DeviceCapability, MemoryItem, PluginInfo, ProviderInfo, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
@@ -127,6 +127,8 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [remoteHandoffMessage, setRemoteHandoffMessage] = useState('');
   const [pairingLinkBusy, setPairingLinkBusy] = useState(false);
   const [pairingLinkMessage, setPairingLinkMessage] = useState('');
+  const capabilityUpdateLocks = useRef(new Set<string>());
+  const [capabilityBusyIds, setCapabilityBusyIds] = useState<Set<string>>(() => new Set());
 
   // provider add form
   const [preset, setPreset] = useState('deepseek');
@@ -656,6 +658,25 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     { id: 'pairing', title: '모바일 연결', adminOnly: true },
   ] as const;
 
+  const setDeviceCapability = async (linkId: string, capability: DeviceCapability, enabled: boolean): Promise<void> => {
+    if (capabilityUpdateLocks.current.has(linkId)) return;
+    capabilityUpdateLocks.current.add(linkId);
+    setCapabilityBusyIds((current) => new Set(current).add(linkId));
+    try {
+      await client.call('pairing.link.capability.set', { id: linkId, capability, enabled });
+      await refresh();
+    } catch (error) {
+      setPairingLinkMessage(`기기 권한 변경 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      capabilityUpdateLocks.current.delete(linkId);
+      setCapabilityBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(linkId);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="settings-layout">
       <aside className="settings-nav">
@@ -1085,8 +1106,15 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                     </Select>
                     <Toggle
                       checked={link.capabilities?.includes('work-sync') === true}
+                      disabled={capabilityBusyIds.has(link.id)}
                       label="작업 동기화"
-                      onChange={(enabled) => void client.call('pairing.link.update', { id: link.id, capabilities: enabled ? ['work-sync'] : [] }).then(() => void refresh())}
+                      onChange={(enabled) => void setDeviceCapability(link.id, 'work-sync', enabled)}
+                    />
+                    <Toggle
+                      checked={link.capabilities?.includes('private-calendar') === true}
+                      disabled={capabilityBusyIds.has(link.id)}
+                      label="개인 근무 캘린더"
+                      onChange={(enabled) => void setDeviceCapability(link.id, 'private-calendar', enabled)}
                     />
                   </div>
                   <Button variant="danger" onClick={() => setDangerConfirm({ title: '기기 연결을 해제할까요?', message: `${link.name} 기기의 인증이 취소되며 다시 사용하려면 새 PIN 또는 QR로 연결해야 합니다.`, confirmLabel: '연결 해제', action: async () => { await client.call('pairing.link.revoke', { id: link.id }); await refresh(); } })}>연결 해제</Button>

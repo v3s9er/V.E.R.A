@@ -555,7 +555,7 @@ export interface NetworkSettings {
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
 
 /** Narrow, independently revocable privileges granted to a paired device. */
-export type DeviceCapability = 'work-sync';
+export type DeviceCapability = 'work-sync' | 'private-calendar';
 
 export interface SafetySettings {
   /** read-only < ask < workspace < full. Legacy confirm is migrated to ask. */

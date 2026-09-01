@@ -83,6 +83,14 @@ export class WsHub {
     }
   }
 
+  /** Broadcast to an explicitly authorized subset of authenticated clients. */
+  broadcastWhere(event: string, data: unknown, predicate: (auth: AuthContext) => boolean): void {
+    for (const client of this.clients) {
+      const auth = client.state.auth;
+      if (client.state.authed && auth && predicate(auth)) client.sendEvent(event, data);
+    }
+  }
+
   /** Control-plane/log/voice events are visible only to the local administrator. */
   broadcastAdmin(event: string, data: unknown): void {
     for (const client of this.clients) {

@@ -56,14 +56,14 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.6';
+export const VERSION = '0.3.7';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
 
-export type ServerEventAudience = 'paired' | 'admin' | 'none';
+export type ServerEventAudience = 'paired' | 'private-calendar' | 'admin' | 'none';
 
 // Event visibility is an authorization boundary, not just a UI concern.
 // Unknown/new events default to no network broadcast until explicitly reviewed.
@@ -71,6 +71,7 @@ const PAIRED_EVENT_ALLOWLIST = new Set([
   'routing.changed', 'routing.presets.changed', 'conversations.changed',
   'workspaces.changed', 'calendar.changed',
 ]);
+const PRIVATE_CALENDAR_EVENT_ALLOWLIST = new Set(['calendar.work.changed']);
 const ADMIN_EVENT_ALLOWLIST = new Set([
   'log', 'plugins.changed', 'providers.changed', 'settings.changed',
   'dependencies.changed', 'memory.changed', 'scheduler.changed', 'scheduler.ran',
@@ -80,6 +81,7 @@ const ADMIN_EVENT_ALLOWLIST = new Set([
 
 export function serverEventAudience(event: string): ServerEventAudience {
   if (PAIRED_EVENT_ALLOWLIST.has(event)) return 'paired';
+  if (PRIVATE_CALENDAR_EVENT_ALLOWLIST.has(event)) return 'private-calendar';
   if (ADMIN_EVENT_ALLOWLIST.has(event)) return 'admin';
   return 'none';
 }
@@ -539,13 +541,21 @@ export class AgentServer {
 
   async pluginsCall(name: string, params: unknown, auth?: AuthContext): Promise<unknown> {
     const permissionMode = effectiveMode(this.config.settings.safety.mode, auth?.permissionCap);
+    const deviceCapabilities = auth?.isAdmin
+      ? ['work-sync', 'private-calendar']
+      : this.config.deviceLinks.find((link) => link.id === auth?.linkId && !link.revokedAt)?.capabilities ?? [];
+    const requiredCapability = this.plugins.requiredCapability(name);
     if (this.plugins.isAdminOnly(name) && !auth?.isAdmin) throw new Error('이 플러그인 설정은 관리자 권한이 필요합니다.');
-    if (this.plugins.isDestructive(name) && !auth?.isAdmin && permissionMode !== 'full') {
+    const narrowCapabilityAllowsWrite = permissionMode !== 'read-only'
+      && Boolean(requiredCapability && deviceCapabilities.includes(requiredCapability as DeviceCapability));
+    if (this.plugins.isDestructive(name) && !auth?.isAdmin && permissionMode !== 'full' && !narrowCapabilityAllowsWrite) {
       throw new Error('직접 변경형 플러그인 호출은 전체 허용 모드가 필요합니다. 대화에서 위임하면 현재 권한 정책에 따라 승인됩니다.');
     }
     return this.plugins.call(name, params, {
       permissionMode,
-      destructiveApproved: auth?.isAdmin === true || !this.plugins.isDestructive(name) || permissionMode === 'full',
+      isAdmin: auth?.isAdmin === true,
+      deviceCapabilities,
+      destructiveApproved: auth?.isAdmin === true || !this.plugins.isDestructive(name) || permissionMode === 'full' || narrowCapabilityAllowsWrite,
       approvalSource: this.plugins.isDestructive(name) ? 'policy' : 'not-required',
     });
   }
@@ -644,6 +654,10 @@ export class AgentServer {
       if (audience === 'none') return;
       this.busSubscriptions.push(this.bus.on(event, (data) => {
         if (audience === 'admin') this.hub?.broadcastAdmin(event, data);
+        else if (audience === 'private-calendar') {
+          this.hub?.broadcastWhere(event, data, (auth) => auth.isAdmin
+            || Boolean(this.config.deviceLinks.find((link) => link.id === auth.linkId && !link.revokedAt)?.capabilities.includes('private-calendar')));
+        }
         else this.hub?.broadcast(event, data);
       }));
     };
@@ -652,7 +666,7 @@ export class AgentServer {
       'dependencies.changed',
       'routing.changed', 'routing.presets.changed', 'conversations.changed',
       'memory.changed', 'scheduler.changed', 'scheduler.ran', 'workspaces.changed',
-      'calendar.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
+      'calendar.changed', 'calendar.work.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
       'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed',
     ].forEach(forward);
     this.busSubscriptions.push(this.bus.on('remote-link.changed', (data) => {
@@ -772,7 +786,7 @@ export class AgentServer {
       assertAdmin(client);
       const body = p(params);
       const capabilities = Array.isArray(body.capabilities)
-        ? body.capabilities.filter((item): item is DeviceCapability => item === 'work-sync')
+        ? body.capabilities.filter((item): item is DeviceCapability => item === 'work-sync' || item === 'private-calendar')
         : undefined;
       const updated = this.config.patchDeviceLink(str(body.id), {
         name: typeof body.name === 'string' ? body.name : undefined,
@@ -782,6 +796,25 @@ export class AgentServer {
       if (updated && (body.permissionCap !== undefined || body.capabilities !== undefined)) {
         this.invalidateDeviceLink(updated.id);
       }
+      return updated;
+    });
+    h.set('pairing.link.capability.set', (params, client) => {
+      assertAdmin(client);
+      const body = p(params);
+      const id = str(body.id);
+      const capability = str(body.capability);
+      if (capability !== 'work-sync' && capability !== 'private-calendar') {
+        throw new Error('지원하지 않는 기기 권한입니다.');
+      }
+      if (typeof body.enabled !== 'boolean') throw new Error('기기 권한 상태가 올바르지 않습니다.');
+      const current = this.config.deviceLinks.find((link) => link.id === id && !link.revokedAt);
+      if (!current) return undefined;
+      const capabilities = new Set(current.capabilities);
+      const wasEnabled = capabilities.has(capability);
+      if (body.enabled) capabilities.add(capability);
+      else capabilities.delete(capability);
+      const updated = this.config.patchDeviceLink(id, { capabilities: [...capabilities] });
+      if (updated && wasEnabled !== body.enabled) this.invalidateDeviceLink(updated.id);
       return updated;
     });
     h.set('pairing.link.revoke', (params, client) => {

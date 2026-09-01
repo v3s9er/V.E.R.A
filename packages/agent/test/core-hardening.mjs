@@ -57,6 +57,7 @@ console.log('1b. API transport guard is case-variant safe');
 console.log('1c. server event visibility is fail-closed');
 {
   check('conversation summaries remain available to paired clients', serverEventAudience('conversations.changed') === 'paired');
+  check('private work-calendar revisions use a capability-scoped audience', serverEventAudience('calendar.work.changed') === 'private-calendar');
   check('scheduler/log/voice/provider events require administrator', [
     'scheduler.changed', 'scheduler.ran', 'log', 'voice.command', 'voice.status', 'providers.changed', 'plugins.changed', 'dependencies.changed', 'remote-link.changed',
   ].every((event) => serverEventAudience(event) === 'admin'));
@@ -440,6 +441,31 @@ console.log('7b. device permission changes invalidate live sessions');
   const downgradeApproval = await pendingApproval;
   check('permission downgrade cancels work, rejects approval and disconnects the affected link', downgraded.permissionCap === 'read-only' && running.signal()?.aborted === true && downgradeApproval === false && running.pendingConfirmForOwner() === undefined && disconnectedLinks.includes(created.link.id));
   running.end();
+
+  const capabilityLink = server.config.createDeviceLink('capability device', 'ask', ['work-sync']);
+  const withPrivateCalendar = handlers.get('pairing.link.capability.set')({
+    id: capabilityLink.link.id, capability: 'private-calendar', enabled: true,
+  }, admin);
+  const atomicAddPreservedCurrent = withPrivateCalendar.capabilities.includes('work-sync')
+    && withPrivateCalendar.capabilities.includes('private-calendar');
+  server.config.patchDeviceLink(capabilityLink.link.id, { capabilities: ['private-calendar'] });
+  const withoutPrivateCalendar = handlers.get('pairing.link.capability.set')({
+    id: capabilityLink.link.id, capability: 'private-calendar', enabled: false,
+  }, admin);
+  check('single-capability updates preserve current server state instead of replaying a stale full array',
+    atomicAddPreservedCurrent && withoutPrivateCalendar.capabilities.length === 0);
+  let unsupportedCapabilityBlocked = false;
+  let pairedCapabilityAdminBlocked = false;
+  try {
+    handlers.get('pairing.link.capability.set')({ id: capabilityLink.link.id, capability: 'administrator', enabled: true }, admin);
+  } catch { unsupportedCapabilityBlocked = true; }
+  try {
+    handlers.get('pairing.link.capability.set')({ id: capabilityLink.link.id, capability: 'private-calendar', enabled: true }, {
+      id: 'paired-client',
+      state: { auth: { isAdmin: false, linkId: capabilityLink.link.id, permissionCap: 'ask' }, chat: new ChatSession() },
+    });
+  } catch { pairedCapabilityAdminBlocked = true; }
+  check('single-capability RPC validates its enum and remains administrator-only', unsupportedCapabilityBlocked && pairedCapabilityAdminBlocked);
 
   const revoked = server.config.createDeviceLink('revoked device', 'full');
   const revokedRun = new ChatSession();

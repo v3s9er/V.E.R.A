@@ -11,6 +11,7 @@ import { dirname, resolve } from 'node:path';
 import { appendFileSync, closeSync, copyFileSync, createWriteStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { openTrustedNmapRouteWithHttpsFallback } from './nmap-route.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bundledAgent = resolve(here, 'agent.mjs');
@@ -373,8 +374,12 @@ function createWindow(url) {
   });
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     try {
+      if (typeof target !== 'string' || target.length > 2_048 || /[\u0000-\u001f\u007f]/.test(target)) return { action: 'deny' };
       const parsed = new URL(target);
-      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') void shell.openExternal(parsed.href);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') void shell.openExternal(parsed.href).catch(() => {});
+      else {
+        void openTrustedNmapRouteWithHttpsFallback(target, (externalUrl) => shell.openExternal(externalUrl));
+      }
     } catch { /* malformed or unsafe URL */ }
     return { action: 'deny' };
   });
@@ -390,6 +395,20 @@ ipcMain.handle('mr-robot:choose-directory', async (event) => {
   assertTrustedRenderer(event);
   const result = await dialog.showOpenDialog(win ?? undefined, { properties: ['openDirectory', 'createDirectory'], title: 'Mr.Robot 작업 폴더 선택' });
   return result.canceled ? null : result.filePaths[0] ?? null;
+});
+
+ipcMain.handle('mr-robot:choose-calendar-workbook', async (event) => {
+  assertTrustedRenderer(event);
+  const result = await dialog.showOpenDialog(win ?? undefined, {
+    properties: ['openFile'],
+    title: '암호화해 가져올 근무 일정 선택',
+    filters: [{ name: 'Excel 통합 문서', extensions: ['xlsx'] }],
+  });
+  if (result.canceled) return null;
+  const selected = result.filePaths[0];
+  if (!selected || !selected.toLowerCase().endsWith('.xlsx')) throw new Error('매크로 없는 .xlsx 파일만 가져올 수 있습니다.');
+  if (statSync(selected).size > 25 * 1024 * 1024) throw new Error('근무 일정 파일은 최대 25MB까지 가져올 수 있습니다.');
+  return selected;
 });
 
 ipcMain.handle('mr-robot:pcs.load', (event) => {

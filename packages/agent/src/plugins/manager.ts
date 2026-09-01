@@ -185,6 +185,10 @@ export class PluginManager {
     return this.commands.get(name)?.adminOnly ?? false;
   }
 
+  requiredCapability(name: string): string | undefined {
+    return this.commands.get(name)?.requiredCapability;
+  }
+
   /** Invoke a plugin-registered command (RPC entry point). */
   async call(name: string, params: unknown, execution?: PluginExecutionContext): Promise<unknown> {
     const cmd = this.commands.get(name);

@@ -36,6 +36,7 @@ export function HomeScreen({
   const [tab, setTab] = useState<Tab>('chat');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const insets = useSafeAreaInsets();
+  const authenticated = connectionState === 'connected' && client.authed;
 
   useEffect(() => {
     const show = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
@@ -72,7 +73,9 @@ export function HomeScreen({
       <View style={styles.content}>
         {tab === 'chat' && <ChatScreen client={client} pc={pc} keyboardVisible={keyboardVisible} />}
         {tab === 'files' && <FilesScreen pc={pc} />}
-        {tab === 'schedules' && <SchedulesScreen client={client} />}
+        {tab === 'schedules' && (
+          <SchedulesScreen client={client} privateWorkAuthenticated={authenticated} />
+        )}
         {tab === 'settings' && <SettingsScreen client={client} />}
       </View>
 

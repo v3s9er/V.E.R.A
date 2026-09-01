@@ -7,6 +7,22 @@ web-build/
 .env
 .env.*
 .mr-robot/
+# Private calendar sources and exports must never enter source control.
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.ods
+*.csv
+*.numbers
+*.pfx
+*.p12
+*.pem
+*.key
+private-calendar/
+work-calendar-private/
+# Also covers MR_ROBOT_HOME pointed directly at the repository root.
+private/work-calendar/
 .ui-*/
 .voice-validation/
 .DS_Store
@@ -42,10 +58,12 @@ release/*
 !release/Mr.Robot-Setup-0.3.4-x64.exe
 !release/Mr.Robot-Setup-0.3.5-x64.exe
 !release/Mr.Robot-Setup-0.3.6-x64.exe
+!release/Mr.Robot-Setup-0.3.7-x64.exe
 !release/SHA256SUMS-0.3.3.txt
 !release/SHA256SUMS-0.3.4.txt
 !release/SHA256SUMS-0.3.5.txt
 !release/SHA256SUMS-0.3.6.txt
+!release/SHA256SUMS-0.3.7.txt
 !release/mobile/
 release/mobile/*
 !release/mobile/Mr.Robot-Mobile-0.2.1.apk
@@ -55,3 +73,4 @@ release/mobile/*
 !release/mobile/Mr.Robot-Mobile-0.3.4.apk
 !release/mobile/Mr.Robot-Mobile-0.3.5.apk
 !release/mobile/Mr.Robot-Mobile-0.3.6.apk
+!release/mobile/Mr.Robot-Mobile-0.3.7.apk

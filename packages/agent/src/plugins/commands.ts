@@ -8,6 +8,10 @@ import type { PermissionMode } from '@mr-robot/shared';
 export interface PluginExecutionContext {
   readonly signal?: AbortSignal;
   readonly permissionMode: PermissionMode;
+  /** True only for the local administrator credential, never for paired-device tokens. */
+  readonly isAdmin?: boolean;
+  /** Independently revocable data capabilities granted to the calling device. */
+  readonly deviceCapabilities?: readonly string[];
   readonly workspaceRoot?: string;
   readonly destructiveApproved: boolean;
   readonly approvalSource: 'not-required' | 'policy' | 'prompt' | 'run-capability';
@@ -21,6 +25,8 @@ export interface RegisterCommandOptions {
   destructive?: boolean;
   /** Direct RPC calls require a locally authenticated administrator. */
   adminOnly?: boolean;
+  /** A narrow paired-device capability may authorize this command without broad full access. */
+  requiredCapability?: string;
   /** Avoid exposing irrelevant tool schemas (and spending their prompt tokens). */
   toolWhen?: (userMessage: string) => boolean;
   /** JSON-schema parameters object for the AI tool (defaults to free-form object). */
@@ -35,6 +41,7 @@ export interface PluginCommandDef {
   tool: boolean;
   destructive: boolean;
   adminOnly: boolean;
+  requiredCapability?: string;
   toolWhen?: (userMessage: string) => boolean;
   parameters?: Record<string, unknown>;
 }
@@ -58,6 +65,7 @@ export class PluginCommandRegistry {
       tool: opts.tool === true,
       destructive: opts.destructive !== false,
       adminOnly: opts.adminOnly === true,
+      requiredCapability: opts.requiredCapability,
       toolWhen: opts.toolWhen,
       parameters: opts.parameters,
     });
