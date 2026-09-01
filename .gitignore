@@ -6,7 +6,33 @@ web-build/
 *.log
 .env
 .env.*
+.dev.vars
+.dev.vars.*
+.wrangler/
 .mr-robot/
+# Runtime state normally lives under ~/.mr-robot. These anchored entries are a
+# second fail-safe for development sessions that explicitly point MR_ROBOT_HOME
+# at the repository root. They cover conversations, device links, provider and
+# plugin state, Cloudflare connector files, shared user files, and voice assets.
+/config.json
+/config.json.bak
+/conversations.json
+/conversations.json.bak
+/memory.json
+/schedules.json
+/routing-traces.jsonl
+/pairing-secret.dpapi
+/context-cache/
+/plugins/*.json
+/private/
+/runtime/
+/shared/
+/voice/
+/docker/
+/signing/
+*.dpapi
+.mr-robot-output/
+.mr-robot-*.part
 # Private calendar sources and exports must never enter source control.
 *.xlsx
 *.xls

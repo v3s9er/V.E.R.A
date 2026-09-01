@@ -1,3 +1,7 @@
 release/*.exe filter=lfs diff=lfs merge=lfs -text
 release/mobile/*.apk filter=lfs diff=lfs merge=lfs -text
+# Installer/APK blobs remain GitHub release assets and LFS objects, not source
+# archive contents. This also keeps GitHub's automatically generated source ZIP
+# aligned with scripts/create-public-source-archive.mjs.
+release/** export-ignore
 THIRD_PARTY_NOTICES.txt text eol=lf
