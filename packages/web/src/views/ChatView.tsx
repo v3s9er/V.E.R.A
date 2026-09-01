@@ -87,7 +87,7 @@ const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detai
   { value: 'full', label: '전체 허용', short: '전체', detail: '기기 권한 상한 안에서 PC 전체 작업을 허용합니다.' },
 ];
 
-export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc }: {
+export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc, onExecutionBusyChange }: {
   profile?: ReactNode;
   voiceCommand?: { id: number; text: string } | null;
   onVoiceCommandHandled?: (id: number) => void;
@@ -96,6 +96,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   executionPcs?: SavedPc[];
   /** Changes the agent host that will receive subsequent conversation work. */
   onSwitchExecutionPc?: (id: string) => void;
+  onExecutionBusyChange?: (busy: boolean) => void;
 }) {
   const { client } = useMrRobot();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -145,6 +146,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const deltaTimer = useRef<number | null>(null);
   const ownedTimers = useRef(new Set<number>());
   const conversationUpdateQueue = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    if (busy) onExecutionBusyChange?.(true);
+  }, [busy, onExecutionBusyChange]);
 
   const later = useCallback((callback: () => void, delayMs: number): number => {
     const id = window.setTimeout(() => {

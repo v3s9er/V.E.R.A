@@ -13,7 +13,7 @@ const SHORTCUTS: Array<{ key: Exclude<ViewKey, 'chat'>; icon: string; label: str
 ];
 
 export function ProfileMenu({
-  view, onChange, deviceName, connected, pcs, activePcId, onSwitchPc, onDisconnect, onManagePcs, embedded = false, header = false, standalone = false,
+  view, onChange, deviceName, connected, pcs, activePcId, onSwitchPc, onDisconnect, onManagePcs, switchingBlocked = false, onBlockedSwitch, embedded = false, header = false, standalone = false,
 }: {
   view: ViewKey;
   onChange: (v: ViewKey) => void;
@@ -24,6 +24,8 @@ export function ProfileMenu({
   onSwitchPc: (id: string) => void;
   onDisconnect: () => void;
   onManagePcs: () => void;
+  switchingBlocked?: boolean;
+  onBlockedSwitch?: () => void;
   embedded?: boolean;
   header?: boolean;
   standalone?: boolean;
@@ -47,11 +49,12 @@ export function ProfileMenu({
         <button key={key} className="profile-action" onClick={() => { onChange(key); setOpen(false); }}>{LABELS[key]}</button>)}
       {pcs.length > 1 && <div className="profile-section">
         <div className="profile-section-label">실행 PC 선택</div>
-        {pcs.map((pc) => <button key={pc.id} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}{pc.id === activePcId ? ' · 현재 실행' : ''}</button>)}
+        {switchingBlocked && <div className="profile-switch-locked">작업 중 · 완료 또는 중지 후 변경</div>}
+        {pcs.map((pc) => <button key={pc.id} disabled={switchingBlocked && pc.id !== activePcId} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { if (switchingBlocked && pc.id !== activePcId) { onBlockedSwitch?.(); return; } onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}{pc.id === activePcId ? ' · 현재 실행' : ''}</button>)}
       </div>}
       {desktopLocal
-        ? <button className="profile-action" onClick={() => { onManagePcs(); setOpen(false); }}>원격 PC 추가·관리</button>
-        : <button className="profile-action danger" onClick={() => { onDisconnect(); setOpen(false); }}>{standalone ? '로컬 PC로 돌아가기' : '연결 관리'}</button>}
+        ? <button className="profile-action" disabled={switchingBlocked} title={switchingBlocked ? '작업 중에는 연결을 변경할 수 없습니다.' : undefined} onClick={() => { if (switchingBlocked) { onBlockedSwitch?.(); return; } onManagePcs(); setOpen(false); }}>원격 PC 추가·관리</button>
+        : <button className="profile-action danger" disabled={switchingBlocked} title={switchingBlocked ? '작업 중에는 연결을 변경할 수 없습니다.' : undefined} onClick={() => { if (switchingBlocked) { onBlockedSwitch?.(); return; } onDisconnect(); setOpen(false); }}>{standalone ? '로컬 PC로 돌아가기' : '연결 관리'}</button>}
     </div>}
     <button className="profile-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
       <span className="profile-avatar">N</span>

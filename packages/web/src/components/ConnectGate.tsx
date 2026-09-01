@@ -11,6 +11,7 @@ import {
   parsePcEndpoint,
   pcOrigin,
   removePc,
+  savedPcById,
   savePcsForEnvironment,
   setLastPcId,
   upsertPc,
@@ -40,7 +41,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
   const [addBusy, setAddBusy] = useState(false);
   const connectAttempt = useRef(0);
   const clientOwner = useRef<number | null>(null);
-  const desktopLocalMode = Boolean(window.mrRobotDesktop && !preferredPc && !manageConnections);
+  const desktopAutomaticMode = Boolean(window.mrRobotDesktop && !manageConnections);
 
   const connectTo = useCallback(
     async (pc: SavedPc, persist = true): Promise<boolean> => {
@@ -113,11 +114,23 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
     let cancelled = false;
     const boot = async (): Promise<void> => {
       try {
-        // The Electron shell contains the local agent. It always opens this
-        // loopback session directly and never needs pairing or registry I/O.
-        // Opening the optional connection manager must bypass the automatic
-        // loopback connection so its PC registry screen remains mounted.
-        if (desktopLocalMode) {
+        // Electron restores the last explicitly selected remote execution PC.
+        // A missing/stale entry or failed remote connection always falls back
+        // to the embedded loopback agent, preserving standalone operation.
+        if (desktopAutomaticMode) {
+          const registered = await loadPcsForEnvironment();
+          if (cancelled) return;
+          setPcs(registered);
+          const lastId = getLastPcId();
+          const restored = preferredPc ?? savedPcById(registered, lastId);
+          if (restored) {
+            const connected = await connectTo(restored);
+            if (cancelled || connected) return;
+            setLastPcId(null);
+          } else if (lastId) {
+            setLastPcId(null);
+          }
+          if (cancelled) return;
           const serving = await detectServingPc();
           if (!serving) throw new Error('내장 로컬 에이전트를 찾을 수 없습니다.');
           const localPc: SavedPc = { ...serving, id: DESKTOP_LOCAL_PC_ID, addedAt: 0 };
@@ -164,7 +177,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       cancelled = true;
       connectAttempt.current += 1;
     };
-  }, [connectTo, manageConnections, preferredPc]);
+  }, [connectTo, desktopAutomaticMode, manageConnections, preferredPc]);
 
   const cancelConnect = (): void => {
     connectAttempt.current += 1;
@@ -232,18 +245,18 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
     if (getLastPcId() === id) setLastPcId(null);
   };
 
-  if (desktopLocalMode && (phase === 'auto' || phase === 'connecting')) {
+  if (desktopAutomaticMode && (phase === 'auto' || phase === 'connecting')) {
     return (
       <div className="gate">
         <div className="gate-card">
           <div className="gate-brand"><Spinner size={26} /></div>
-          <p className="gate-sub">로컬 에이전트를 준비하는 중…</p>
+          <p className="gate-sub">{connectingPc ? `저장된 실행 PC “${connectingPc.name}”에 연결하는 중…` : '저장된 실행 PC를 확인하는 중…'}</p>
         </div>
       </div>
     );
   }
 
-  if (desktopLocalMode && phase === 'list') {
+  if (desktopAutomaticMode && phase === 'list') {
     return (
       <div className="gate">
         <Card className="gate-card wide">

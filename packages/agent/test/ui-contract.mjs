@@ -106,16 +106,21 @@ if (!pcsRegistry.includes('sessionStorage.setItem(KEY')
   || !pcsRegistry.includes('localStorage.removeItem(KEY)')
   || pcsRegistry.includes('localStorage.setItem(KEY')) throw new Error('browser bearer registry can persist beyond the current tab session');
 if (!connectGate.includes('clientOwner') || !connectGate.includes('ownsClient()') || !connectGate.includes('if (!isCurrent() || !ownsClient()) return false')) throw new Error('connection gate lacks attempt-scoped client ownership guards');
-if (!connectGate.includes('const desktopLocalMode = Boolean(window.mrRobotDesktop && !preferredPc && !manageConnections)')
-  || !connectGate.includes('if (desktopLocalMode)')
-  || connectGate.includes('if (window.mrRobotDesktop && !preferredPc)')
+if (!connectGate.includes('const desktopAutomaticMode = Boolean(window.mrRobotDesktop && !manageConnections)')
+  || !connectGate.includes('savedPcById(registered, lastId)')
+  || !connectGate.includes('if (desktopAutomaticMode)')
   || !connectGate.includes('await connectTo(localPc, false)')
-  || !connectGate.includes('로컬 에이전트를 준비하는 중')) throw new Error('desktop local startup or explicit connection-manager routing can regress');
+  || !connectGate.includes('setLastPcId(null)')
+  || !connectGate.includes('저장된 실행 PC를 확인하는 중')) throw new Error('desktop saved-host restore or safe local fallback can regress');
 if (!connectGate.includes('if (manageConnections)') || !profileMenu.includes('원격 PC 추가·관리') || !profileMenu.includes('로컬 에이전트 · 준비됨')) throw new Error('desktop optional remote-PC management is not separated from local startup');
 if (!chat.includes('aria-label="실행 PC"')
   || !chat.includes('onSwitchExecutionPc?.(event.target.value)')
   || !app.includes('executionPcs={pcList}')
   || !profileMenu.includes('실행 PC 선택')) throw new Error('desktop chat cannot explicitly change its active execution host');
+if (!app.includes("client.call('chat.runs'")
+  || !app.includes('if (executionBusy) { showBusySwitchNotice(); return; }')
+  || !profileMenu.includes('작업 중 · 완료 또는 중지 후 변경')
+  || !chat.includes('onExecutionBusyChange?.(true)')) throw new Error('desktop can abandon a running job while changing execution PCs');
 if (!connectGate.includes("/^(?:\\d{6}|\\d{12})$/.test(pin)") || !connectGate.includes("slice(0, 12)") || !connectGate.includes('외출용 12자리 일회용 코드')) throw new Error('desktop remote-PC registration does not accept the stronger travel handoff code');
 if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
 if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
@@ -152,6 +157,7 @@ if (!dependenciesSource.includes("envPath('ProgramFiles(x86)')") || !dependencie
 if (!pluginsView.includes('기존 원격 설정을 복원했습니다.') || !pluginsView.includes('이번에 켠 플러그인을 다시 껐습니다.') || !pluginsView.includes('터널 상태를 다시 확인할 수 없어')) throw new Error('Quick Link partial failures lack safe rollback or preservation messaging');
 if (!pluginsView.includes('mountedRef.current') || !pluginsView.includes('remoteActionRef.current = true')) throw new Error('Quick Link async completion can update an unmounted view');
 if (!pluginsView.includes("value=\"cloudflare-named\"") || !pluginsView.includes('고정 공개 호스트명') || !pluginsView.includes('Cloudflare Tunnel 토큰')) throw new Error('named Cloudflare Tunnel cannot be configured directly from the plugin UI');
+if (!pluginsView.includes('PC마다 고유한 호스트명·전용 Tunnel') || !pluginsView.includes('같은 호스트명을 두 PC Connector가 공유하면')) throw new Error('multi-PC Cloudflare setup can omit the unique-hostname requirement');
 if (!pluginsView.includes('clearRemoteTunnelToken') || !pluginsView.includes("name: 'remote-link.verify'") || !pluginsView.includes('Windows DPAPI')) throw new Error('named Tunnel credential lifecycle or public endpoint verification is missing from the UI');
 if (!remoteLink.includes('protectSecret') || !remoteLink.includes('redactRemoteLinkDiagnostics') || !remoteLink.includes('TUNNEL_TOKEN') || remoteLink.includes("'--token', tunnelToken")) throw new Error('named Tunnel token is not protected from storage, diagnostics, and process arguments');
 if (!remoteLink.includes('localTunnelCredentialsFromToken') || !remoteLink.includes('service: http_status:404') || !remoteLink.includes('cloudflaredEnvironment')) throw new Error('named Tunnel can fall back to remotely-managed extra routes or inherit unrelated credentials');
@@ -186,6 +192,10 @@ if (!mobileHome.includes('고정된 모체 PC 없이')
   || !mobileHome.includes('onSelectPc(candidate)')
   || !mobileHome.includes('PC 추가·연결 관리')
   || !mobileApp.includes('selectExecutionPcRef')) throw new Error('mobile cannot directly choose or change an independent execution PC');
+if (!mobileHome.includes("client.call('chat.runs'")
+  || !mobileHome.includes('현재 PC에서 작업 중입니다')
+  || !mobileHome.includes('disabled={selected || executionBusy}')
+  || !mobileChat.includes('onExecutionBusyChange?.(true)')) throw new Error('mobile can abandon a running job while changing execution PCs');
 if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 HTTPS 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
 if (mobileRpc.includes('obj.secret') || mobilePcList.includes('payload.secret') || webRpc.includes('obj.secret')) throw new Error('legacy QR payloads can still import a long-lived device secret');
 if (!mobileRpc.includes("obj.version !== 3") || !webRpc.includes("obj.version !== 3")

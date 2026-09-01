@@ -59,7 +59,7 @@ function describe(input: unknown): string {
   }
 }
 
-export function ChatScreen({ client, pc, keyboardVisible = false }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean }) {
+export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBusyChange }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean; onExecutionBusyChange?: (busy: boolean) => void }) {
   const insets = useSafeAreaInsets();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
@@ -115,6 +115,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
 
   const activeRun = conversation ? runs[conversation.id] : undefined;
   const busy = Boolean(activeRun?.running);
+  useEffect(() => {
+    if (busy) onExecutionBusyChange?.(true);
+  }, [busy, onExecutionBusyChange]);
   const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
   const reasoningProvider = conversation?.routingPresetId
     ? undefined

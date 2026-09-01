@@ -3,7 +3,7 @@ import { Keyboard, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View }
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { AppConnectionState } from '../../App';
 import type { MrRobotClient } from '../rpc';
-import type { SavedPc } from '../types';
+import type { ChatRunState, SavedPc } from '../types';
 import { colors, radius } from '../theme';
 import { ChatScreen } from './ChatScreen';
 import { SchedulesScreen } from './SchedulesScreen';
@@ -40,6 +40,7 @@ export function HomeScreen({
   const [tab, setTab] = useState<Tab>('chat');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [showPcPicker, setShowPcPicker] = useState(false);
+  const [executionBusy, setExecutionBusy] = useState(false);
   const insets = useSafeAreaInsets();
   const authenticated = connectionState === 'connected' && client.authed;
 
@@ -48,6 +49,24 @@ export function HomeScreen({
     const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false));
     return () => { show.remove(); hide.remove(); };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    let active = true;
+    const refreshRuns = async (): Promise<void> => {
+      try {
+        const runs = await client.call('chat.runs', {}, 5000) as ChatRunState[];
+        if (active) setExecutionBusy(runs.some((run) => run.running));
+      } catch {
+        // Retain the last known state until this PC can be authenticated again.
+      }
+    };
+    void refreshRuns();
+    const offStatus = client.on('chat.status', () => setExecutionBusy(true));
+    const offDone = client.on('chat.done', () => void refreshRuns());
+    const offError = client.on('chat.error', () => void refreshRuns());
+    return () => { active = false; offStatus(); offDone(); offError(); };
+  }, [authenticated, client, pc.id]);
 
   return (
     <View style={styles.root}>
@@ -76,7 +95,7 @@ export function HomeScreen({
       )}
 
       <View style={styles.content}>
-        {tab === 'chat' && <ChatScreen client={client} pc={pc} keyboardVisible={keyboardVisible} />}
+        {tab === 'chat' && <ChatScreen client={client} pc={pc} keyboardVisible={keyboardVisible} onExecutionBusyChange={(value) => { if (value) setExecutionBusy(true); }} />}
         {tab === 'files' && <FilesScreen pc={pc} />}
         {tab === 'schedules' && (
           <SchedulesScreen client={client} privateWorkAuthenticated={authenticated} />
@@ -103,14 +122,15 @@ export function HomeScreen({
               </View>
               <TouchableOpacity style={styles.pickerClose} onPress={() => setShowPcPicker(false)} accessibilityLabel="실행 PC 선택 닫기"><Text style={styles.pickerCloseText}>×</Text></TouchableOpacity>
             </View>
+            {executionBusy && <View style={styles.pickerBusyNotice}><Text style={styles.pickerBusyTitle}>현재 PC에서 작업 중입니다</Text><Text style={styles.pickerBusyCopy}>작업을 중지하거나 완료한 뒤 실행 PC를 변경하세요. 연결만 끊고 작업을 백그라운드에 남기지 않습니다.</Text></View>}
             <ScrollView style={styles.pickerList} contentContainerStyle={styles.pickerListContent}>
               {pcs.map((candidate) => {
                 const selected = candidate.id === pc.id;
                 return <TouchableOpacity
                   key={candidate.id}
                   style={[styles.pickerPc, selected && styles.pickerPcSelected]}
-                  disabled={selected}
-                  accessibilityState={{ selected }}
+                  disabled={selected || executionBusy}
+                  accessibilityState={{ selected, disabled: selected || executionBusy }}
                   onPress={() => {
                     setShowPcPicker(false);
                     onSelectPc(candidate);
@@ -118,11 +138,11 @@ export function HomeScreen({
                 >
                   <View style={styles.pickerPcIcon}><Text>🖥️</Text></View>
                   <View style={{ flex: 1 }}><Text style={styles.pickerPcName} numberOfLines={1}>{candidate.name}</Text><Text style={styles.pickerPcRoute} numberOfLines={1}>{connectionOrigins(candidate)[0] ?? '보안 접속 주소 없음'}</Text></View>
-                  <Text style={[styles.pickerPcState, selected && styles.pickerPcStateSelected]}>{selected ? '현재 실행' : '선택'}</Text>
+                  <Text style={[styles.pickerPcState, selected && styles.pickerPcStateSelected]}>{selected ? '현재 실행' : executionBusy ? '작업 후 선택' : '선택'}</Text>
                 </TouchableOpacity>;
               })}
             </ScrollView>
-            <TouchableOpacity style={styles.manageBtn} onPress={() => { setShowPcPicker(false); onManagePcs(); }}><Text style={styles.manageBtnText}>＋ PC 추가·연결 관리</Text></TouchableOpacity>
+            <TouchableOpacity style={[styles.manageBtn, executionBusy && styles.manageBtnDisabled]} disabled={executionBusy} accessibilityState={{ disabled: executionBusy }} onPress={() => { setShowPcPicker(false); onManagePcs(); }}><Text style={styles.manageBtnText}>{executionBusy ? '작업 완료 후 연결 관리 가능' : '＋ PC 추가·연결 관리'}</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -175,6 +195,9 @@ const styles = StyleSheet.create({
   pickerCopy: { marginTop: 5, color: colors.dim, fontSize: 12, lineHeight: 17 },
   pickerClose: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm },
   pickerCloseText: { color: colors.dim, fontSize: 22, lineHeight: 24 },
+  pickerBusyNotice: { padding: 11, borderWidth: 1, borderColor: 'rgba(251,191,36,.35)', borderRadius: radius.md, backgroundColor: 'rgba(251,191,36,.08)' },
+  pickerBusyTitle: { color: colors.warn, fontSize: 12.5, fontWeight: '800' },
+  pickerBusyCopy: { marginTop: 4, color: colors.dim, fontSize: 11, lineHeight: 16 },
   pickerList: { flexGrow: 0 },
   pickerListContent: { gap: 8 },
   pickerPc: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, backgroundColor: 'rgba(255,255,255,.025)' },
@@ -185,5 +208,6 @@ const styles = StyleSheet.create({
   pickerPcState: { color: colors.accent2, fontSize: 11, fontWeight: '800' },
   pickerPcStateSelected: { color: colors.accent },
   manageBtn: { alignItems: 'center', padding: 12, borderWidth: 1, borderColor: 'rgba(34,211,238,.38)', borderRadius: radius.md, backgroundColor: 'rgba(34,211,238,.08)' },
+  manageBtnDisabled: { opacity: 0.5, borderColor: colors.border, backgroundColor: 'rgba(255,255,255,.025)' },
   manageBtnText: { color: colors.accent2, fontSize: 13, fontWeight: '800' },
 });

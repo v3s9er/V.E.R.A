@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import type { DependencyReport, SystemStatus } from '@mr-robot/shared';
+import type { ChatRunState, DependencyReport, SystemStatus } from '@mr-robot/shared';
 import { MrRobotClient } from './rpc';
 import { MrRobotContext } from './state';
 import { DESKTOP_LOCAL_PC_ID, loadPcsForEnvironment, setLastPcId, type SavedPc } from './pcs';
@@ -25,8 +25,11 @@ export function App() {
   const [preferredPc, setPreferredPc] = useState<SavedPc | null>(null);
   const [managingConnections, setManagingConnections] = useState(false);
   const [showDependencySetup, setShowDependencySetup] = useState(false);
+  const [executionBusy, setExecutionBusy] = useState(false);
+  const [connectionNotice, setConnectionNotice] = useState('');
   const [voiceCommands, setVoiceCommands] = useState<Array<{ id: number; text: string }>>([]);
   const voiceCommandId = useRef(0);
+  const connectionNoticeTimer = useRef<number | undefined>(undefined);
   const desktopStandalone = Boolean(window.mrRobotDesktop);
   const desktopLocalActive = desktopStandalone && activePc?.id === DESKTOP_LOCAL_PC_ID;
 
@@ -86,6 +89,34 @@ export function App() {
 
   useEffect(() => {
     if (!ready) return;
+    let active = true;
+    const refreshRuns = async (): Promise<void> => {
+      try {
+        const runs = await client.call('chat.runs', {}, 5000) as ChatRunState[];
+        if (active) setExecutionBusy(runs.some((run) => run.running));
+      } catch {
+        // Keep the last known busy state while the connection is recovering.
+      }
+    };
+    void refreshRuns();
+    const offStatus = client.on('chat.status', () => setExecutionBusy(true));
+    const offDone = client.on('chat.done', () => void refreshRuns());
+    const offError = client.on('chat.error', () => void refreshRuns());
+    return () => { active = false; offStatus(); offDone(); offError(); };
+  }, [client, ready]);
+
+  useEffect(() => () => {
+    if (connectionNoticeTimer.current !== undefined) window.clearTimeout(connectionNoticeTimer.current);
+  }, []);
+
+  const showBusySwitchNotice = (): void => {
+    setConnectionNotice('현재 실행 PC에서 작업 중입니다. 작업을 중지하거나 완료한 뒤 PC를 변경하세요.');
+    if (connectionNoticeTimer.current !== undefined) window.clearTimeout(connectionNoticeTimer.current);
+    connectionNoticeTimer.current = window.setTimeout(() => setConnectionNotice(''), 5000);
+  };
+
+  useEffect(() => {
+    if (!ready) return;
     return client.on('voice.command', (data) => {
       const command = data as { kind?: string; text?: string };
       const text = command.text?.trim();
@@ -107,6 +138,7 @@ export function App() {
   }, [client, ready]);
 
   const switchPc = (id: string): void => {
+    if (executionBusy) { showBusySwitchNotice(); return; }
     const pc = pcList.find((p) => p.id === id);
     if (!pc || pc.id === activePc?.id) return;
     const local = pc.id === DESKTOP_LOCAL_PC_ID;
@@ -120,6 +152,7 @@ export function App() {
   };
 
   const disconnect = (): void => {
+    if (executionBusy) { showBusySwitchNotice(); return; }
     setManagingConnections(false);
     setPreferredPc(null);
     setLastPcId(null);
@@ -130,6 +163,7 @@ export function App() {
   };
 
   const openConnectionManager = (): void => {
+    if (executionBusy) { showBusySwitchNotice(); return; }
     setManagingConnections(true);
     setPreferredPc(null);
     client.close();
@@ -188,6 +222,7 @@ export function App() {
                   value={activePc?.id ?? ''}
                   onChange={(e) => switchPc(e.target.value)}
                   title="실행 PC 전환"
+                  disabled={executionBusy}
                 >
                   {pcList.map((pc) => (
                     <option key={pc.id} value={pc.id}>
@@ -209,10 +244,10 @@ export function App() {
                 </>
               )}
               {!client.isAdmin && <span className="topbar-chip locked" title="PC 관리 설정은 데스크톱 관리자 연결에서만 변경할 수 있습니다.">🔒 연결 기기 · 관리 제한</span>}
-              <button className="btn btn-ghost" onClick={desktopLocalActive ? openConnectionManager : disconnect} title={desktopLocalActive ? '선택 기능: 원격 PC 추가·관리' : '현재 원격 연결을 닫고 로컬 PC로 돌아가기'}>
+              <button className="btn btn-ghost" disabled={executionBusy} onClick={desktopLocalActive ? openConnectionManager : disconnect} title={executionBusy ? '작업 중에는 실행 PC를 변경할 수 없습니다.' : desktopLocalActive ? '선택 기능: 원격 PC 추가·관리' : '현재 원격 연결을 닫고 로컬 PC로 돌아가기'}>
                 {desktopLocalActive ? '원격 PC' : desktopStandalone ? '로컬 PC로' : '연결 해제'}
               </button>
-                <ProfileMenu standalone={desktopStandalone} header view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} />
+                <ProfileMenu standalone={desktopStandalone} header view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} switchingBlocked={executionBusy} onBlockedSwitch={showBusySwitchNotice} />
               </div>
             </div>
             <nav className="workspace-nav" aria-label="주요 화면">
@@ -223,7 +258,8 @@ export function App() {
             activePc={activePc}
             executionPcs={pcList}
             onSwitchExecutionPc={switchPc}
-            profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} />}
+            onExecutionBusyChange={(value) => { if (value) setExecutionBusy(true); }}
+            profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} switchingBlocked={executionBusy} onBlockedSwitch={showBusySwitchNotice} />}
             voiceCommand={voiceCommands[0] ?? null}
             onVoiceCommandHandled={(id) => setVoiceCommands((queued) => queued.filter((command) => command.id !== id))}
           />}
@@ -234,6 +270,7 @@ export function App() {
             {view === 'settings' && <SettingsView onOpenChat={() => setView('chat')} />}
           </Suspense>}
         </main>
+        {connectionNotice && <div className="connection-switch-notice" role="status"><span>●</span>{connectionNotice}</div>}
         {showDependencySetup && <DependencySetup modal onComplete={() => setShowDependencySetup(false)} />}
       </div>
     </MrRobotContext.Provider>

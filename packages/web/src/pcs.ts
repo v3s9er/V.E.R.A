@@ -332,6 +332,12 @@ function normalizePc<T extends SavedPc>(pc: T): T {
   return { ...pc, protocol, origins, activeOrigin, credentialOrigin, cloudflareAccessOrigin };
 }
 
+/** Resolve a persisted execution-host choice without ever inventing a PC. */
+export function savedPcById(pcs: SavedPc[], id: string | null): SavedPc | null {
+  if (!id) return null;
+  return pcs.find((pc) => pc.id === id) ?? null;
+}
+
 /** Exchange a short PIN for the long-lived secret on a (possibly remote) PC. */
 export async function exchangePin(hostPort: string, pin: string, deviceName = '웹 브라우저', permissionCap = 'ask', access?: CloudflareAccessServiceCredentials): Promise<string> {
   const base = assertSecurePcOrigin(parsePcEndpoint(hostPort).origin);

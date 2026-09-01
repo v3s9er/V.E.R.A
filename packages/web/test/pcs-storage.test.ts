@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { connectionOrigins, loadPcsForEnvironment, upsertPc, type DesktopPcLoadResult, type SavedPc } from '../src/pcs';
+import { connectionOrigins, loadPcsForEnvironment, savedPcById, upsertPc, type DesktopPcLoadResult, type SavedPc } from '../src/pcs';
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -101,6 +101,8 @@ async function loadWith(result: DesktopPcLoadResult, saves: SavedPc[][]): Promis
   });
   assert.equal(updated.length, 2, 'updating one execution PC must not replace another host');
   assert.equal(updated[1]?.id, mesh[1]?.id, 'host selection identity must remain stable after re-pairing');
+  assert.equal(savedPcById(updated, mesh[1]!.id)?.name, 'Laptop renamed', 'a valid persisted execution-PC choice is restored');
+  assert.equal(savedPcById(updated, 'removed-pc'), null, 'a stale execution-PC choice fails closed to local fallback');
 }
 
 console.log('web PC credential-storage tests passed');
