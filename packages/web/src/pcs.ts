@@ -1,7 +1,7 @@
-import { parsePairingPayload } from './rpc';
+import { DESKTOP_LOCAL_AUTH_TOKEN, parsePairingPayload } from './rpc';
 
 /**
- * Multi-PC registry stored in localStorage. Each entry holds everything
+ * Multi-PC registry for the current browser session. Each entry holds everything
  * needed to reach one Mr.Robot agent: host, port and its pairing secret.
  * The web UI can register any number of PCs and switch between them.
  */
@@ -39,9 +39,31 @@ const KEY = 'mr-robot.pcs';
 const LAST_KEY = 'mr-robot.lastPcId';
 export const DESKTOP_LOCAL_PC_ID = 'desktop-local';
 
+function browserRegistryValue(): string | null {
+  const current = sessionStorage.getItem(KEY);
+  if (current) return current;
+  // One-time migration for older browser builds that persisted bearer
+  // credentials indefinitely. Keep them only for this tab session and erase
+  // the durable copy immediately.
+  const legacy = localStorage.getItem(KEY);
+  if (!legacy) return null;
+  sessionStorage.setItem(KEY, legacy);
+  localStorage.removeItem(KEY);
+  return legacy;
+}
+
+function clearBrowserBearerRegistry(): void {
+  // Electron owns durable connection credentials through safeStorage. Purge
+  // both browser stores after every successful secure-registry read, including
+  // mixed-state upgrades where an encrypted entry already exists and would
+  // otherwise make the migration path return early.
+  try { sessionStorage.removeItem(KEY); } catch { /* storage unavailable */ }
+  try { localStorage.removeItem(KEY); } catch { /* storage unavailable */ }
+}
+
 export function loadPcs(): SavedPc[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = browserRegistryValue();
     if (!raw) return [];
     const arr = JSON.parse(raw) as SavedPc[];
     if (!Array.isArray(arr)) return [];
@@ -55,7 +77,8 @@ export function loadPcs(): SavedPc[] {
 
 export function savePcs(pcs: SavedPc[]): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(pcs.map(normalizePc)));
+    sessionStorage.setItem(KEY, JSON.stringify(pcs.map(normalizePc)));
+    localStorage.removeItem(KEY);
   } catch {
     /* storage unavailable */
   }
@@ -63,8 +86,9 @@ export function savePcs(pcs: SavedPc[]): void {
 
 /**
  * Electron keeps long-lived device credentials in Windows safeStorage.
- * Browsers retain the legacy local registry because they do not expose an OS
- * credential vault. Existing desktop entries are migrated on first launch.
+ * Browsers keep credentials only in sessionStorage because they do not expose
+ * an OS credential vault. Existing durable browser entries are erased during
+ * one-time migration. Electron entries move into Windows safeStorage.
  */
 export async function loadPcsForEnvironment(): Promise<SavedPc[]> {
   if (!window.mrRobotDesktop?.loadPcs) return loadPcs();
@@ -84,6 +108,7 @@ export async function loadPcsForEnvironment(): Promise<SavedPc[]> {
     : normalizedEncrypted;
   if (JSON.stringify(result.value) !== JSON.stringify(encrypted)) await window.mrRobotDesktop.savePcs(encrypted);
   if (encrypted.length) {
+    clearBrowserBearerRegistry();
     return encrypted;
   }
   const legacy = loadPcs();
@@ -92,8 +117,8 @@ export async function loadPcsForEnvironment(): Promise<SavedPc[]> {
     : legacy;
   if (legacy.length) {
     if (migratable.length) await window.mrRobotDesktop.savePcs(migratable);
-    try { localStorage.removeItem(KEY); } catch { /* best effort migration */ }
   }
+  clearBrowserBearerRegistry();
   return migratable;
 }
 
@@ -150,7 +175,7 @@ export async function detectServingPc(): Promise<Omit<SavedPc, 'id' | 'addedAt'>
     if (window.mrRobotDesktop) {
       const local = await window.mrRobotDesktop.getLocalConnection();
       const origin = originFromParts('http', local.host, local.port);
-      return { ...local, hosts: [local.host], protocol: 'http', origins: [origin], activeOrigin: origin };
+      return { name: local.name, host: local.host, port: local.port, secret: DESKTOP_LOCAL_AUTH_TOKEN, hosts: [local.host], protocol: 'http', origins: [origin], activeOrigin: origin };
     }
     const res = await fetch('/api/pairing', { headers: { accept: 'application/json' } });
     if (!res.ok) return null;
@@ -207,19 +232,13 @@ function isLoopbackHost(host: string): boolean {
   return value === '127.0.0.1' || value === '::1' || value === 'localhost';
 }
 
-function isTailnetHost(host: string): boolean {
-  const octets = host.replace(/^\[|\]$/g, '').split('.').map(Number);
-  return octets.length === 4
-    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    && octets[0] === 100
-    && octets[1] >= 64
-    && octets[1] <= 127;
-}
-
 export function assertSecurePcOrigin(origin: string): string {
   const endpoint = parsePcEndpoint(origin);
-  if (endpoint.protocol !== 'https' && !isLoopbackHost(endpoint.host) && !isTailnetHost(endpoint.host)) {
-    throw new Error('평문 LAN 인증은 차단됩니다. Cloudflare Quick Link(HTTPS) 또는 Tailscale 주소를 사용하세요.');
+  // A numeric CGNAT address is not proof that the packet uses Tailscale. Only
+  // this desktop's loopback agent may use HTTP; every remote credential path
+  // must have TLS (Cloudflare or a user-configured Tailscale Serve hostname).
+  if (endpoint.protocol !== 'https' && !isLoopbackHost(endpoint.host)) {
+    throw new Error('평문 원격 인증은 차단됩니다. Cloudflare 또는 Tailscale Serve의 HTTPS 주소를 사용하세요.');
   }
   return endpoint.origin;
 }
@@ -229,10 +248,9 @@ export function parsePcEndpoint(value: string, defaultPort = 8787, defaultProtoc
   if (!raw) throw new Error('PC 주소를 입력하세요.');
   const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(raw);
   const probe = new URL(explicitScheme ? raw : `http://${raw}`);
-  const pageProtocol: PcProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https' : 'http';
   const fallback = isPrivateOrLocalHost(probe.hostname)
     ? 'http'
-    : defaultProtocol ?? pageProtocol;
+    : defaultProtocol ?? 'https';
   const parsed = new URL(explicitScheme ? raw : `${fallback}://${raw}`);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('HTTP 또는 HTTPS 주소만 사용할 수 있습니다.');
   if (parsed.username || parsed.password) throw new Error('주소에 사용자 이름이나 비밀번호를 넣을 수 없습니다.');
@@ -276,7 +294,7 @@ export function pcOrigin(pc: Pick<SavedPc, 'host' | 'hosts' | 'activeHost' | 'po
     return assertSecurePcOrigin(origin);
   }
   const origin = connectionOrigins(pc)[0];
-  if (!origin) throw new Error('이 PC에 보안 접속 주소가 없습니다. Quick Link 또는 Tailscale로 다시 등록하세요.');
+  if (!origin) throw new Error('이 PC에 HTTPS 접속 주소가 없습니다. Cloudflare 또는 Tailscale Serve 주소로 다시 등록하세요.');
   return origin;
 }
 
@@ -297,6 +315,11 @@ function normalizePc<T extends SavedPc>(pc: T): T {
 /** Exchange a short PIN for the long-lived secret on a (possibly remote) PC. */
 export async function exchangePin(hostPort: string, pin: string, deviceName = '웹 브라우저', permissionCap = 'ask'): Promise<string> {
   const base = assertSecurePcOrigin(parsePcEndpoint(hostPort).origin);
+  if (window.mrRobotDesktop?.pairRemotePc) {
+    const paired = await window.mrRobotDesktop.pairRemotePc({ origin: base, pin: pin.trim(), deviceName, permissionCap });
+    if (!paired?.credentialRef) throw new Error('암호화된 PC 연결 정보를 만들지 못했습니다.');
+    return paired.credentialRef;
+  }
   const res = await fetch(`${base}/api/pair`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

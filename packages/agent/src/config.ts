@@ -17,7 +17,7 @@ export interface PairingConfig {
 }
 
 export interface ConfigRecoveryDiagnostic {
-  code: 'config-corrupt-quarantined' | 'config-backup-recovered' | 'config-fresh-recovery' | 'provider-secret-unavailable' | 'config-persistence-blocked';
+  code: 'config-corrupt-quarantined' | 'config-backup-recovered' | 'config-fresh-recovery' | 'provider-secret-unavailable' | 'pairing-secret-unavailable' | 'config-persistence-blocked';
   message: string;
   at: number;
   path?: string;
@@ -83,7 +83,7 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-const supportedDeviceCapabilities = new Set<DeviceCapability>(['work-sync', 'private-calendar']);
+const supportedDeviceCapabilities = new Set<DeviceCapability>(['work-sync', 'private-calendar', 'file-transfer']);
 const supportedDevicePermissions = new Set<PermissionMode>(['read-only', 'ask', 'workspace', 'full']);
 
 function normalizeDevicePermission(value: unknown): PermissionMode {
@@ -91,8 +91,9 @@ function normalizeDevicePermission(value: unknown): PermissionMode {
 }
 
 function normalizeDeviceCapabilities(value: unknown, permissionCap: PermissionMode): DeviceCapability[] {
-  // Existing ask/workspace/full links previously had no capability field. Give
-  // those links the same product feature without restoring broad `full` access.
+  // Existing ask/workspace/full links previously had no capability field. Keep
+  // work sync compatible, but never silently grant the security-sensitive file
+  // transfer capability; it must be enabled locally for each paired device.
   if (value === undefined) return permissionCap === 'read-only' ? [] : ['work-sync'];
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item): item is DeviceCapability => typeof item === 'string' && supportedDeviceCapabilities.has(item as DeviceCapability)))];
@@ -496,19 +497,29 @@ function freshPairing(now = Date.now()): PairingConfig {
   return { secret: generateSecret(), pin: generatePin(), createdAt: now, pinCreatedAt: now };
 }
 
-function normalizePairing(value: Partial<PairingConfig> | undefined): { pairing: PairingConfig; migrated: boolean } {
-  if (!value) return { pairing: freshPairing(), migrated: true };
+function isValidPairingSecret(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f\d]{64}$/i.test(value);
+}
+
+function normalizePairing(value: Partial<PairingConfig> | undefined, secret: string): { pairing: PairingConfig; migrated: boolean } {
   const now = Date.now();
-  const createdAt = typeof value.createdAt === 'number' && Number.isFinite(value.createdAt) ? value.createdAt : now;
-  const pinCreatedAt = typeof value.pinCreatedAt === 'number' && Number.isFinite(value.pinCreatedAt) ? value.pinCreatedAt : createdAt;
+  const createdAt = typeof value?.createdAt === 'number' && Number.isFinite(value.createdAt) ? value.createdAt : now;
+  // The six-digit enrollment code is deliberately process-local. Persisting it
+  // extends a five-minute credential across restarts and leaks it through
+  // backups. A restart therefore always starts a fresh pairing epoch.
+  const pin = generatePin();
   return {
     pairing: {
-      secret: typeof value.secret === 'string' && value.secret ? value.secret : generateSecret(),
-      pin: typeof value.pin === 'string' && /^\d{6}$/.test(value.pin) ? value.pin : generatePin(),
+      secret,
+      pin,
       createdAt,
-      pinCreatedAt,
+      pinCreatedAt: now,
     },
-    migrated: value.pinCreatedAt === undefined,
+    migrated: !value
+      || typeof value.createdAt !== 'number'
+      || Object.prototype.hasOwnProperty.call(value, 'secret')
+      || Object.prototype.hasOwnProperty.call(value, 'pin')
+      || Object.prototype.hasOwnProperty.call(value, 'pinCreatedAt'),
   };
 }
 
@@ -557,31 +568,103 @@ function containsPlaintextProviderSecret(value: string): boolean {
   }
 }
 
+function containsPlaintextPairingCredential(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as { pairing?: { secret?: unknown; pin?: unknown; pinCreatedAt?: unknown } };
+    const pairing = parsed.pairing;
+    return Boolean(pairing && (
+      typeof pairing.secret === 'string'
+      || typeof pairing.pin === 'string'
+      || Object.prototype.hasOwnProperty.call(pairing, 'pinCreatedAt')
+    ));
+  } catch {
+    return false;
+  }
+}
+
+export interface SecretProtector {
+  protect(value: string): string;
+  unprotect(value: string): string;
+}
+
+export interface ConfigStoreDependencies {
+  /** Test seam; production always uses Windows CurrentUser DPAPI. */
+  providerVault?: SecretProtector;
+  /** Test seam; production always uses Windows CurrentUser DPAPI. */
+  pairingVault?: SecretProtector;
+}
+
+/** Fatal by design: starting with an unknown administrator credential is unsafe. */
+export class PairingSecretUnavailableError extends Error {
+  readonly code = 'PAIRING_SECRET_UNAVAILABLE';
+
+  constructor(message = 'Windows DPAPI 관리자 인증정보를 사용할 수 없어 안전하게 시작할 수 없습니다.', options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'PairingSecretUnavailableError';
+  }
+}
+
 /**
  * JSON-backed config store at ~/.mr-robot/config.json. Written atomically
  * (write/fsync temp then rename) and keeps a last-known-good backup.
  *
- * Note on API keys: they are stored on the local machine only, in
- * `~/.mr-robot/config.json`. Treat that file like a password vault.
+ * API keys are DPAPI ciphertext inside config.json. The global administrator
+ * pairing secret lives in its own DPAPI file and short pairing PINs are never
+ * persisted. The public in-memory PairingConfig API remains unchanged.
  */
 export class ConfigStore {
   readonly dir: string;
   readonly file: string;
   readonly backupFile: string;
+  readonly pairingSecretFile: string;
   private data: MrRobotConfigData;
-  private readonly vault = new SecretVault();
+  private readonly vault: SecretProtector;
+  private readonly pairingVault: SecretProtector;
+  private persistedPairingSecret: string | undefined;
+  private persistedPairingCiphertext: string | undefined;
   private readonly unavailableProviderSecrets = new Map<string, string>();
   private recoveryDiagnostics: ConfigRecoveryDiagnostic[] = [];
   private writesBlocked = false;
 
-  constructor(home = mrRobotHome()) {
+  constructor(home = mrRobotHome(), dependencies: ConfigStoreDependencies = {}) {
     this.dir = home;
     this.file = join(home, 'config.json');
     this.backupFile = `${this.file}.bak`;
+    this.pairingSecretFile = join(home, 'pairing-secret.dpapi');
+    this.vault = dependencies.providerVault ?? new SecretVault();
+    this.pairingVault = dependencies.pairingVault ?? new SecretVault('pairing-administrator');
     this.data = this.load();
   }
 
-  private decode(raw: string): { data: MrRobotConfigData; needsRewrite: boolean } {
+  private pairingSecret(legacyValue: unknown): string {
+    if (existsSync(this.pairingSecretFile)) {
+      try {
+        const ciphertext = readFileSync(this.pairingSecretFile, 'utf8').trim();
+        if (!ciphertext) throw new Error('protected administrator secret is empty');
+        const secret = this.pairingVault.unprotect(ciphertext);
+        if (!isValidPairingSecret(secret)) throw new Error('protected administrator secret is invalid');
+        this.persistedPairingSecret = secret;
+        this.persistedPairingCiphertext = ciphertext;
+        return secret;
+      } catch (error) {
+        throw new PairingSecretUnavailableError(undefined, { cause: error });
+      }
+    }
+    if (isValidPairingSecret(legacyValue)) return legacyValue;
+    throw new PairingSecretUnavailableError('DPAPI 관리자 인증정보 파일이 없으며 안전하게 마이그레이션할 기존 비밀도 없습니다.');
+  }
+
+  private protectPairingSecret(secret: string): string {
+    try {
+      const ciphertext = this.pairingVault.protect(secret);
+      if (!ciphertext || ciphertext === secret) throw new Error('secret protector returned unsafe ciphertext');
+      return ciphertext;
+    } catch (error) {
+      throw new PairingSecretUnavailableError(undefined, { cause: error });
+    }
+  }
+
+  private decode(raw: string): { data: MrRobotConfigData; needsRewrite: boolean; pairingNeedsRewrite: boolean } {
     const parsed = JSON.parse(raw) as Partial<MrRobotConfigData>;
     if (!isConfigJson(raw)) throw new Error('config structure is invalid');
     const defaults = defaultSettings();
@@ -607,7 +690,8 @@ export class ConfigStore {
       const { apiKeyProtected: _protected, ...rest } = provider;
       return { ...rest, apiKey };
     });
-    const normalizedPairing = normalizePairing(parsed.pairing);
+    const pairingSecret = this.pairingSecret(parsed.pairing?.secret);
+    const normalizedPairing = normalizePairing(parsed.pairing, pairingSecret);
     const data: MrRobotConfigData = {
       settings: {
         ...defaults,
@@ -644,36 +728,50 @@ export class ConfigStore {
     return {
       data,
       needsRewrite: normalizedPairing.migrated || storedProviders.some((provider) => Boolean(provider.apiKey) && !provider.apiKeyProtected),
+      pairingNeedsRewrite: normalizedPairing.migrated,
     };
   }
 
-  private fresh(): MrRobotConfigData {
+  private fresh(secret = generateSecret()): MrRobotConfigData {
     return {
       settings: defaultSettings(),
       providers: [],
       routing: defaultRouting(),
       routingPresets: [],
       workspaces: [],
-      pairing: freshPairing(),
+      pairing: { ...freshPairing(), secret },
       deviceLinks: [],
     };
   }
 
   private load(): MrRobotConfigData {
     if (!existsSync(this.file)) {
-      const fresh = this.fresh();
+      // A surviving credential file is authoritative even if config.json was
+      // removed. Never overwrite an unopenable DPAPI secret with a new one.
+      const secret = existsSync(this.pairingSecretFile) ? this.pairingSecret(undefined) : generateSecret();
+      const fresh = this.fresh(secret);
       this.save(fresh);
       return fresh;
     }
 
     try {
-      const decoded = this.decode(readFileSync(this.file, 'utf8'));
-      if (decoded.needsRewrite) {
+      const raw = readFileSync(this.file, 'utf8');
+      const decoded = this.decode(raw);
+      let backupPairingNeedsRewrite = false;
+      if (existsSync(this.backupFile)) {
+        try { backupPairingNeedsRewrite = containsPlaintextPairingCredential(readFileSync(this.backupFile, 'utf8')); }
+        catch { /* an unreadable backup is handled by the next normal save/recovery */ }
+      }
+      if (decoded.needsRewrite || backupPairingNeedsRewrite) {
         try { this.save(decoded.data); }
-        catch (error) { console.error('[config] loaded config but could not persist its safe migration:', error); }
+        catch (error) {
+          if (decoded.pairingNeedsRewrite || backupPairingNeedsRewrite || error instanceof PairingSecretUnavailableError) throw error;
+          console.error('[config] loaded config but could not persist its safe migration:', error);
+        }
       }
       return decoded.data;
     } catch (error) {
+      if (error instanceof PairingSecretUnavailableError) throw error;
       console.error('[config] config is unreadable; preserving it for recovery:', error);
     }
 
@@ -684,15 +782,21 @@ export class ConfigStore {
         message: '손상되거나 읽을 수 없는 설정 원본을 격리했습니다.',
         path: quarantine,
       });
+    } else {
+      // A malformed file can still contain a recoverable plaintext credential.
+      // If it cannot be isolated and followed by a committed rotation, allowing
+      // the agent to authenticate would leave an unknown copy valid.
+      throw new PairingSecretUnavailableError('손상된 설정을 격리하고 관리자 인증정보를 회전할 수 없어 시작을 차단했습니다.');
     }
 
     if (existsSync(this.backupFile)) {
       let backupRaw: string | undefined;
-      let decoded: { data: MrRobotConfigData; needsRewrite: boolean } | undefined;
+      let decoded: { data: MrRobotConfigData; needsRewrite: boolean; pairingNeedsRewrite: boolean } | undefined;
       try {
         backupRaw = readFileSync(this.backupFile, 'utf8');
         decoded = this.decode(backupRaw);
       } catch (error) {
+        if (error instanceof PairingSecretUnavailableError) throw error;
         console.error('[config] last-known-good backup is also unreadable:', error);
         const backupQuarantine = this.quarantine(this.backupFile);
         if (backupQuarantine) {
@@ -706,34 +810,47 @@ export class ConfigStore {
       if (backupRaw !== undefined && decoded !== undefined) {
         if (!this.writesBlocked) {
           try {
-            atomicWriteUtf8(this.file, backupRaw);
-            if (decoded.needsRewrite) this.save(decoded.data);
+            // Re-serialize the decoded state. Copying a legacy backup verbatim
+            // would briefly restore its plaintext administrator credential.
+            // The quarantined primary may itself contain this credential even
+            // when it was not valid JSON, so invalidate it before startup.
+            decoded.data.pairing = {
+              ...decoded.data.pairing,
+              secret: generateSecret(),
+              createdAt: Date.now(),
+            };
+            for (const link of decoded.data.deviceLinks) if (!link.revokedAt) link.revokedAt = Date.now();
+            this.save(decoded.data);
           } catch (error) {
-            this.writesBlocked = true;
-            this.recordDiagnostic({
-              code: 'config-persistence-blocked',
-              message: '정상 설정 백업은 읽었지만 복구본을 저장하지 못해 추가 저장을 차단했습니다.',
-              path: this.backupFile,
-            });
-            console.error('[config] backup loaded but could not be restored atomically:', error);
+            throw error instanceof PairingSecretUnavailableError
+              ? error
+              : new PairingSecretUnavailableError('복구된 설정의 관리자 인증정보를 안전하게 회전하지 못해 시작을 차단했습니다.', { cause: error });
           }
+        } else {
+          throw new PairingSecretUnavailableError('복구된 설정의 관리자 인증정보를 저장할 수 없어 시작을 차단했습니다.');
         }
         this.recordDiagnostic({
           code: 'config-backup-recovered',
-          message: '마지막 정상 설정 백업으로 복구했습니다.',
+          message: '마지막 정상 설정 백업으로 복구하고 노출 가능성이 있는 인증정보를 회전했습니다.',
           path: this.backupFile,
         });
         return decoded.data;
       }
     }
 
-    const fresh = this.fresh();
+    // Validate an existing DPAPI envelope before replacing it. This prevents a
+    // different Windows account from silently taking ownership of an unreadable
+    // credential store. The fresh state then rotates away from every secret
+    // that may remain inside either quarantined file.
+    if (existsSync(this.pairingSecretFile)) this.pairingSecret(undefined);
+    const fresh = this.fresh(generateSecret());
     this.recordDiagnostic({
       code: 'config-fresh-recovery',
       message: '정상 백업이 없어 새 설정으로 시작했습니다. 격리된 원본은 수동 복구할 수 있습니다.',
       path: quarantine,
     });
-    if (!this.writesBlocked) this.save(fresh);
+    if (this.writesBlocked) throw new PairingSecretUnavailableError('새 관리자 인증정보를 안전하게 저장할 수 없어 시작을 차단했습니다.');
+    this.save(fresh);
     return fresh;
   }
 
@@ -764,6 +881,9 @@ export class ConfigStore {
     mkdirSync(this.dir, { recursive: true });
     const persisted = {
       ...data,
+      // The administrator secret is stored in pairing-secret.dpapi. PINs are
+      // process-local and deliberately absent from both config generations.
+      pairing: { createdAt: data.pairing.createdAt },
       providers: data.providers.map((provider) => {
         const { apiKey, ...rest } = provider;
         const retainedProtected = this.unavailableProviderSecrets.get(provider.id);
@@ -778,6 +898,15 @@ export class ConfigStore {
       }),
     };
     const serialized = JSON.stringify(persisted, null, 2);
+    const pairingSecretChanged = this.persistedPairingSecret !== data.pairing.secret || !existsSync(this.pairingSecretFile);
+    const nextPairingCiphertext = pairingSecretChanged ? this.protectPairingSecret(data.pairing.secret) : this.persistedPairingCiphertext;
+    if (pairingSecretChanged && !existsSync(this.pairingSecretFile)) {
+      // Fresh install and plaintext migration: establish DPAPI storage before
+      // removing the sole recoverable copy from the JSON file.
+      atomicWriteUtf8(this.pairingSecretFile, nextPairingCiphertext as string);
+      this.persistedPairingSecret = data.pairing.secret;
+      this.persistedPairingCiphertext = nextPairingCiphertext;
+    }
     let backupRaw = serialized;
     if (existsSync(this.file)) {
       const currentRaw = readFileSync(this.file, 'utf8');
@@ -789,7 +918,7 @@ export class ConfigStore {
           message: '저장 직전 감지한 손상 설정을 격리했습니다.',
           path: quarantined,
         });
-      } else if (!containsPlaintextProviderSecret(currentRaw)) {
+      } else if (!containsPlaintextProviderSecret(currentRaw) && !containsPlaintextPairingCredential(currentRaw)) {
         backupRaw = currentRaw;
       }
     }
@@ -802,6 +931,14 @@ export class ConfigStore {
     }
     atomicWriteUtf8(this.backupFile, backupRaw);
     atomicWriteUtf8(this.file, serialized);
+    if (pairingSecretChanged && this.persistedPairingSecret !== data.pairing.secret) {
+      // Rotation commits revocations/config first, then atomically switches the
+      // administrator credential. A failed final write keeps the previous
+      // credential and already-revoked device links instead of widening access.
+      atomicWriteUtf8(this.pairingSecretFile, nextPairingCiphertext as string);
+      this.persistedPairingSecret = data.pairing.secret;
+      this.persistedPairingCiphertext = nextPairingCiphertext;
+    }
   }
 
   get settings(): AppSettings {
@@ -1151,9 +1288,16 @@ export class ConfigStore {
   }
 
   regenerateSecret(): string {
+    const previousSecret = this.data.pairing.secret;
     this.data.pairing = { ...this.data.pairing, secret: generateSecret(), createdAt: Date.now() };
     for (const link of this.data.deviceLinks) if (!link.revokedAt) link.revokedAt = Date.now();
-    this.save();
+    try {
+      this.save();
+    } catch (error) {
+      // The DPAPI file remains authoritative when rotation cannot commit.
+      this.data.pairing.secret = previousSecret;
+      throw error;
+    }
     return this.data.pairing.secret;
   }
 
@@ -1161,7 +1305,6 @@ export class ConfigStore {
     const previous = this.data.pairing.pin;
     this.data.pairing.pin = nextPairingPin(previous);
     this.data.pairing.pinCreatedAt = Date.now();
-    this.save();
     return this.data.pairing.pin;
   }
 

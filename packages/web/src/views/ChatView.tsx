@@ -25,9 +25,15 @@ declare global {
     mrRobotDesktop?: {
       chooseDirectory(): Promise<string | null>;
       chooseCalendarWorkbook(): Promise<string | null>;
-      getLocalConnection(): Promise<{ name: string; host: string; port: number; secret: string }>;
+      getLocalConnection(): Promise<{ name: string; host: string; port: number; auth: string }>;
+      connectLocalRpc(input: { url: string; credentialRef: string }): Promise<{ ok: boolean; isAdmin: boolean; permissionCap: PermissionMode }>;
+      callLocalRpc(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+      closeLocalRpc(): void;
+      onLocalRpcEvent(handler: (message: { event: string; data: unknown }) => void): () => void;
+      onLocalRpcClose(handler: (reason: string) => void): () => void;
       loadPcs(): Promise<DesktopPcLoadResult>;
       savePcs(pcs: SavedPc[]): Promise<{ ok: boolean }>;
+      pairRemotePc(input: { origin: string; pin: string; deviceName: string; permissionCap: string }): Promise<{ credentialRef: string }>;
       downloadFile(input: { id: string; url: string; token: string; suggestedName: string }): Promise<{ canceled: boolean; path?: string }>;
       cancelDownload(id: string): Promise<{ ok: boolean }>;
       onNavigate(handler: (view: string) => void): () => void;

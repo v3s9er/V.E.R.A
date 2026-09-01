@@ -7,9 +7,9 @@
  * WS connect/auth/disconnect and screen-stream cycles this way, plus verify
  * every tracked resource (listeners, clients, plugins) returns to baseline.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
@@ -19,10 +19,24 @@ const helloPath = resolve(here, '..', '..', '..', 'examples', 'plugins', 'hello'
 const monitorPath = resolve(here, '..', '..', '..', 'examples', 'plugins', 'monitor', 'index.js');
 
 process.env.MR_ROBOT_HOME = mkdtempSync(join(tmpdir(), 'mr-robot-leak-'));
+const hiddenDependencyRoot = mkdtempSync(join(tmpdir(), 'mr-robot-leak-deps-'));
+// This test measures plugin/listener reclamation, not cloudflared trust. Hide an
+// installed cloudflared so 600 plugin change events do not each pay for a
+// Windows Authenticode subprocess; dedicated remote-link tests cover that path.
+process.env.LOCALAPPDATA = hiddenDependencyRoot;
+process.env.ProgramFiles = hiddenDependencyRoot;
+process.env['ProgramFiles(x86)'] = hiddenDependencyRoot;
+process.env.PATH = String(process.env.PATH ?? '')
+  .split(delimiter)
+  .filter((folder) => !existsSync(join(folder, 'cloudflared.exe')) && !existsSync(join(folder, 'cloudflared')))
+  .join(delimiter);
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
 const server = new AgentServer();
-await server.start({ port: 8797, host: '127.0.0.1' });
+// Let the OS choose a free loopback port so a running installed agent or a
+// concurrent test process cannot turn the leak check into a false failure.
+const { port } = await server.start({ port: 0, host: '127.0.0.1' });
+const wsUrl = `ws://127.0.0.1:${port}/ws`;
 const baselinePluginIds = server.plugins.list().map((plugin) => plugin.id).sort();
 const baselineLogListeners = server.bus.listenerCount('log');
 
@@ -41,6 +55,18 @@ const measure = (label) => {
     `${label.padEnd(26)} heap=${String(kb(m.heapUsed)).padStart(6)} KB  listeners(log)=${server.bus.listenerCount('log')}  clients=${server.hub?.clients.size ?? '?'}  plugins=${server.plugins.list().length}`,
   );
   return m.heapUsed;
+};
+
+// Hundreds of intentional attach/detach and socket cycles generate thousands
+// of info lines. Keeping those writes in the PTY makes the stress test measure
+// console backpressure instead of resource reclamation and can stretch a
+// minute-scale test into tens of minutes. Structured bus events still execute;
+// only the terminal sink is muted while each measured workload runs.
+const withQuietConsole = async (work) => {
+  const originalLog = console.log;
+  console.log = () => {};
+  try { return await work(); }
+  finally { console.log = originalLog; }
 };
 
 const open = (s) => new Promise((r) => s.once('open', r));
@@ -67,15 +93,15 @@ const pluginCycle = async (n) => {
 };
 
 const base = measure('baseline');
-await pluginCycle(300);
+await withQuietConsole(() => pluginCycle(300));
 const pluginB1 = measure('after plugin batch1 (300)');
-await pluginCycle(300);
+await withQuietConsole(() => pluginCycle(300));
 const pluginB2 = measure('after plugin batch2 (600)');
 
 // ------------------------------------------------------------------ 2. ws
 const wsCycle = async (n) => {
   for (let i = 0; i < n; i++) {
-    const ws = new WebSocket('ws://127.0.0.1:8797/ws');
+    const ws = new WebSocket(wsUrl);
     await open(ws);
     await rpc(ws, 'auth', { secret: server.secret });
     await rpc(ws, 'status', {});
@@ -84,14 +110,14 @@ const wsCycle = async (n) => {
   await new Promise((r) => setTimeout(r, 300));
 };
 
-await wsCycle(40);
+await withQuietConsole(() => wsCycle(40));
 const wsB1 = measure('after ws batch1 (40)');
-await wsCycle(40);
+await withQuietConsole(() => wsCycle(40));
 const wsB2 = measure('after ws batch2 (80)');
 
 // --------------------------------------------------------------- 3. stream
-{
-  const ws = new WebSocket('ws://127.0.0.1:8797/ws');
+await withQuietConsole(async () => {
+  const ws = new WebSocket(wsUrl);
   await open(ws);
   await rpc(ws, 'auth', { secret: server.secret });
   for (let i = 0; i < 20; i++) {
@@ -101,7 +127,7 @@ const wsB2 = measure('after ws batch2 (80)');
   }
   ws.close();
   await new Promise((r) => setTimeout(r, 300));
-}
+});
 const streamEnd = measure('after 20 stream start/stop');
 
 // ---------------------------------------------------------------- verdict
@@ -134,4 +160,5 @@ console.log(finalOk ? 'NO LEAK DETECTED' : 'POSSIBLE LEAK — investigate');
 
 await server.stop();
 rmSync(process.env.MR_ROBOT_HOME, { recursive: true, force: true });
+rmSync(hiddenDependencyRoot, { recursive: true, force: true });
 process.exitCode = finalOk ? 0 : 1;

@@ -1,6 +1,42 @@
-import type { PermissionMode, RpcMessage, RpcRequest } from '@mr-robot/shared';
+import {
+  WS_RPC_PROTOCOL,
+  WS_UPGRADE_TICKET_PROTOCOL_PREFIX,
+  type PermissionMode,
+  type RpcMessage,
+  type RpcRequest,
+  type WsUpgradeTicketInfo,
+} from '@mr-robot/shared';
 
 type Listener = (data: unknown) => void;
+export const DESKTOP_LOCAL_AUTH_TOKEN = 'electron-main-process-managed-session';
+export const DESKTOP_REMOTE_AUTH_PREFIX = 'electron-main-process-pc:';
+
+function isDesktopManagedAuthToken(value: string): boolean {
+  return value === DESKTOP_LOCAL_AUTH_TOKEN || value.startsWith(DESKTOP_REMOTE_AUTH_PREFIX);
+}
+
+async function publicWebSocketProtocols(url: string, secret: string, signal: AbortSignal): Promise<string[] | undefined> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'wss:') return undefined;
+  const endpoint = new URL('/api/ws-ticket', `https://${parsed.host}`);
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'x-mr-robot-token': secret, accept: 'application/json' },
+    signal,
+    cache: 'no-store',
+    credentials: 'omit',
+  });
+  if (!response.ok) throw new Error(`WebSocket 보안 티켓 발급 실패 (HTTP ${response.status})`);
+  const ticket = await response.json() as WsUpgradeTicketInfo;
+  if (typeof ticket.protocol !== 'string'
+    || !ticket.protocol.startsWith(WS_UPGRADE_TICKET_PROTOCOL_PREFIX)
+    || !/^[A-Za-z0-9_-]{43}$/.test(ticket.protocol.slice(WS_UPGRADE_TICKET_PROTOCOL_PREFIX.length))
+    || !Number.isFinite(ticket.expiresAt)
+    || ticket.expiresAt <= Date.now()) {
+    throw new Error('WebSocket 보안 티켓 응답이 올바르지 않습니다.');
+  }
+  return [WS_RPC_PROTOCOL, ticket.protocol];
+}
 
 /**
  * Minimal WebSocket RPC client for the Mr.Robot agent.
@@ -17,6 +53,9 @@ export class MrRobotClient {
   private connectionGeneration = 0;
   private authToken = '';
   private cancelConnecting: ((reason: Error) => void) | null = null;
+  private desktopLocal = false;
+  private desktopUnsubscribeEvent: (() => void) | null = null;
+  private desktopUnsubscribeClose: (() => void) | null = null;
 
   connected = false;
   authed = false;
@@ -26,6 +65,9 @@ export class MrRobotClient {
   onAuthFail: (() => void) | null = null;
 
   connect(url: string, secret: string, timeoutMs = 8000): Promise<void> {
+    if (isDesktopManagedAuthToken(secret) && window.mrRobotDesktop?.connectLocalRpc) {
+      return this.connectDesktopManaged(url, secret);
+    }
     this.close();
     const generation = ++this.connectionGeneration;
     this.closedByUser = false;
@@ -34,6 +76,8 @@ export class MrRobotClient {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let cancelAttempt: ((reason: Error) => void) | null = null;
+      let ws: WebSocket | null = null;
+      const admissionController = new AbortController();
       const finish = (err?: Error): void => {
         if (settled) return;
         settled = true;
@@ -42,51 +86,55 @@ export class MrRobotClient {
         if (err) reject(err);
         else resolve();
       };
-
-      const ws = new WebSocket(url);
-      this.ws = ws;
       cancelAttempt = (reason) => {
-        try { ws.close(); } catch { /* best effort */ }
+        admissionController.abort(reason);
+        try { ws?.close(); } catch { /* best effort */ }
         finish(reason);
       };
       this.cancelConnecting = cancelAttempt;
       timer = setTimeout(() => {
-        ws.close();
-        finish(new Error('연결 시간 초과'));
+        cancelAttempt?.(new Error('연결 시간 초과'));
       }, timeoutMs);
 
-      ws.onopen = () => {
-        if (generation !== this.connectionGeneration) { ws.close(); return; }
-        this.connected = true;
-        void this.call('auth', { secret })
-          .then((r) => {
-            const auth = r as { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode };
-            this.authed = Boolean(auth?.ok);
-            this.isAdmin = auth?.isAdmin === true;
-            this.permissionCap = auth?.permissionCap ?? 'read-only';
-            if (this.authed) finish();
-            else {
-              this.onAuthFail?.();
-              ws.close();
-              finish(new Error('인증 실패: 시크릿이 일치하지 않습니다.'));
-            }
-          })
-          .catch((err: Error) => { ws.close(); finish(err); });
-      };
-      ws.onmessage = (ev) => { if (generation === this.connectionGeneration) this.onMessage(String(ev.data)); };
-      ws.onerror = () => { ws.close(); finish(new Error('연결 오류')); };
-      ws.onclose = () => {
-        if (generation !== this.connectionGeneration) return;
-        clearTimeout(timer);
-        this.connected = false;
-        this.authed = false;
-        this.isAdmin = false;
-        this.permissionCap = 'read-only';
-        this.settlePending(new Error('연결이 끊어졌습니다'));
-        this.ws = null;
-        if (!this.closedByUser) this.onClose?.();
-        finish(new Error('연결이 닫혔습니다'));
-      };
+      void publicWebSocketProtocols(url, secret, admissionController.signal).then((protocols) => {
+        if (settled || generation !== this.connectionGeneration) return;
+        ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+        this.ws = ws;
+        ws.onopen = () => {
+          if (generation !== this.connectionGeneration) { ws?.close(); return; }
+          this.connected = true;
+          void this.call('auth', { secret })
+            .then((r) => {
+              const auth = r as { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode };
+              this.authed = Boolean(auth?.ok);
+              this.isAdmin = auth?.isAdmin === true;
+              this.permissionCap = auth?.permissionCap ?? 'read-only';
+              if (this.authed) finish();
+              else {
+                this.onAuthFail?.();
+                ws?.close();
+                finish(new Error('인증 실패: 시크릿이 일치하지 않습니다.'));
+              }
+            })
+            .catch((err: Error) => { ws?.close(); finish(err); });
+        };
+        ws.onmessage = (ev) => { if (generation === this.connectionGeneration) this.onMessage(String(ev.data)); };
+        ws.onerror = () => { ws?.close(); finish(new Error('연결 오류')); };
+        ws.onclose = () => {
+          if (generation !== this.connectionGeneration) return;
+          if (timer !== undefined) clearTimeout(timer);
+          this.connected = false;
+          this.authed = false;
+          this.isAdmin = false;
+          this.permissionCap = 'read-only';
+          this.settlePending(new Error('연결이 끊어졌습니다'));
+          this.ws = null;
+          if (!this.closedByUser) this.onClose?.();
+          finish(new Error('연결이 닫혔습니다'));
+        };
+      }).catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
@@ -95,6 +143,10 @@ export class MrRobotClient {
   }
 
   call(method: string, params?: unknown, timeoutMs = 60000): Promise<unknown> {
+    if (this.desktopLocal) {
+      const bridge = window.mrRobotDesktop?.callLocalRpc;
+      return bridge ? bridge(method, params, timeoutMs) : Promise.reject(new Error('로컬 RPC 브리지를 사용할 수 없습니다.'));
+    }
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('연결되어 있지 않습니다'));
@@ -146,12 +198,20 @@ export class MrRobotClient {
     this.cancelConnecting = null;
     cancelConnecting?.(new Error('연결을 취소했습니다'));
     this.settlePending(new Error('연결 종료'));
+    const wasDesktopLocal = this.desktopLocal;
+    this.desktopLocal = false;
+    this.desktopUnsubscribeEvent?.();
+    this.desktopUnsubscribeEvent = null;
+    this.desktopUnsubscribeClose?.();
+    this.desktopUnsubscribeClose = null;
+    if (wasDesktopLocal) window.mrRobotDesktop?.closeLocalRpc?.();
     try {
       this.ws?.close();
     } catch {
       /* ignore */
     }
     this.ws = null;
+    this.authToken = '';
     this.connected = false;
     this.authed = false;
     this.isAdmin = false;
@@ -183,6 +243,43 @@ export class MrRobotClient {
       this.pending.delete(msg.id);
       if (msg.ok) p.resolve(msg.result);
       else p.reject(new Error(msg.error.message));
+    }
+  }
+
+  private async connectDesktopManaged(url: string, credentialRef: string): Promise<void> {
+    this.close();
+    const generation = ++this.connectionGeneration;
+    this.closedByUser = false;
+    this.authToken = credentialRef;
+    const bridge = window.mrRobotDesktop;
+    if (!bridge?.connectLocalRpc || !bridge.onLocalRpcEvent || !bridge.onLocalRpcClose) throw new Error('로컬 RPC 브리지를 사용할 수 없습니다.');
+    this.desktopUnsubscribeEvent = bridge.onLocalRpcEvent((message) => {
+      if (generation !== this.connectionGeneration || !this.desktopLocal || !message || typeof message.event !== 'string') return;
+      const set = this.listeners.get(message.event);
+      if (set) for (const handler of [...set]) handler(message.data);
+    });
+    this.desktopUnsubscribeClose = bridge.onLocalRpcClose(() => {
+      if (generation !== this.connectionGeneration || !this.desktopLocal) return;
+      this.desktopLocal = false;
+      this.connected = false;
+      this.authed = false;
+      this.isAdmin = false;
+      this.permissionCap = 'read-only';
+      this.settlePending(new Error('연결이 끊어졌습니다'));
+      if (!this.closedByUser) this.onClose?.();
+    });
+    this.desktopLocal = true;
+    try {
+      const auth = await bridge.connectLocalRpc({ url, credentialRef });
+      if (generation !== this.connectionGeneration) throw new Error('연결이 취소되었습니다.');
+      this.connected = true;
+      this.authed = auth?.ok === true;
+      this.isAdmin = auth?.isAdmin === true;
+      this.permissionCap = auth?.permissionCap ?? 'read-only';
+      if (!this.authed || (credentialRef === DESKTOP_LOCAL_AUTH_TOKEN && !this.isAdmin)) throw new Error('PC 인증에 실패했습니다.');
+    } catch (error) {
+      if (generation === this.connectionGeneration) this.close();
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -230,13 +327,9 @@ export interface PairingPayload {
   pin: string;
 }
 
-function isTailnetHost(hostname: string): boolean {
-  const octets = hostname.replace(/^\[|\]$/g, '').split('.').map(Number);
-  return octets.length === 4
-    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    && octets[0] === 100
-    && octets[1] >= 64
-    && octets[1] <= 127;
+function isLoopbackPairingHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
 }
 
 function assertSecurePairingHost(value: string, port: number, protocol: 'http' | 'https'): void {
@@ -244,8 +337,8 @@ function assertSecurePairingHost(value: string, port: number, protocol: 'http' |
   const parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(input) ? input : `${protocol}://${input}:${port}`);
   if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) throw new Error('unsupported pairing protocol');
   if (parsed.username || parsed.password) throw new Error('pairing URLs cannot contain credentials');
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'wss:' && !isTailnetHost(parsed.hostname)) {
-    throw new Error('pairing requires HTTPS or a Tailscale address');
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'wss:' && !isLoopbackPairingHost(parsed.hostname)) {
+    throw new Error('remote pairing requires HTTPS');
   }
 }
 

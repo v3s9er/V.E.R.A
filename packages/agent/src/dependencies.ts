@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { delimiter, join } from 'node:path';
 import type { DependencyId, DependencyInfo, DependencyInstallResult } from '@mr-robot/shared';
 import { mrRobotHome } from './config.js';
+import { terminateProcessTree } from './computer/shell.js';
 
 interface ProcessResult {
   exitCode: number | null;
@@ -32,9 +34,47 @@ const windowsDir = (): string => envPath('WINDIR') || 'C:\\Windows';
 
 const SENSE_VOICE_FOLDER = 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17';
 const SENSE_VOICE_URL = `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${SENSE_VOICE_FOLDER}.tar.bz2`;
+const SENSE_VOICE_SHA256 = '7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e';
 const KOREAN_VOICE_FOLDER = 'sherpa-onnx-zipformer-korean-2024-06-24';
 const KOREAN_VOICE_URL = `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${KOREAN_VOICE_FOLDER}.tar.bz2`;
+const KOREAN_VOICE_SHA256 = '24bd409318f389cd2de0e295eb1acf91f4e8dfcc0d650490dd2a01f5b50d2c77';
 const SILERO_VAD_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx';
+const SILERO_VAD_SHA256 = '9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6';
+
+const SAFE_TAR_EXTRACTION = String.raw`
+import pathlib, shutil, sys, tarfile
+archive = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2]).resolve()
+expected = sys.argv[3]
+destination.mkdir(parents=True, exist_ok=True)
+total = 0
+with tarfile.open(archive, 'r:bz2') as source:
+    members = source.getmembers()
+    if not members or len(members) > 10000:
+        raise RuntimeError('archive entry count is invalid')
+    for member in members:
+        name = member.name.replace('\\', '/')
+        relative = pathlib.PurePosixPath(name)
+        if relative.is_absolute() or not relative.parts or relative.parts[0] != expected or '..' in relative.parts:
+            raise RuntimeError('unsafe archive path')
+        target = destination.joinpath(*relative.parts).resolve()
+        if target != destination and destination not in target.parents:
+            raise RuntimeError('archive path escaped destination')
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isfile():
+            raise RuntimeError('links and special archive entries are not allowed')
+        total += member.size
+        if member.size > 1024 * 1024 * 1024 or total > 4 * 1024 * 1024 * 1024:
+            raise RuntimeError('archive expands beyond the safety limit')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stream = source.extractfile(member)
+        if stream is None:
+            raise RuntimeError('archive member could not be read')
+        with stream, target.open('xb') as output:
+            shutil.copyfileobj(stream, output, 1024 * 1024)
+`;
 
 function localVoicePaths() {
   const root = join(mrRobotHome(), 'voice');
@@ -46,6 +86,7 @@ function localVoicePaths() {
     modelRoot,
     model: join(modelRoot, 'model.int8.onnx'),
     tokens: join(modelRoot, 'tokens.txt'),
+    senseMarker: join(modelRoot, '.mr-robot-archive.sha256'),
     vad: join(root, 'silero_vad.onnx'),
     koreanRoot,
     koreanArchive: join(root, `${KOREAN_VOICE_FOLDER}.tar.bz2`),
@@ -53,6 +94,7 @@ function localVoicePaths() {
     koreanDecoder: join(koreanRoot, 'decoder-epoch-99-avg-1.int8.onnx'),
     koreanJoiner: join(koreanRoot, 'joiner-epoch-99-avg-1.int8.onnx'),
     koreanTokens: join(koreanRoot, 'tokens.txt'),
+    koreanMarker: join(koreanRoot, '.mr-robot-archive.sha256'),
   };
 }
 
@@ -74,12 +116,12 @@ const DEFINITIONS: Definition[] = [
   },
   {
     id: 'codex', name: 'Codex CLI', command: 'codex', versionArgs: ['--version'], required: false, requiresLogin: true,
-    description: 'ChatGPT 구독 기반 코딩 에이전트입니다. 설치 후 로그인이 필요합니다.', npmPackage: '@openai/codex@latest',
+    description: 'ChatGPT 구독 기반 코딩 에이전트입니다. 설치 후 로그인이 필요합니다.', npmPackage: '@openai/codex@0.148.0',
     candidates: () => [join(appData(), 'npm', 'codex.cmd'), join(localAppData(), 'Microsoft', 'WindowsApps', 'codex.exe')],
   },
   {
     id: 'claude', name: 'Claude Code', command: 'claude', versionArgs: ['--version'], required: false, requiresLogin: true,
-    description: 'Claude 구독 기반 코딩 에이전트입니다. 설치 후 로그인이 필요합니다.', npmPackage: '@anthropic-ai/claude-code@latest',
+    description: 'Claude 구독 기반 코딩 에이전트입니다. 설치 후 로그인이 필요합니다.', npmPackage: '@anthropic-ai/claude-code@2.1.237',
     candidates: () => [join(appData(), 'npm', 'claude.cmd')],
   },
   {
@@ -120,6 +162,23 @@ function boundedAppend(current: string, chunk: Buffer | string, limit = 16_000):
   return next.length > limit ? next.slice(next.length - limit) : next;
 }
 
+function dependencyEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const allowed = [
+    'PATH', 'PATHEXT', 'SystemRoot', 'windir', 'ComSpec',
+    'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
+    'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+    'OS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'NUMBER_OF_PROCESSORS',
+    'LANG', 'LC_ALL', 'TERM',
+  ];
+  const entries = Object.entries(source);
+  const env: NodeJS.ProcessEnv = { POWERSHELL_TELEMETRY_OPTOUT: '1' };
+  for (const name of allowed) {
+    const found = entries.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    if (found && typeof found[1] === 'string') env[name] = found[1];
+  }
+  return env;
+}
+
 function run(command: string, args: string[], timeoutMs = 20_000): Promise<ProcessResult> {
   return new Promise((resolve) => {
     let output = '';
@@ -134,7 +193,7 @@ function run(command: string, args: string[], timeoutMs = 20_000): Promise<Proce
     };
     let child;
     try {
-      child = spawn(command, args, { windowsHide: true, shell: false, env: process.env });
+      child = spawn(command, args, { windowsHide: true, shell: false, env: dependencyEnvironment() });
     } catch (error) {
       output = error instanceof Error ? error.message : String(error);
       finish(null);
@@ -146,10 +205,90 @@ function run(command: string, args: string[], timeoutMs = 20_000): Promise<Proce
     child.on('close', (code) => finish(code));
     timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
-      finish(null);
+      terminateProcessTree(child);
     }, timeoutMs);
+    timer.unref?.();
   });
+}
+
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(path);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function provenanceMarkerMatches(path: string, expected: string): boolean {
+  try {
+    return readFileSync(path, 'utf8').trim().toLowerCase() === expected;
+  } catch {
+    return false;
+  }
+}
+
+async function downloadVerified(
+  curl: string,
+  url: string,
+  destination: string,
+  expectedSha256: string,
+  timeoutMs: number,
+): Promise<ProcessResult> {
+  const result = await run(curl, [
+    '--proto', '=https', '--tlsv1.2', '--location', '--fail', '--retry', '3',
+    '--output', destination, url,
+  ], timeoutMs);
+  if (result.exitCode !== 0) return result;
+  const actual = await sha256File(destination);
+  if (actual !== expectedSha256) {
+    try { unlinkSync(destination); } catch { /* keep the original verification error */ }
+    return {
+      exitCode: null,
+      timedOut: false,
+      output: `다운로드 SHA-256 검증 실패 (expected ${expectedSha256}, actual ${actual})`,
+    };
+  }
+  return { ...result, output: `${result.output}\nSHA-256 검증 완료: ${actual}`.trim() };
+}
+
+async function installVerifiedArchive(
+  py: string,
+  archive: string,
+  voiceRoot: string,
+  folder: string,
+  requiredRelativePaths: string[],
+  timeoutMs: number,
+): Promise<ProcessResult> {
+  const stagingRoot = join(voiceRoot, `.install-${randomUUID()}`);
+  const stagedModel = join(stagingRoot, folder);
+  const targetModel = join(voiceRoot, folder);
+  const backupModel = join(voiceRoot, `.previous-${folder}-${randomUUID()}`);
+  mkdirSync(stagingRoot, { recursive: false });
+  let backedUp = false;
+  try {
+    const extracted = await run(py, ['-c', SAFE_TAR_EXTRACTION, archive, stagingRoot, folder], timeoutMs);
+    if (extracted.exitCode !== 0) return extracted;
+    if (!requiredRelativePaths.every((relative) => existsSync(join(stagedModel, relative)))) {
+      return { exitCode: null, timedOut: false, output: '검증된 압축 안에 필수 음성 모델 파일이 없습니다.' };
+    }
+    if (existsSync(targetModel)) {
+      renameSync(targetModel, backupModel);
+      backedUp = true;
+    }
+    try {
+      renameSync(stagedModel, targetModel);
+    } catch (error) {
+      if (backedUp && !existsSync(targetModel)) renameSync(backupModel, targetModel);
+      throw error;
+    }
+    if (backedUp) rmSync(backupModel, { recursive: true, force: true });
+    return { ...extracted, output: `${extracted.output}\n경로·링크·압축 해제 크기 검증 완료`.trim() };
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true });
+    if (backedUp && existsSync(backupModel) && existsSync(targetModel)) rmSync(backupModel, { recursive: true, force: true });
+  }
 }
 
 async function probeKoreanSpeech(definition: Definition): Promise<DependencyInfo> {
@@ -160,8 +299,12 @@ async function probeKoreanSpeech(definition: Definition): Promise<DependencyInfo
   const paths = localVoicePaths();
   const py = await findOnPath('py') ?? (existsSync(join(windowsDir(), 'py.exe')) ? join(windowsDir(), 'py.exe') : undefined);
   const accurateModelReady = existsSync(paths.koreanEncoder) && existsSync(paths.koreanDecoder)
-    && existsSync(paths.koreanJoiner) && existsSync(paths.koreanTokens);
-  if (py && existsSync(paths.model) && existsSync(paths.tokens) && existsSync(paths.vad) && accurateModelReady) {
+    && existsSync(paths.koreanJoiner) && existsSync(paths.koreanTokens)
+    && provenanceMarkerMatches(paths.koreanMarker, KOREAN_VOICE_SHA256);
+  const fastModelReady = existsSync(paths.model) && existsSync(paths.tokens)
+    && provenanceMarkerMatches(paths.senseMarker, SENSE_VOICE_SHA256);
+  const vadReady = existsSync(paths.vad) && await sha256File(paths.vad).catch(() => '') === SILERO_VAD_SHA256;
+  if (py && fastModelReady && vadReady && accurateModelReady) {
     const imports = await run(py, ['-c', 'import sherpa_onnx, sounddevice, numpy; print(sherpa_onnx.__version__)'], 20_000);
     if (imports.exitCode === 0) return {
       id: definition.id,
@@ -290,38 +433,54 @@ export class DependencyManager {
           if (pythonInstall.exitCode !== 0 || !py) throw new Error(`Python 설치 실패: ${pythonInstall.output}`);
         }
 
-        const pip = await run(py, ['-m', 'pip', 'install', '--user', '--disable-pip-version-check', 'sherpa-onnx==1.13.6', 'sounddevice>=0.5.0'], 15 * 60_000);
+        const pip = await run(py, [
+          '-m', 'pip', 'install', '--user', '--disable-pip-version-check', '--only-binary=:all:',
+          'sherpa-onnx==1.13.6', 'sounddevice==0.5.6',
+        ], 15 * 60_000);
         combined += `\n${pip.output}`;
         if (pip.exitCode !== 0) {
           result = { ...pip, output: combined.trim() };
         } else {
           const curl = await findOnPath('curl.exe') ?? join(windowsDir(), 'System32', 'curl.exe');
-          const tar = await findOnPath('tar.exe') ?? join(windowsDir(), 'System32', 'tar.exe');
           let failed: ProcessResult | null = null;
-          if (!existsSync(paths.model) || !existsSync(paths.tokens)) {
-            const download = await run(curl, ['-L', '--fail', '--retry', '3', '-o', paths.archive, SENSE_VOICE_URL], 30 * 60_000);
+          if (!existsSync(paths.model) || !existsSync(paths.tokens) || !provenanceMarkerMatches(paths.senseMarker, SENSE_VOICE_SHA256)) {
+            const download = await downloadVerified(curl, SENSE_VOICE_URL, paths.archive, SENSE_VOICE_SHA256, 30 * 60_000);
             combined += `\n${download.output}`;
             if (download.exitCode !== 0) failed = download;
             if (!failed) {
-              const extract = await run(tar, ['-xjf', paths.archive, '-C', paths.root], 10 * 60_000);
+              const extract = await installVerifiedArchive(
+                py, paths.archive, paths.root, SENSE_VOICE_FOLDER,
+                ['model.int8.onnx', 'tokens.txt'], 10 * 60_000,
+              );
               combined += `\n${extract.output}`;
               if (extract.exitCode !== 0) failed = extract;
+              else writeFileSync(paths.senseMarker, `${SENSE_VOICE_SHA256}\n`, { encoding: 'utf8', mode: 0o600 });
             }
             if (!failed && existsSync(paths.archive)) unlinkSync(paths.archive);
           }
-          if (!failed && !existsSync(paths.vad)) {
-            const vad = await run(curl, ['-L', '--fail', '--retry', '3', '-o', paths.vad, SILERO_VAD_URL], 10 * 60_000);
+          const installedVadHash = existsSync(paths.vad) ? await sha256File(paths.vad).catch(() => '') : '';
+          if (!failed && installedVadHash !== SILERO_VAD_SHA256) {
+            const vad = await downloadVerified(curl, SILERO_VAD_URL, paths.vad, SILERO_VAD_SHA256, 10 * 60_000);
             combined += `\n${vad.output}`;
             if (vad.exitCode !== 0) failed = vad;
           }
-          if (!failed && (!existsSync(paths.koreanEncoder) || !existsSync(paths.koreanDecoder) || !existsSync(paths.koreanJoiner) || !existsSync(paths.koreanTokens))) {
-            const download = await run(curl, ['-L', '--fail', '--retry', '3', '-o', paths.koreanArchive, KOREAN_VOICE_URL], 45 * 60_000);
+          if (!failed && (!existsSync(paths.koreanEncoder) || !existsSync(paths.koreanDecoder) || !existsSync(paths.koreanJoiner)
+            || !existsSync(paths.koreanTokens) || !provenanceMarkerMatches(paths.koreanMarker, KOREAN_VOICE_SHA256))) {
+            const download = await downloadVerified(curl, KOREAN_VOICE_URL, paths.koreanArchive, KOREAN_VOICE_SHA256, 45 * 60_000);
             combined += `\n${download.output}`;
             if (download.exitCode !== 0) failed = download;
             if (!failed) {
-              const extract = await run(tar, ['-xjf', paths.koreanArchive, '-C', paths.root], 15 * 60_000);
+              const extract = await installVerifiedArchive(
+                py, paths.koreanArchive, paths.root, KOREAN_VOICE_FOLDER,
+                [
+                  'encoder-epoch-99-avg-1.int8.onnx', 'decoder-epoch-99-avg-1.int8.onnx',
+                  'joiner-epoch-99-avg-1.int8.onnx', 'tokens.txt',
+                ],
+                15 * 60_000,
+              );
               combined += `\n${extract.output}`;
               if (extract.exitCode !== 0) failed = extract;
+              else writeFileSync(paths.koreanMarker, `${KOREAN_VOICE_SHA256}\n`, { encoding: 'utf8', mode: 0o600 });
             }
             if (!failed && existsSync(paths.koreanArchive)) unlinkSync(paths.koreanArchive);
             // The archive also contains large fp32 copies. The runtime uses only

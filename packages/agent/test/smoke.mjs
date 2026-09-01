@@ -5,8 +5,9 @@
  * Covers: event bus, plugin attach/detach leak-freedom, plugin commands,
  * computer shell/screen, HTTP API + pairing, WebSocket RPC.
  */
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PassThrough, Readable, Writable } from 'node:stream';
@@ -18,8 +19,8 @@ const here = dirnameOf(import.meta);
 const dist = resolve(here, '..', 'dist');
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
-const { browserOriginAllowed, createByteLimitStream, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
-const { createRemoteLinkPlugin, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
+const { browserOriginAllowed, createByteLimitStream, isSecurePlainPeerTransport, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
+const { createRemoteLinkPlugin, localTunnelCredentialsFromToken, localTunnelIngressConfig, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
 const { SecretVault } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
@@ -52,13 +53,30 @@ check('off stops delivery', count === 1);
 console.log('1b. transport + HTTP security helpers');
 check('Tailscale CGNAT transport range accepted', isTailnetAddress('100.64.0.1') && isTailnetAddress('100.127.255.254') && isTailnetAddress('::ffff:100.100.10.20'));
 check('look-alike non-Tailscale ranges rejected', !isTailnetAddress('100.63.255.255') && !isTailnetAddress('100.128.0.1') && !isTailnetAddress('192.168.10.20'));
-check('private peer base accepted', normalizePeerBase('http://192.168.10.20:8787').origin === 'http://192.168.10.20:8787');
+check('loopback and literal Tailscale peer bases accepted', normalizePeerBase('http://127.0.0.1:8787').origin === 'http://127.0.0.1:8787'
+  && normalizePeerBase('http://100.100.10.20:8787').origin === 'http://100.100.10.20:8787');
+let plainLanBlocked = false;
+try { normalizePeerBase('http://192.168.10.20:8787'); } catch { plainLanBlocked = true; }
+check('ordinary private-LAN plaintext peer blocked', plainLanBlocked);
+check('actual plaintext socket must stay on loopback or a verified Tailscale adapter',
+  isSecurePlainPeerTransport('127.0.0.1', '127.0.0.1')
+  && isSecurePlainPeerTransport('100.90.1.2', '100.101.2.3', new Set(['100.101.2.3']))
+  && !isSecurePlainPeerTransport('100.90.1.2', '192.168.1.10', new Set(['100.101.2.3']))
+  && !isSecurePlainPeerTransport('100.90.1.2', '100.101.2.3', new Set())
+  && !isSecurePlainPeerTransport('192.168.1.20', '192.168.1.10', new Set()));
 let metadataBlocked = false;
 try { normalizePeerBase('http://169.254.169.254'); } catch { metadataBlocked = true; }
 check('cloud metadata/link-local peer blocked', metadataBlocked);
-let publicPeerBlocked = false;
-try { normalizePeerBase('https://example.com'); } catch { publicPeerBlocked = true; }
-check('arbitrary public peer blocked', publicPeerBlocked);
+check('custom public HTTPS peer origin accepted for later DNS pinning',
+  normalizePeerBase('https://example.com').origin === 'https://example.com');
+for (const unsafePeer of ['https://127.0.0.1', 'https://192.168.10.20', 'https://printer.local', 'https://example.com:8443']) {
+  let rejected = false;
+  try { normalizePeerBase(unsafePeer); } catch { rejected = true; }
+  check(`unsafe HTTPS peer origin rejected: ${unsafePeer}`, rejected);
+}
+let publicPlaintextBlocked = false;
+try { normalizePeerBase('http://example.com'); } catch { publicPlaintextBlocked = true; }
+check('custom public peer remains HTTPS-only', publicPlaintextBlocked);
 check('same browser origin accepted', browserOriginAllowed('http://127.0.0.1:8787', '127.0.0.1:8787', '127.0.0.1'));
 check('foreign browser origin rejected', !browserOriginAllowed('https://evil.example', '127.0.0.1:8787', '127.0.0.1'));
 let byteLimitBlocked = false;
@@ -159,20 +177,39 @@ tunnelB.close();
 await stopB;
 await racePlugin.deactivate(fakePluginContext);
 
-const namedToken = `eyJ${'B'.repeat(160)}`;
+const namedTunnelId = '61355f59-342f-45e9-af9f-9607cfd4280a';
+const namedToken = Buffer.from(JSON.stringify({
+  a: '0123456789abcdef0123456789abcdef',
+  t: namedTunnelId,
+  s: Buffer.from('test-tunnel-secret-material-32bytes').toString('base64'),
+})).toString('base64url');
+const decodedNamed = localTunnelCredentialsFromToken(namedToken);
+check('connector token becomes local credentials without changing tunnel identity',
+  decodedNamed.tunnelId === namedTunnelId && JSON.parse(decodedNamed.contents).TunnelID === namedTunnelId);
+check('local credential diagnostics redact the derived tunnel secret',
+  !redactRemoteLinkDiagnostics(`TUNNEL_CRED_CONTENTS=${decodedNamed.contents}`).includes('test-tunnel-secret-material'));
+check('local named config has one exact Agent ingress and a deny catch-all',
+  localTunnelIngressConfig(namedTunnelId, 'pc1.example.com', 'http://127.0.0.1:8787').includes('hostname: "pc1.example.com"')
+  && localTunnelIngressConfig(namedTunnelId, 'pc1.example.com', 'http://127.0.0.1:8787').includes('service: http_status:404'));
 const namedChild = new FakeTunnelProcess(103);
 const namedCommands = new Map();
 const namedStorage = new Map();
 let spawnedArgs = [];
-let spawnedToken = '';
+let spawnedCredentials = '';
+let spawnedConfig = '';
+let spawnedConfigPath = '';
+const remoteRuntime = mkdtempSync(join(tmpdir(), 'mr-robot-remote-runtime-'));
 const namedPlugin = createRemoteLinkPlugin({
   findExecutable: () => 'fake-cloudflared',
   verifyExecutable: trustFakeCloudflared,
   protectSecret: (value) => `protected:${value}`,
   unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  runtimeDirectory: remoteRuntime,
   spawnProcess: (_executable, args, options) => {
     spawnedArgs = [...args];
-    spawnedToken = options.env?.TUNNEL_TOKEN ?? '';
+    spawnedCredentials = options.env?.TUNNEL_CRED_CONTENTS ?? '';
+    spawnedConfigPath = args[args.indexOf('--config') + 1] ?? '';
+    spawnedConfig = readFileSync(spawnedConfigPath, 'utf8');
     return namedChild;
   },
   fetchUrl: async () => new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } }),
@@ -191,7 +228,15 @@ check('named tunnel token is protected at rest and omitted from config responses
 const namedStart = namedCommands.get('remote-link.start')({});
 namedChild.stderr.write(`INF Registered tunnel connection connIndex=0 token=${namedToken}`);
 const namedStatus = await namedStart;
-check('named tunnel uses environment credential instead of process arguments', spawnedToken === namedToken && !spawnedArgs.join(' ').includes(namedToken));
+check('named tunnel uses local in-memory credentials instead of a remotely-managed token',
+  JSON.parse(spawnedCredentials).TunnelID === namedTunnelId
+  && !spawnedArgs.join(' ').includes(namedToken)
+  && !spawnedArgs.includes('--token')
+  && spawnedArgs.includes(namedTunnelId));
+check('named tunnel process is locked to one loopback Agent route plus catch-all 404',
+  spawnedConfig.includes('hostname: "pc1.example.com"')
+  && spawnedConfig.includes('service: "http://127.0.0.1:8787"')
+  && spawnedConfig.includes('service: http_status:404'));
 check('named tunnel exposes only the validated stable origin', namedStatus.publicUrl === 'https://pc1.example.com' && namedStatus.temporary === false);
 check('named tunnel status diagnostics never return the connector token', !String(namedStatus.diagnostics).includes(namedToken));
 const verifiedNamed = await namedCommands.get('remote-link.verify')({});
@@ -199,6 +244,7 @@ check('named tunnel verifies the public endpoint before pairing', verifiedNamed.
 const namedStop = Promise.resolve(namedCommands.get('remote-link.stop')({}));
 namedChild.close();
 await namedStop;
+check('ephemeral local tunnel config is removed when connector stops', !existsSync(spawnedConfigPath));
 const clearedNamed = await namedCommands.get('remote-link.config.set')({ ...savedNamed, clearTunnelToken: true });
 check('saved tunnel credential can be explicitly cleared', clearedNamed.hasTunnelToken === false && !namedStorage.get('config').tunnelTokenProtected);
 await namedPlugin.deactivate(namedContext);
@@ -213,6 +259,7 @@ const transientPlugin = createRemoteLinkPlugin({
   verifyExecutable: trustFakeCloudflared,
   protectSecret: (value) => `protected:${value}`,
   unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  runtimeDirectory: remoteRuntime,
   spawnProcess: () => transientQueue.shift(),
 });
 const transientContext = {
@@ -261,6 +308,7 @@ const failedQuickPlugin = createRemoteLinkPlugin({
   verifyExecutable: trustFakeCloudflared,
   protectSecret: (value) => `protected:${value}`,
   unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  runtimeDirectory: remoteRuntime,
   spawnProcess: () => { throw new Error('simulated Quick Link failure'); },
 });
 const failedQuickContext = {
@@ -278,6 +326,7 @@ const failedQuickError = await failedQuickStart;
 check('failed transient Quick Link leaves the saved named tunnel security configuration untouched',
   failedQuickError instanceof Error && JSON.stringify(failedQuickStorage.get('config')) === savedBeforeFailedQuick);
 await failedQuickPlugin.deactivate(failedQuickContext);
+rmSync(remoteRuntime, { recursive: true, force: true });
 
 const confineBase = mkdtempSync(join(tmpdir(), 'mr-robot-confine-'));
 const confineRoot = join(confineBase, 'root');
@@ -406,6 +455,12 @@ check('public Cloudflare enrollment rejects the ordinary six-digit PIN', proxied
 
 const bad = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: '000000' }) });
 check('wrong pin rejected', bad.status === 400);
+const malformedJson = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
+const malformedBody = await malformedJson.text();
+check('malformed JSON returns a bounded production error without stack or local paths',
+  malformedJson.status === 400
+  && malformedJson.headers.get('content-type')?.includes('application/json')
+  && !/<pre>|node_modules|[A-Z]:\\/i.test(malformedBody));
 
 const paired = await (
   await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: localPairing.pin }) })
@@ -451,11 +506,18 @@ let observedRestAuth;
 server.chatOnce = async (text, auth) => { observedRestAuth = auth; return { text }; };
 const restChat = await fetch(`${base}/api/chat`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json', 'x-mr-robot-token': readOnlyPaired.secret },
+  headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
   body: JSON.stringify({ text: 'REST auth bridge' }),
 });
 server.chatOnce = originalChatOnce;
-check('REST chat forwards paired permission context', restChat.status === 200 && observedRestAuth?.permissionCap === 'read-only' && observedRestAuth?.isAdmin === false);
+check('REST chat forwards paired permission context', restChat.status === 200 && observedRestAuth?.permissionCap === 'ask' && observedRestAuth?.isAdmin === false);
+const readOnlyRestChat = await fetch(`${base}/api/chat`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'x-mr-robot-token': readOnlyPaired.secret },
+  body: JSON.stringify({ text: 'must not spend provider tokens' }),
+});
+check('REST chat rejects read-only devices before model execution', readOnlyRestChat.status === 400
+  && /읽기 전용/.test(String((await readOnlyRestChat.json()).error ?? '')));
 const blockedPluginCall = await fetch(`${base}/api/plugins/call`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', 'x-mr-robot-token': paired.secret },
@@ -471,6 +533,7 @@ const limitedUpload = await fetch(`${base}/api/files/upload?path=${encodeURIComp
   body: 'must not be written by an ask/read-only device',
 });
 check('read-only paired device cannot mutate shared files', limitedUpload.status === 403);
+server.config.patchDeviceLink(paired.linkId, { capabilities: ['work-sync', 'file-transfer'] });
 const askSharedUpload = await fetch(`${base}/api/files/upload?path=${encodeURIComponent('smoke/paired-transfer.txt')}`, {
   method: 'PUT',
   headers: { 'content-type': 'application/octet-stream', 'x-mr-robot-token': paired.secret },
@@ -506,6 +569,20 @@ const directPull = await fetch(`${base}/api/files/pull`, {
   body: JSON.stringify({ sourceBase: base, sourceGrant: fileGrant, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/direct-copy.txt' }),
 });
 check('PC-to-PC endpoint performs direct stream pull', directPull.status === 200 && (await directPull.json()).transport === 'direct-device-stream');
+const blockedLanGrantResponse = await fetch(`${base}/api/transfers/grant`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ kind: 'file', path: 'smoke/direct-transfer.txt' }),
+});
+const blockedLanGrant = (await blockedLanGrantResponse.json()).grant;
+const blockedLanPull = await fetch(`${base}/api/files/pull`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
+  body: JSON.stringify({ sourceBase: 'http://192.168.10.20:8787', sourceGrant: blockedLanGrant, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/plain-lan-copy.txt' }),
+});
+const preservedBlockedGrant = await fetch(`${base}/api/files/download?path=${encodeURIComponent('smoke/direct-transfer.txt')}`, {
+  headers: { 'x-mr-robot-transfer': blockedLanGrant },
+});
+check('blocked plaintext-LAN pull never forwards or consumes its one-use grant', blockedLanPull.status === 400
+  && preservedBlockedGrant.status === 200 && await preservedBlockedGrant.text() === 'direct bytes without an AI call');
 const reusedGrantPull = await fetch(`${base}/api/files/pull`, {
   method: 'POST', headers: { 'content-type': 'application/json', 'x-mr-robot-token': server.secret },
   body: JSON.stringify({ sourceBase: base, sourceGrant: fileGrant, sourcePath: 'smoke/direct-transfer.txt', targetPath: 'smoke/direct-reuse.txt' }),
@@ -590,6 +667,48 @@ const rpc = (socket, method, params) =>
     socket.send(JSON.stringify({ id, method, params }));
   });
 
+const publicWsHeaders = (hostName, ray, clientIp) => ({
+  Host: hostName,
+  'CF-Ray': ray,
+  'CF-Connecting-IP': clientIp,
+});
+const issuePublicWsTicket = (secret, hostName, ray, clientIp) => new Promise((resolveTicket, rejectTicket) => {
+  // Node fetch intentionally owns the Host header. Use the low-level client so
+  // this loopback integration test reproduces the public tunnel authority that
+  // the browser/mobile client reaches over HTTPS in production.
+  const request = httpRequest(`${base}/api/ws-ticket`, {
+    method: 'POST',
+    headers: {
+      ...publicWsHeaders(hostName, ray, clientIp),
+      'x-mr-robot-token': secret,
+      accept: 'application/json',
+    },
+  }, (response) => {
+    const chunks = [];
+    response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    response.on('end', () => {
+      let ticket = {};
+      try { ticket = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* asserted by caller */ }
+      resolveTicket({ response: { status: response.statusCode ?? 0 }, ticket });
+    });
+  });
+  request.on('error', rejectTicket);
+  request.end();
+});
+const rejectedPublicWsStatus = (hostName, ray, clientIp, protocols) => new Promise((resolveStatus) => {
+  const socket = protocols
+    ? new WebSocket(`ws://127.0.0.1:${port}/ws`, protocols, { headers: publicWsHeaders(hostName, ray, clientIp) })
+    : new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: publicWsHeaders(hostName, ray, clientIp) });
+  const timer = setTimeout(() => { try { socket.terminate(); } catch {} resolveStatus(0); }, 1_500);
+  socket.once('unexpected-response', (_request, response) => {
+    clearTimeout(timer);
+    response.resume();
+    resolveStatus(response.statusCode ?? 0);
+  });
+  socket.once('open', () => { clearTimeout(timer); socket.close(); resolveStatus(101); });
+  socket.once('error', () => { /* unexpected-response carries the status */ });
+});
+
 const foreignOriginClosed = await new Promise((resolveClose, reject) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin: 'https://foreign.example' });
   const timer = setTimeout(() => resolveClose(0), 1_000);
@@ -610,10 +729,21 @@ const oversizedPreAuthClosed = new Promise((resolveClose) => {
 oversizedPreAuthWs.send(JSON.stringify({ id: 1, method: 'auth', params: { secret: 'x'.repeat(5_000) } }));
 check('WS accepts only one small text authentication frame before auth', await oversizedPreAuthClosed === 1008);
 
+const missingPublicTicketStatus = await rejectedPublicWsStatus(
+  'robot.v3s9er.com:443', 'abcd1234ef567893-icn', '203.0.113.13', undefined,
+);
+check('public Cloudflare WS is rejected before occupying an unauthenticated slot without a ticket', missingPublicTicketStatus === 401);
+
+const issuedCloudflareTicket = await issuePublicWsTicket(
+  paired.secret, 'robot.v3s9er.com:443', 'abcd1234ef567893-icn', '203.0.113.13',
+);
+check('authenticated HTTPS issues a short-lived WS protocol ticket', issuedCloudflareTicket.response.status === 200
+  && /^mr-robot-ticket\.[A-Za-z0-9_-]{43}$/.test(issuedCloudflareTicket.ticket.protocol ?? '')
+  && Number(issuedCloudflareTicket.ticket.expiresAt) > Date.now());
 const cloudflareNativeWs = await new Promise((resolveWs, reject) => {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, ['mr-robot-rpc-v1', issuedCloudflareTicket.ticket.protocol], {
     origin: 'https://robot.v3s9er.com:443',
-    headers: { Host: 'robot.v3s9er.com:443', 'CF-Ray': 'abcd1234ef567893-icn', 'CF-Connecting-IP': '203.0.113.13' },
+    headers: publicWsHeaders('robot.v3s9er.com:443', 'abcd1234ef567893-icn', '203.0.113.13'),
   });
   socket.on('open', () => resolveWs(socket));
   socket.on('error', reject);
@@ -621,11 +751,19 @@ const cloudflareNativeWs = await new Promise((resolveWs, reject) => {
 const cloudflareNativeAuth = await rpc(cloudflareNativeWs, 'auth', { secret: paired.secret });
 check('WS normalizes an explicit Cloudflare HTTPS default port', cloudflareNativeAuth.result?.ok === true);
 cloudflareNativeWs.close();
+const replayedPublicTicketStatus = await rejectedPublicWsStatus(
+  'robot.v3s9er.com:443', 'abcd1234ef567893-icn', '203.0.113.13',
+  ['mr-robot-rpc-v1', issuedCloudflareTicket.ticket.protocol],
+);
+check('public WS upgrade ticket is single-use', replayedPublicTicketStatus === 401);
 
+const issuedDesktopTicket = await issuePublicWsTicket(
+  paired.secret, 'robot.v3s9er.com', 'abcd1234ef567894-icn', '203.0.113.14',
+);
 const desktopControllerWs = await new Promise((resolveWs, reject) => {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, ['mr-robot-rpc-v1', issuedDesktopTicket.ticket.protocol], {
     origin: 'http://127.0.0.1:8787',
-    headers: { Host: 'robot.v3s9er.com', 'CF-Ray': 'abcd1234ef567894-icn', 'CF-Connecting-IP': '203.0.113.14' },
+    headers: publicWsHeaders('robot.v3s9er.com', 'abcd1234ef567894-icn', '203.0.113.14'),
   });
   socket.on('open', () => resolveWs(socket));
   socket.on('error', reject);

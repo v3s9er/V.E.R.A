@@ -3,7 +3,16 @@ import type { ChatUsage, ModelRole, PermissionMode, ReasoningEffort, RoutingNode
 import type { ProviderRegistry } from './registry.js';
 import { ToolExecutor, type ConfirmFn } from './executor.js';
 import { neutralTool } from './tools.js';
-import { parseToolArgs, type NeutralTool, type ProviderUsage, type Turn } from './provider.js';
+import {
+  parseToolArgs,
+  type AiProvider,
+  type ChatRequest,
+  type NativeAgentRequest,
+  type NeutralTool,
+  type ProviderResult,
+  type ProviderUsage,
+  type Turn,
+} from './provider.js';
 import type { ModelRouter } from './router.js';
 import type { ContextBroker } from '../context-broker.js';
 
@@ -44,6 +53,14 @@ export interface LoopCallbacks {
   signal?: AbortSignal;
   /** User instructions queued while the current run is in progress. */
   takeSteering?: () => string[];
+  /**
+   * Atomically reserve one real provider invocation inside the already
+   * admitted user run. A missing usage report keeps the reservation as debt.
+   */
+  reserveModelCall?: (
+    kind: 'api' | 'native',
+    maximumTokens: number,
+  ) => { finish(usage?: Pick<ChatUsage, 'promptTokens' | 'completionTokens'>): boolean };
 }
 
 export interface LoopResult {
@@ -69,6 +86,30 @@ export interface RunOptions {
 const MAX_STEPS = 16;
 const MAX_SCENARIO_NODES = 8;
 const MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS = 2;
+const MAX_PROVIDER_OUTPUT_TOKENS = 4_096;
+const PROVIDER_PROTOCOL_TOKEN_OVERHEAD = 8_192;
+
+/**
+ * Conservative upper bound for an API invocation. A tokenizer cannot emit
+ * more content tokens than the UTF-8 bytes carrying that content; the fixed
+ * allowance covers provider chat framing and tool-schema serialization.
+ */
+function providerCallMaximumTokens(request: ChatRequest): number {
+  const serialized = JSON.stringify({
+    system: request.system ?? '',
+    turns: request.turns,
+    tools: request.tools ?? [],
+  });
+  const inputUpperBound = Buffer.byteLength(serialized, 'utf8');
+  const outputUpperBound = Math.max(1, Math.min(
+    MAX_PROVIDER_OUTPUT_TOKENS,
+    Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
+  ));
+  return Math.min(
+    Number.MAX_SAFE_INTEGER,
+    inputUpperBound + outputUpperBound + PROVIDER_PROTOCOL_TOKEN_OVERHEAD,
+  );
+}
 
 function canonicalToolValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalToolValue);
@@ -160,6 +201,55 @@ export class AgentLoop {
     let previousToolRound = '';
     let consecutiveNoProgressRounds = 0;
 
+    const budgetedChat = async (actualProvider: AiProvider, request: ChatRequest): Promise<ProviderResult> => {
+      const boundedRequest: ChatRequest = {
+        ...request,
+        maxTokens: Math.max(1, Math.min(
+          MAX_PROVIDER_OUTPUT_TOKENS,
+          Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
+        )),
+      };
+      const callLease = cb.reserveModelCall?.('api', providerCallMaximumTokens(boundedRequest));
+      let settled = false;
+      try {
+        const result = await actualProvider.chat(boundedRequest);
+        settled = true;
+        const withinReservation = callLease?.finish(result.usage) ?? true;
+        addUsage(usage, result.usage);
+        if (!withinReservation) {
+          throw new Error('모델 공급자가 예약 상한보다 많은 토큰을 보고해 안전을 위해 작업을 중단했습니다.');
+        }
+        return result;
+      } catch (error) {
+        if (!settled) callLease?.finish();
+        throw error;
+      }
+    };
+
+    const budgetedNativeAgent = async (
+      actualProvider: AiProvider,
+      request: NativeAgentRequest,
+    ): Promise<ProviderResult> => {
+      if (!actualProvider.runAgent) throw new Error('이 모델은 네이티브 에이전트 실행을 지원하지 않습니다.');
+      // Native CLIs can fan out internally and often return zero usage. The
+      // admission lease therefore reserves all of this run's remaining budget.
+      const callLease = cb.reserveModelCall?.('native', Number.MAX_SAFE_INTEGER);
+      let settled = false;
+      try {
+        const result = await actualProvider.runAgent(request);
+        settled = true;
+        const withinReservation = callLease?.finish(result.usage) ?? true;
+        addUsage(usage, result.usage);
+        if (!withinReservation) {
+          throw new Error('네이티브 에이전트가 예약 상한보다 많은 토큰을 보고해 안전을 위해 작업을 중단했습니다.');
+        }
+        return result;
+      } catch (error) {
+        if (!settled) callLease?.finish();
+        throw error;
+      }
+    };
+
     if (!provider) {
       return {
         text: 'AI 제공자가 설정되어 있지 않습니다. 설정 화면에서 API 키를 추가해 주세요.',
@@ -222,14 +312,13 @@ export class AgentLoop {
       if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 의견을 내지 못했습니다.' };
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
       try {
-        const response = await stageProvider.chat({
+        const response = await budgetedChat(stageProvider, {
           system: identifiedSystem(system, stageProvider),
           turns: [{ role: 'user', content }],
           reasoningEffort: effortFor(stageProvider),
           signal: cb.signal,
           promptCacheKey: options.cacheKey ? `${options.cacheKey}:stage:${node.id}` : undefined,
         });
-        addUsage(usage, response.usage);
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: response.text };
       } catch (error) {
         if (cb.signal?.aborted) throw cb.signal.reason ?? error;
@@ -261,7 +350,7 @@ export class AgentLoop {
             break;
           }
           usedModels.add(`${stageProvider.label} / ${stageProvider.model}`);
-          const response = await stageProvider.chat({
+          const response = await budgetedChat(stageProvider, {
             system: identifiedSystem(system, stageProvider),
             turns: localTurns,
             tools: stageProvider.supportsTools ? allowedTools : undefined,
@@ -269,7 +358,6 @@ export class AgentLoop {
             signal: cb.signal,
             promptCacheKey: options.cacheKey ? `${options.cacheKey}:agent:${node.id}` : undefined,
           });
-          addUsage(usage, response.usage);
           if (response.text) collected = [collected, response.text].filter(Boolean).join('\n');
           if (response.toolCalls.length === 0) break;
           localTurns.push({ role: 'assistant', content: response.text, toolCalls: response.toolCalls });
@@ -301,10 +389,13 @@ export class AgentLoop {
       }
     };
 
-    // A selected subscription CLI is already a complete coding-agent harness.
-    // In direct mode, let it own its native tools instead of degrading it into
-    // an advisor for a second API model.
-    if (executionMode === 'single' && provider.runAgent && options.workspacePath) {
+    // Codex exposes a real OS workspace sandbox, so its native harness may run
+    // under read-only/workspace/full policy. Claude Code's acceptEdits mode is
+    // an approval policy rather than an OS boundary; keep Claude tool-less
+    // unless the user explicitly selected full machine access.
+    const requestedNativePermission = options.permissionMode ?? 'ask';
+    const nativeAllowedByPolicy = provider.type === 'codex-cli' || requestedNativePermission === 'full';
+    if (executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
       const nativeProvider = provider;
       let nativePermission = options.permissionMode ?? 'ask';
       if (nativePermission === 'ask') {
@@ -344,7 +435,7 @@ export class AgentLoop {
         if (!actualProvider?.runAgent) return undefined;
         const actualEffort = effortFor(actualProvider);
         cb.onStatus?.(`네이티브 에이전트 실행 · ${actualProvider.label} · ${options.workspacePath}`);
-        const result = await actualProvider.runAgent({
+        const result = await budgetedNativeAgent(actualProvider, {
           prompt: identifiedSystem(prompt, actualProvider),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
@@ -364,7 +455,6 @@ export class AgentLoop {
       let native = nativeCall.result;
       let actualNativeProvider = nativeCall.provider;
       let actualNativeEffort = nativeCall.effort;
-      addUsage(usage, native.usage);
       // Native CLIs cannot accept stdin steering reliably in print/exec mode.
       // Consume queued instructions immediately after each run and start a
       // compact continuation with the verified result, bounded to three passes.
@@ -385,7 +475,6 @@ export class AgentLoop {
         native = nativeCall.result;
         actualNativeProvider = nativeCall.provider;
         actualNativeEffort = nativeCall.effort;
-        addUsage(usage, native.usage);
       }
       turns.push({ role: 'assistant', content: native.text });
       cb.onText?.(native.text);
@@ -585,14 +674,13 @@ export class AgentLoop {
       let advice: Awaited<ReturnType<typeof requestedAdvisor.chat>> | undefined;
       if (adviceProvider) {
         cb.onStatus?.(`advisor:${adviceProvider.label}`);
-        advice = await adviceProvider.chat({
+        advice = await budgetedChat(adviceProvider, {
           system: identifiedSystem('Analyze the user request and produce a concise, concrete execution plan for another computer-use agent. Do not claim that any action has already happened.', adviceProvider),
           turns: [{ role: 'user', content: userMessage }],
           reasoningEffort: effortFor(adviceProvider),
           signal: cb.signal,
           promptCacheKey: options.cacheKey ? `${options.cacheKey}:advisor` : undefined,
         });
-        addUsage(usage, advice.usage);
       }
       const executorProvider = this.registry.toolCapable(provider.id);
       if (!executorProvider) {
@@ -647,7 +735,7 @@ export class AgentLoop {
         cb.onStatus?.(`model:${route.providerLabel}:${route.role}:${route.effort}`);
         reportedModel = modelKey;
       }
-      const res = await actualProvider.chat({
+      const res = await budgetedChat(actualProvider, {
         system: identifiedSystem(`${SYSTEM_PROMPT}${context}`, actualProvider),
         turns,
         tools,
@@ -658,7 +746,6 @@ export class AgentLoop {
           if (e.type === 'text') cb.onText?.(e.text);
         },
       });
-      addUsage(usage, res.usage);
 
       if (res.toolCalls.length === 0) {
         turns.push({ role: 'assistant', content: res.text });

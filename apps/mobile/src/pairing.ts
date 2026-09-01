@@ -1,14 +1,5 @@
 import type { PairingPayload } from './types';
 
-function isTailnetHost(hostname: string): boolean {
-  const octets = hostname.replace(/^\[|\]$/g, '').split('.').map(Number);
-  return octets.length === 4
-    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    && octets[0] === 100
-    && octets[1] >= 64
-    && octets[1] <= 127;
-}
-
 function securePairingOrigin(value: string, port: number, protocol: 'http' | 'https'): string {
   const input = value.trim();
   const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(input);
@@ -17,8 +8,10 @@ function securePairingOrigin(value: string, port: number, protocol: 'http' | 'ht
   if (parsed.username || parsed.password || (parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
     throw new Error('페어링 QR에는 origin 주소만 사용할 수 있습니다.');
   }
-  if (parsed.protocol !== 'https:' && !isTailnetHost(parsed.hostname)) {
-    throw new Error('페어링 QR은 Cloudflare HTTPS 원격 링크 또는 Tailscale 주소가 필요합니다.');
+  // Address-range membership is not transport authentication. A raw
+  // 100.64/10 HTTP route can be captured when the Tailscale adapter is down.
+  if (parsed.protocol !== 'https:') {
+    throw new Error('페어링 QR은 Cloudflare 또는 Tailscale Serve의 HTTPS 주소가 필요합니다.');
   }
   const resolvedPort = Number(parsed.port || (explicitScheme && parsed.protocol === 'https:' ? 443 : port));
   if (!Number.isInteger(resolvedPort) || resolvedPort < 1 || resolvedPort > 65_535) throw new Error('페어링 포트가 올바르지 않습니다.');

@@ -1128,6 +1128,12 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                       label="개인 근무 캘린더"
                       onChange={(enabled) => void setDeviceCapability(link.id, 'private-calendar', enabled)}
                     />
+                    <Toggle
+                      checked={link.capabilities?.includes('file-transfer') === true}
+                      disabled={capabilityBusyIds.has(link.id)}
+                      label="파일 업로드·다운로드"
+                      onChange={(enabled) => void setDeviceCapability(link.id, 'file-transfer', enabled)}
+                    />
                   </div>
                   <Button variant="danger" onClick={() => setDangerConfirm({ title: '기기 연결을 해제할까요?', message: `${link.name} 기기의 인증이 취소되며 다시 사용하려면 새 PIN 또는 QR로 연결해야 합니다.`, confirmLabel: '연결 해제', action: async () => { await client.call('pairing.link.revoke', { id: link.id }); await refresh(); } })}>연결 해제</Button>
                 </div>)}

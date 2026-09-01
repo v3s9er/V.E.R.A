@@ -41,3 +41,18 @@ export function isEncryptedTailnetTransport(
     && isTailnetAddress(normalizedLocal)
     && trustedLocalAddresses.has(normalizedLocal);
 }
+
+/**
+ * Plain HTTP is safe only when it never leaves the local process host or when
+ * the actual connected socket is carried by the Tailscale adapter. Merely
+ * seeing a 100.64/10 destination is not enough because ordinary LANs can use
+ * the same CGNAT range.
+ */
+export function isSecurePlainPeerTransport(
+  remote: string,
+  local: string,
+  trustedLocalAddresses: ReadonlySet<string> = tailscaleInterfaceAddresses(),
+): boolean {
+  return (isLoopback(remote) && isLoopback(local))
+    || isEncryptedTailnetTransport(remote, local, trustedLocalAddresses);
+}

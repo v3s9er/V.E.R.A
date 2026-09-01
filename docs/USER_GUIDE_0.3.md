@@ -33,7 +33,7 @@ Windows 설치 파일을 실행한 뒤 Mr.Robot을 켜면 PC 앱은 다른 기�
 
 QR 스캐너는 코드를 읽자마자 연결하지 않습니다. 유효한 Mr.Robot QR을 인식하면 카메라를 멈추고 QR에 들어 있는 모든 접속 후보를 보여 줍니다. 내용을 확인한 뒤 **인식한 PC에 연결**을 눌러야 PIN 교환과 저장이 시작됩니다. 다른 QR을 비춰도 스캐너는 계속 동작하며, **다시 스캔**으로 인식 후보를 버릴 수 있습니다.
 
-일반 Wi-Fi/LAN의 평문 HTTP 주소는 인증정보 노출을 막기 위해 사용할 수 없습니다. 휴대폰 VPN 없이 쓰려면 PC 플러그인에서 Cloudflare Quick Link 또는 고정 Tunnel을 시작하고 표시된 HTTPS 주소/QR을 등록하세요. Tailscale을 이미 쓰는 경우에는 PC의 사설 Mesh 수신을 켠 뒤 `100.64.0.0/10` 주소를 사용할 수 있습니다.
+평문 HTTP 주소는 인증정보 노출을 막기 위해 원격 앱에서 사용할 수 없습니다. 휴대폰 VPN 없이 쓰려면 PC 플러그인에서 Cloudflare Quick Link 또는 고정 Tunnel을 시작하고 표시된 HTTPS 주소/QR을 등록하세요. Tailscale을 쓰는 경우에도 숫자형 `100.64.0.0/10` 주소가 아니라 Tailscale Serve가 제공하는 HTTPS 이름을 사용합니다. 주소 대역만으로 실제 Tailscale 라우트를 증명할 수 없기 때문입니다.
 
 모바일 채팅 입력창은 키보드가 올라오면 함께 이동하고, 키보드가 열린 동안 하단 탭을 숨겨 입력 영역을 확보합니다. 다른 대화를 보고 있어도 실행 중인 대화별 상태가 분리되며, 실행 중지와 추가 지시가 원래 작업에만 전달됩니다.
 
@@ -43,21 +43,21 @@ QR 스캐너는 코드를 읽자마자 연결하지 않습니다. 유효한 Mr.R
 
 Tailscale은 선택 플러그인입니다. 금융 앱 때문에 휴대폰 VPN을 계속 켜기 불편하면 다음 흐름을 사용합니다.
 
-임시 연결은 PC 앱의 `플러그인 → Cloudflare Remote Link`에서 **Quick Tunnel**을 선택하고 `빠른 연결`을 누릅니다. cloudflared가 없으면 첫 실행 의존성 마법사 v5, 플러그인의 `cloudflared 설치` 버튼, 또는 첫 Quick Link 승인 중 하나가 Windows winget의 x64 사용자 범위 portable 패키지로 설치합니다. 설치에는 몇 분이 걸릴 수 있으며 앱은 완료까지 연결 버튼을 정상 대기 상태로 유지합니다. 표시된 HTTPS QR을 모바일에 등록합니다. PIN은 5분 동안 한 번만 쓸 수 있고 성공 즉시 새 PIN으로 바뀝니다.
+임시 연결은 PC 앱의 `플러그인 → Cloudflare Remote Link`에서 **Quick Tunnel**을 선택하고 `빠른 연결`을 누릅니다. cloudflared가 없으면 첫 실행 의존성 마법사 v5, 플러그인의 `cloudflared 설치` 버튼, 또는 첫 Quick Link 승인 중 하나가 Windows winget의 x64 사용자 범위 portable 패키지로 설치합니다. 설치에는 몇 분이 걸릴 수 있으며 앱은 완료까지 연결 버튼을 정상 대기 상태로 유지합니다. 외부 연결 검사가 끝난 뒤 **24시간·1회용 외출 코드 생성**을 명시적으로 눌러 12자리 코드가 든 HTTPS QR을 만든 다음 모바일에 등록합니다. 공개 Cloudflare 주소에서는 일반 6자리 PIN을 받지 않습니다.
 
 주소를 계속 유지하려면 같은 화면에서 **Cloudflare 고정 Tunnel**을 선택합니다.
 
 1. Cloudflare Networking → Tunnels에서 remotely-managed Tunnel을 만듭니다.
-2. Public Hostname을 `pc1.example.com`처럼 지정하고 Service URL을 플러그인에 표시된 `http://127.0.0.1:8787`로 설정합니다.
+2. Public Hostname을 `pc1.example.com`처럼 등록합니다. 앱은 실행 때 그 호스트 → 표시된 loopback Agent 한 경로와 catch-all 404를 로컬에서 강제합니다.
 3. 플러그인에 고정 호스트명과 Add a replica의 Tunnel 토큰을 입력합니다.
 4. `Mr.Robot 시작 시 자동 연결`을 켜고 저장한 뒤 `고정 Tunnel 연결`을 누릅니다.
 5. `외부 연결 검사`가 성공하면 QR을 모바일에 등록합니다.
 
-두 Cloudflare 방식 모두 휴대폰 VPN 없이 HTTPS/WSS로 연결합니다. Quick 주소는 재시작할 때 바뀌지만 고정 Tunnel은 사용자 도메인을 유지합니다. Tunnel 토큰은 Windows DPAPI로 암호화되고 상태·QR·로그·명령줄에 반환되지 않습니다. 자동 연결은 PC와 Mr.Robot이 실행 중일 때만 유효합니다. Cloudflare에서 토큰을 폐기하면 이 PC에서도 저장 토큰을 지우고 새 토큰을 등록하세요.
+두 Cloudflare 방식 모두 휴대폰 VPN 없이 HTTPS/WSS로 연결합니다. 인증된 앱은 HTTPS에서 30초·1회용 WebSocket 업그레이드 티켓을 자동으로 받아 연결하므로 별도 입력은 필요 없습니다. Quick 주소는 재시작할 때 바뀌지만 고정 Tunnel은 사용자 도메인을 유지합니다. Tunnel 토큰은 Windows DPAPI로 암호화되고, 실행 시에만 로컬 최소 권한 자격증명으로 변환되며 상태·QR·로그·명령줄에 반환되지 않습니다. 대시보드에 다른 origin 경로가 남아 있어도 이 Connector는 앱이 만든 단일 Agent ingress와 404 catch-all만 실행합니다. 자동 연결은 PC와 Mr.Robot이 실행 중일 때만 유효합니다. Cloudflare에서 토큰을 폐기하면 이 PC에서도 저장 토큰을 지우고 새 토큰을 등록하세요.
 
 외출 전에 새 휴대폰을 나중에 등록해야 한다면, 원격 링크가 실행 중인 상태에서 PC 관리자로 **24시간·1회용 외출 코드 생성**을 누릅니다. 이 12자리 코드는 PC에 저장되지 않고 실행 중인 Agent 메모리에만 있으며, 모바일의 PIN 입력란에 Quick Link 주소와 함께 입력할 수 있습니다. 한 기기가 연결하면 즉시 폐기되고 일반 6자리 PIN도 함께 바뀝니다. 반대로 일반 PIN 사용·재생성, 링크 중지, 앱/Agent 재시작, 또는 **즉시 폐기**도 외출 코드를 무효화합니다. 따라서 외출 중 연결하려면 PC와 Mr.Robot 및 cloudflared를 켜 둬야 하며, 코드는 비공개 저장소에만 보관하세요.
 
-Tailscale을 선호하면 플러그인에서 켠 뒤 PC·모바일을 같은 계정에 연결하면 됩니다. Mr.Robot의 파일 전송과 인증은 Tailscale 자체 파일 API가 아니라 동일한 Mr.Robot 프로토콜을 사용합니다.
+Tailscale을 선호하면 플러그인에서 켠 뒤 PC·모바일을 같은 계정에 연결하고, PC의 로컬 Mr.Robot 포트를 Tailscale Serve HTTPS로 공개한 이름을 앱에 등록합니다. Mr.Robot의 파일 전송과 인증은 Tailscale 자체 파일 API가 아니라 동일한 Mr.Robot 프로토콜을 사용하되, PIN과 기기 토큰은 반드시 TLS 안에서 전송됩니다.
 
 ## 5. 파일과 작업 동기화
 
@@ -69,7 +69,7 @@ Tailscale을 선호하면 플러그인에서 켠 뒤 PC·모바일을 같은 계
 - PC 1 → PC 2 직접 전송
 - 대화와 사용자 프리셋의 양방향 동기화
 
-PC 간 전송 때 소스 PC의 장기 인증 토큰을 대상 PC에 보내지 않습니다. 소스 PC가 파일 하나 또는 동기화 한 번에만 쓸 수 있는 90초짜리 1회성 전송권을 발급하고, 사용 즉시 폐기합니다. 작업 동기화는 기기별 `작업 동기화` 권한을 별도로 확인하며, 양쪽에서 같은 대화를 수정했다면 한쪽을 덮지 않고 `동기화 충돌 복사본`으로 보존합니다.
+PC 간 전송 때 소스 PC의 장기 인증 토큰을 대상 PC에 보내지 않습니다. 소스 PC가 파일 하나 또는 동기화 한 번에만 쓸 수 있는 90초짜리 1회성 전송권을 발급하고, 사용 즉시 폐기합니다. 평문 연결은 실제 loopback/Tailscale 경로로 검증하며, 사용자 도메인의 고정 HTTPS Tunnel은 DNS의 모든 응답이 공인 주소인지 확인한 뒤 한 주소에 고정하고 원래 도메인의 TLS 인증서를 검증합니다. 작업 동기화는 기기별 `작업 동기화` 권한을 별도로 확인하며, 양쪽에서 같은 대화를 수정했다면 한쪽을 덮지 않고 `동기화 충돌 복사본`으로 보존합니다.
 
 설정이나 대화 저장 중 PC가 꺼져 JSON이 손상되어도 원본 바이트를 `.corrupt-...` 파일로 격리하고 마지막 정상 백업에서 복구합니다. 특정 공급자의 DPAPI 키만 읽지 못할 때도 다른 공급자와 설정을 초기화하지 않으며, 해당 키만 다시 연결하도록 표시합니다.
 
@@ -105,10 +105,10 @@ CTF는 본인이 소유하거나 명시적으로 허가받은 문제·워게임 
 
 ## 9. 설치 파일
 
-- Windows x64: `release/Mr.Robot-Setup-0.3.7-x64.exe`
-- Android: 기존 릴리스 키로 `release/mobile/Mr.Robot-Mobile-0.3.7.apk` 생성
+- Windows x64: `release/Mr.Robot-Setup-0.3.8-x64.exe`
+- Android: 기존 릴리스 키로 `release/mobile/Mr.Robot-Mobile-0.3.8.apk` 생성
 
-0.2.1 이하 모바일 시험판은 Android 디버그 인증서로 서명됐고, 0.3.0부터는 Mr.Robot 전용 릴리스 인증서를 사용합니다. Android 보안 정책상 기존 시험판 위에 바로 덮어쓸 수 없으므로, 필요한 대화·프리셋을 먼저 PC와 동기화한 뒤 기존 앱을 한 번 제거하고 0.3.7을 설치해 다시 페어링하세요. 0.3.0~0.3.6 사용자는 같은 릴리스 키와 더 높은 versionCode 12를 사용하는 0.3.7로 바로 업데이트할 수 있습니다.
+0.2.1 이하 모바일 시험판은 Android 디버그 인증서로 서명됐고, 0.3.0부터는 Mr.Robot 전용 릴리스 인증서를 사용합니다. Android 보안 정책상 기존 시험판 위에 바로 덮어쓸 수 없으므로, 필요한 대화·프리셋을 먼저 PC와 동기화한 뒤 기존 앱을 한 번 제거하고 0.3.8을 설치해 다시 페어링하세요. 0.3.0~0.3.6 사용자는 같은 릴리스 키와 더 높은 versionCode 13을 사용하는 0.3.8로 바로 업데이트할 수 있습니다.
 
 현재 Windows 설치본은 상용 Authenticode 인증서가 없어 Windows SmartScreen 확인이 나올 수 있습니다. GitHub 공개 릴리스의 SHA-256과 내려받은 파일의 해시를 대조하세요. Android APK는 릴리스 키로 서명되며, 개발자는 `C:\Users\<사용자>\.mr-robot\signing`의 keystore와 DPAPI 보호 암호를 안전하게 백업해야 이후 업데이트를 같은 서명으로 배포할 수 있습니다. DPAPI 파일만 다른 PC로 복사해서는 복호화할 수 없습니다.
 

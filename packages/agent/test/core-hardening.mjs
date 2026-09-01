@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,14 +10,14 @@ const home = mkdtempSync(join(tmpdir(), 'mr-robot-core-hardening-'));
 process.env.MR_ROBOT_HOME = home;
 
 const { ChatSession } = await import(pathToFileURL(join(dist, 'server', 'chat.js')).href);
-const { cleanupDisconnectedClientState } = await import(pathToFileURL(join(dist, 'server', 'ws.js')).href);
+const { cleanupDisconnectedClientState, WsUpgradeTickets, webSocketTicketBinding } = await import(pathToFileURL(join(dist, 'server', 'ws.js')).href);
+const { FileTransferAdmission } = await import(pathToFileURL(join(dist, 'server', 'transfer-admission.js')).href);
 const { ContextBroker } = await import(pathToFileURL(join(dist, 'context-broker.js')).href);
 const { ToolExecutor } = await import(pathToFileURL(join(dist, 'ai', 'executor.js')).href);
 const { OpenAICompatibleProvider } = await import(pathToFileURL(join(dist, 'ai', 'openai.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
-const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
-const { serverEventAudience } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
-const { isEncryptedTailnetTransport, requiresSecureApiTransport } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
+const { AgentServer, ChatRunAdmissionPolicy, serverEventAudience } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
+const { fetchVerifiedPlainPeer, isEncryptedTailnetTransport, isPublicPeerAddress, isSecurePlainPeerTransport, normalizePeerBase, requiresSecureApiTransport } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
 const { ConfigStore } = await import(pathToFileURL(join(dist, 'config.js')).href);
 const { ConversationStore } = await import(pathToFileURL(join(dist, 'conversations.js')).href);
 
@@ -52,10 +53,152 @@ console.log('1b. API transport guard is case-variant safe');
     isEncryptedTailnetTransport('100.90.1.2', '100.101.2.3', new Set(['100.101.2.3'])) === true
     && isEncryptedTailnetTransport('100.90.1.2', '100.101.2.3', new Set()) === false
     && isEncryptedTailnetTransport('100.90.1.2', '192.168.1.10', new Set(['100.101.2.3'])) === false);
+  check('outbound plaintext peer sockets are fail-closed to loopback or the real Tailnet adapter',
+    isSecurePlainPeerTransport('127.0.0.1', '127.0.0.1') === true
+    && isSecurePlainPeerTransport('100.90.1.2', '100.101.2.3', new Set(['100.101.2.3'])) === true
+    && isSecurePlainPeerTransport('100.90.1.2', '100.101.2.3', new Set()) === false
+    && isSecurePlainPeerTransport('192.168.1.20', '192.168.1.10', new Set()) === false);
   check('mixed-case pairing route cannot bypass the guard', requiresSecureApiTransport('/API/pair') === true);
   check('mixed-case protected API route cannot bypass the guard', requiresSecureApiTransport('/Api/status') === true);
   check('only the public health probe is exempt', requiresSecureApiTransport('/API/PING') === false);
   check('non-API pages remain outside the API transport guard', requiresSecureApiTransport('/settings') === false);
+  check('named HTTPS tunnel domains are accepted as peer origins',
+    normalizePeerBase('https://robot.v3s9er.com').origin === 'https://robot.v3s9er.com');
+  check('public peer pinning rejects private, CGNAT, metadata, documentation and local IPv6 answers',
+    isPublicPeerAddress('104.16.1.2') === true
+    && isPublicPeerAddress('2606:4700::6810:102') === true
+    && isPublicPeerAddress('10.0.0.1') === false
+    && isPublicPeerAddress('100.64.0.1') === false
+    && isPublicPeerAddress('169.254.169.254') === false
+    && isPublicPeerAddress('203.0.113.8') === false
+    && isPublicPeerAddress('::1') === false
+    && isPublicPeerAddress('fd00::1') === false);
+  let plaintextDomainRejected = false;
+  try { normalizePeerBase('http://robot.v3s9er.com'); } catch { plaintextDomainRejected = true; }
+  check('named tunnel domains remain HTTPS-only', plaintextDomainRejected);
+  let mdnsDomainRejected = false;
+  try { normalizePeerBase('https://printer.local'); } catch { mdnsDomainRejected = true; }
+  check('mDNS names cannot bypass public DNS pinning', mdnsDomainRejected);
+}
+
+console.log('1bb. public WebSocket admission tickets are bound, expiring, and single-use');
+{
+  const localBinding = webSocketTicketBinding({
+    directRemote: '127.0.0.1', directLocal: '127.0.0.1', hostHeader: '127.0.0.1:8787',
+  });
+  const publicBinding = webSocketTicketBinding({
+    directRemote: '127.0.0.1', directLocal: '127.0.0.1', hostHeader: 'robot.example.com',
+    cloudflareConnectingIp: '203.0.113.20', cloudflareRay: '1234567890abcdef-icn',
+  });
+  check('direct Electron loopback stays ticket-free', localBinding.requiresTicket === false);
+  check('Cloudflare/public loopback route requires a ticket', publicBinding.requiresTicket === true
+    && publicBinding.source === 'cloudflare:203.0.113.20' && publicBinding.audience === 'robot.example.com');
+
+  const protocols = (ticket) => `mr-robot-rpc-v1, ${ticket.protocol}`;
+  const tickets = new WsUpgradeTickets(1_000);
+  const wrongSource = tickets.issue(publicBinding.source, publicBinding.audience, 'device:a', 10_000);
+  check('source mismatch is rejected and consumes the presented ticket',
+    tickets.consume(protocols(wrongSource), 'cloudflare:203.0.113.99', publicBinding.audience, 10_001) === null
+    && tickets.consume(protocols(wrongSource), publicBinding.source, publicBinding.audience, 10_002) === null);
+  const valid = tickets.issue(publicBinding.source, publicBinding.audience, 'device:a', 20_000);
+  check('valid ticket returns only its bound principal and cannot replay',
+    tickets.consume(protocols(valid), publicBinding.source, publicBinding.audience, 20_001) === 'device:a'
+    && tickets.consume(protocols(valid), publicBinding.source, publicBinding.audience, 20_002) === null);
+  const expired = tickets.issue(publicBinding.source, publicBinding.audience, 'device:a', 30_000);
+  check('expired ticket is rejected', tickets.consume(protocols(expired), publicBinding.source, publicBinding.audience, 31_001) === null);
+
+  const principalBound = new WsUpgradeTickets(30_000);
+  const outstanding = Array.from({ length: 8 }, (_, index) => principalBound.issue(`cloudflare:198.51.100.${index + 1}`, 'robot.example.com', 'device:stolen', 40_000));
+  let ninthPrincipalTicketBlocked = false;
+  try { principalBound.issue('cloudflare:198.51.100.99', 'robot.example.com', 'device:stolen', 40_001); } catch { ninthPrincipalTicketBlocked = true; }
+  check('one principal cannot evade outstanding-ticket limits by rotating source IPs',
+    ninthPrincipalTicketBlocked && outstanding.length === 8);
+
+  const rateBound = new WsUpgradeTickets(30_000);
+  for (let index = 0; index < 16; index++) {
+    const issued = rateBound.issue('cloudflare:203.0.113.8', 'robot.example.com', 'device:rate', 50_000 + index);
+    rateBound.consume(protocols(issued), 'cloudflare:203.0.113.8', 'robot.example.com', 50_000 + index);
+  }
+  let issueRateBlocked = false;
+  try { rateBound.issue('cloudflare:203.0.113.9', 'robot.example.com', 'device:rate', 50_020); } catch { issueRateBlocked = true; }
+  check('ticket consumption cannot bypass the per-principal issuance window', issueRateBlocked);
+
+  const globallyBound = new WsUpgradeTickets(30_000);
+  const firstGlobal = globallyBound.issue('cloudflare:192.0.2.1', 'robot.example.com', 'device:0', 60_000);
+  for (let index = 1; index < 512; index++) {
+    globallyBound.issue(`cloudflare:192.0.${Math.floor(index / 250) + 2}.${(index % 250) + 1}`, 'robot.example.com', `device:${index}`, 60_000);
+  }
+  let globalCapacityBlocked = false;
+  try { globallyBound.issue('cloudflare:203.0.113.250', 'robot.example.com', 'device:overflow', 60_001); } catch { globalCapacityBlocked = true; }
+  check('global capacity rejects overflow without evicting another principal ticket',
+    globalCapacityBlocked && globallyBound.consume(protocols(firstGlobal), 'cloudflare:192.0.2.1', 'robot.example.com', 60_002) === 'device:0');
+}
+
+console.log('1bc. verified plaintext peer responses preserve Fetch body boundaries');
+{
+  const peer = createServer((request, response) => {
+    const path = request.url ?? '/';
+    if (path === '/normal') {
+      response.writeHead(206, 'Partial Content', {
+        'content-type': 'application/octet-stream',
+        'content-length': '12',
+        'x-peer-boundary': 'preserved',
+      });
+      response.end('hello peer!\n');
+      return;
+    }
+    if (path === '/slow') return;
+    const status = Number(path.slice(1));
+    response.writeHead(status, { 'x-peer-boundary': String(status) });
+    // 205 can legally arrive with bytes from a non-conforming peer. The
+    // wrapper must still expose the Fetch-mandated null body without buffering.
+    response.end(status === 205 ? 'must-not-leak' : undefined);
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    peer.once('error', rejectListen);
+    peer.listen(0, '127.0.0.1', resolveListen);
+  });
+  const address = peer.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  try {
+    const normal = await fetchVerifiedPlainPeer(
+      new URL(`http://127.0.0.1:${port}/normal`),
+      { accept: 'application/octet-stream' },
+      AbortSignal.timeout(2_000),
+    );
+    check('ordinary peer response preserves status, headers, and streaming body',
+      normal.status === 206
+      && normal.statusText === 'Partial Content'
+      && normal.headers.get('x-peer-boundary') === 'preserved'
+      && await normal.text() === 'hello peer!\n');
+
+    for (const status of [204, 205, 304]) {
+      const response = await fetchVerifiedPlainPeer(
+        new URL(`http://127.0.0.1:${port}/${status}`),
+        {},
+        AbortSignal.timeout(2_000),
+      );
+      check(`${status} peer response resolves bodyless without an uncaught constructor error`,
+        response.status === status
+        && response.headers.get('x-peer-boundary') === String(status)
+        && response.body === null
+        && await response.text() === '');
+    }
+
+    const controller = new AbortController();
+    const pending = fetchVerifiedPlainPeer(
+      new URL(`http://127.0.0.1:${port}/slow`),
+      {},
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(new Error('peer request test abort')), 20);
+    let aborted = false;
+    try { await pending; } catch { aborted = true; }
+    check('verified peer request retains AbortSignal cancellation', aborted);
+  } finally {
+    peer.closeAllConnections();
+    await new Promise((resolveClose) => peer.close(resolveClose));
+  }
 }
 
 console.log('1c. server event visibility is fail-closed');
@@ -610,6 +753,219 @@ console.log('8. stored conversation permissions cannot exceed the linked device 
   check('ask devices cannot persist a full-permission conversation', created.permissionMode === 'ask' && updated.permissionMode === 'ask');
 }
 
+console.log('8b. model-run admission is shared, bounded, and failure-safe');
+{
+  let now = 10_000;
+  const policy = new ChatRunAdmissionPolicy({
+    now: () => now,
+    globalActive: 2,
+    linkedActive: 1,
+    adminActive: 2,
+    startWindowMs: 1_000,
+    globalStartsPerWindow: 20,
+    linkedStartsPerWindow: 10,
+    adminStartsPerWindow: 20,
+    tokenWindowMs: 1_000,
+    globalTokensPerWindow: 1_000,
+    linkedTokensPerWindow: 100,
+    adminTokensPerWindow: 1_000,
+    maxPrincipals: 2,
+  });
+  const linkedAuth = (id) => ({ isAdmin: false, linkId: id, permissionCap: 'ask' });
+  const first = policy.acquire(linkedAuth('one'));
+  let activeBlocked = false;
+  try { policy.acquire(linkedAuth('one')); } catch { activeBlocked = true; }
+  first.finish({ promptTokens: 60, completionTokens: 50 });
+  first.finish({ promptTokens: 999, completionTokens: 999 });
+  const afterFirst = policy.snapshot();
+  let tokenBlocked = false;
+  try { policy.acquire(linkedAuth('one')); } catch { tokenBlocked = true; }
+  check('linked active slots release idempotently and actual completed usage creates token debt',
+    activeBlocked && tokenBlocked && afterFirst.globalActive === 0 && afterFirst.globalTokens === 110);
+  now += 1_000;
+  const afterExpiry = policy.acquire(linkedAuth('one'));
+  afterExpiry.finish({ promptTokens: 0, completionTokens: 0 });
+  check('sliding start and token debt expire exactly at the configured boundary', policy.snapshot().globalActive === 0);
+
+  const secondIdentity = policy.acquire(linkedAuth('two'));
+  secondIdentity.finish({ promptTokens: 0, completionTokens: 0 });
+  let identityMapBlocked = false;
+  try { policy.acquire(linkedAuth('three')); } catch { identityMapBlocked = true; }
+  check('principal accounting map remains bounded and fails closed', identityMapBlocked && policy.snapshot().principalCount === 2);
+  const staleLease = policy.acquire(linkedAuth('one'));
+  policy.clear();
+  staleLease.finish({ promptTokens: 100, completionTokens: 100 });
+  check('clear resets counters and late completions cannot repopulate a stopped epoch',
+    JSON.stringify(policy.snapshot()) === JSON.stringify({ principalCount: 0, globalActive: 0, globalReserved: 0, globalStarts: 0, globalTokens: 0 }));
+}
+
+{
+  const auth = { isAdmin: false, linkId: 'parallel-budget', permissionCap: 'ask' };
+  const policy = new ChatRunAdmissionPolicy({
+    globalActive: 2,
+    linkedActive: 2,
+    adminActive: 2,
+    globalStartsPerWindow: 20,
+    linkedStartsPerWindow: 20,
+    adminStartsPerWindow: 20,
+    globalTokensPerWindow: 100,
+    linkedTokensPerWindow: 100,
+    adminTokensPerWindow: 100,
+  });
+  const first = policy.acquire(auth);
+  const second = policy.acquire(auth);
+  let thirdBlocked = false;
+  try { policy.acquire(auth); } catch { thirdBlocked = true; }
+  check('simultaneous jobs reserve the entire available token ceiling before any provider starts',
+    thirdBlocked && first.tokenBudget === 50 && second.tokenBudget === 50 && policy.snapshot().globalReserved === 100);
+  first.finish();
+  second.finish();
+  let debtBlocked = false;
+  try { policy.acquire(auth); } catch { debtBlocked = true; }
+  check('unknown failed runs convert their reservations to debt instead of becoming free',
+    debtBlocked && policy.snapshot().globalReserved === 0 && policy.snapshot().globalTokens === 100);
+}
+
+{
+  const auth = { isAdmin: false, linkId: 'incremental-budget', permissionCap: 'ask' };
+  const policy = new ChatRunAdmissionPolicy({
+    globalActive: 1,
+    linkedActive: 1,
+    adminActive: 1,
+    globalStartsPerWindow: 20,
+    linkedStartsPerWindow: 20,
+    adminStartsPerWindow: 20,
+    globalTokensPerWindow: 100,
+    linkedTokensPerWindow: 100,
+    adminTokensPerWindow: 100,
+  });
+  const partial = policy.acquire(auth);
+  const failedCall = partial.reserveModelCall('api', 30);
+  let parallelCallBlocked = false;
+  try { partial.reserveModelCall('api', 80); } catch { parallelCallBlocked = true; }
+  failedCall.finish();
+  partial.finish();
+  check('a failed provider invocation retains its conservative call reservation exactly once',
+    parallelCallBlocked && policy.snapshot().globalTokens === 30 && policy.snapshot().globalReserved === 0);
+  const successful = policy.acquire(auth);
+  const exactCall = successful.reserveModelCall('api', 40);
+  const within = exactCall.finish({ promptTokens: 6, completionTokens: 4 });
+  successful.finish({ promptTokens: 6, completionTokens: 4 });
+  check('successful calls replace their reservation with exact incremental usage',
+    within && policy.snapshot().globalTokens === 40);
+}
+
+{
+  const server = new AgentServer();
+  const handlers = server.handlers();
+  let providerCalls = 0;
+  server.loop.run = async () => {
+    providerCalls += 1;
+    return { text: 'unexpected', turns: [], usage: { promptTokens: 1, completionTokens: 1 } };
+  };
+  const readOnlyAuth = { isAdmin: false, linkId: 'strict-reader', permissionCap: 'read-only' };
+  const readOnlyClient = { id: 'strict-reader-client', state: { auth: readOnlyAuth, chat: new ChatSession() } };
+  const before = server.conversations.list().length;
+  let wsBlocked = false;
+  let restBlocked = false;
+  try { await handlers.get('chat.start')({ text: 'must not persist' }, readOnlyClient); } catch { wsBlocked = true; }
+  try { await server.chatOnce('must not call provider', readOnlyAuth); } catch { restBlocked = true; }
+  check('read-only WS and REST chat reject before provider use or retained-content mutation',
+    wsBlocked && restBlocked && providerCalls === 0 && server.conversations.list().length === before);
+}
+
+{
+  const server = new AgentServer();
+  server.chatRunAdmission = new ChatRunAdmissionPolicy({
+    globalActive: 4,
+    linkedActive: 1,
+    adminActive: 4,
+    globalStartsPerWindow: 100,
+    linkedStartsPerWindow: 100,
+    adminStartsPerWindow: 100,
+    globalTokensPerWindow: 1_000_000,
+    linkedTokensPerWindow: 1_000_000,
+    adminTokensPerWindow: 1_000_000,
+  });
+  const auth = { isAdmin: false, linkId: 'shared-budget-link', permissionCap: 'ask' };
+  const client = { id: 'shared-budget-ws', state: { auth, chat: new ChatSession() } };
+  const handlers = server.handlers();
+  let resolveRest;
+  server.loop.run = () => new Promise((resolveRun) => { resolveRest = resolveRun; });
+  const conversationsBeforeBlockedRun = server.conversations.list().length;
+  const restRun = server.chatOnce('hold REST slot', auth);
+  let wsWhileRestBlocked = false;
+  try { await handlers.get('chat.start')({ text: 'same principal over WS' }, client); } catch { wsWhileRestBlocked = true; }
+  const noConversationOnAdmissionFailure = server.conversations.list().length === conversationsBeforeBlockedRun;
+  resolveRest({ text: 'released', turns: [], usage: { promptTokens: 5, completionTokens: 3 } });
+  await restRun;
+
+  server.loop.run = async (_turns, text, callbacks) => {
+    const call = callbacks.reserveModelCall('api', 100);
+    if (text === 'provider failure') {
+      call.finish();
+      throw new Error('expected provider failure');
+    }
+    if (text === 'cancel me') {
+      return await new Promise((_resolveRun, rejectRun) => {
+        callbacks.signal.addEventListener('abort', () => {
+          call.finish();
+          rejectRun(callbacks.signal.reason ?? new Error('cancelled'));
+        }, { once: true });
+      });
+    }
+    call.finish({ promptTokens: 7, completionTokens: 2 });
+    return {
+      text: 'ok',
+      turns: [{ role: 'user', content: text }, { role: 'assistant', content: 'ok' }],
+      usage: { promptTokens: 7, completionTokens: 2 },
+    };
+  };
+  const afterRest = await handlers.get('chat.start')({ text: 'after REST release' }, client);
+  const failed = await handlers.get('chat.start')({ text: 'provider failure' }, client);
+  const cancelPromise = handlers.get('chat.start')({ text: 'cancel me' }, client);
+  const cancelId = client.state.chat.conversationId;
+  handlers.get('chat.cancel')({ conversationId: cancelId }, client);
+  const cancelled = await cancelPromise;
+  const recovered = await handlers.get('chat.start')({ text: 'after failure and cancel' }, client);
+  check('REST and WS share a principal active budget without mutating on rejection',
+    wsWhileRestBlocked && noConversationOnAdmissionFailure && afterRest.ok === true);
+  check('failure and cancellation release the shared active counter for the next run',
+    failed.ok === false && cancelled.ok === false && recovered.ok === true && server.chatRunAdmission.snapshot().globalActive === 0);
+}
+
+console.log('8c. HTTP transfer admission is concurrent-safe and byte-bounded');
+{
+  const policy = new FileTransferAdmission({
+    globalActive: 2,
+    principalActive: 1,
+    windowMs: 1_000,
+    globalBytes: 100,
+    principalBytes: 60,
+    maxPrincipals: 4,
+  });
+  const first = policy.acquire('device:a', 60, 10_000);
+  let samePrincipalBlocked = false;
+  try { policy.acquire('device:a', 1, 10_000); } catch { samePrincipalBlocked = true; }
+  const second = policy.acquire('device:b', 40, 10_000);
+  let globalActiveBlocked = false;
+  try { policy.acquire('device:c', 1, 10_000); } catch { globalActiveBlocked = true; }
+  check('parallel reservations cannot exceed per-device or global active limits',
+    samePrincipalBlocked && globalActiveBlocked && policy.snapshot().active === 2 && policy.snapshot().reserved === 100);
+  first.settle(20, 10_100);
+  second.settle(40, 10_100);
+  let debtBlocked = false;
+  try { policy.acquire('device:a', 41, 10_100); } catch { debtBlocked = true; }
+  const within = policy.acquire('device:a', 40, 10_100);
+  within.settle(5, 10_200);
+  check('settlement replaces reservations with actual rolling byte debt exactly once',
+    debtBlocked && policy.snapshot().active === 0 && policy.snapshot().reserved === 0 && policy.snapshot().bytes === 65);
+  const afterExpiry = policy.acquire('device:a', 60, 11_201);
+  afterExpiry.settle(0, 11_201);
+  check('rolling transfer debt expires and idle principal state remains bounded',
+    policy.snapshot().active === 0 && policy.snapshot().reserved === 0 && policy.snapshot().bytes === 0);
+}
+
 console.log('9. cross-PC sync validates both stores and preserves local access decisions');
 {
   const server = new AgentServer();
@@ -779,7 +1135,17 @@ console.log('10. PIN pairing gets narrow work sync without control-plane adminis
   check('short PIN grants at most ask and never administrator', paired.ok === true && auth?.permissionCap === 'ask' && auth.isAdmin === false);
   if (paired.linkId && paired.secret) {
     const defaultLink = server.config.deviceLinks.find((link) => link.id === paired.linkId);
-    check('default ask pairing receives only the dedicated work-sync capability', defaultLink?.capabilities.includes('work-sync') === true && server.isSyncSecret(paired.secret) === true);
+    check('default ask pairing receives work sync but never implicit file transfer', defaultLink?.capabilities.includes('work-sync') === true
+      && defaultLink?.capabilities.includes('file-transfer') !== true
+      && server.isSyncSecret(paired.secret) === true
+      && server.fileAccess(paired.secret, false) === false
+      && server.sharedFileAccess(paired.secret, true) === false);
+    server.config.patchDeviceLink(paired.linkId, { permissionCap: 'ask', capabilities: ['work-sync', 'file-transfer'] });
+    check('explicit file capability allows bounded shared transfer but not workspace mutation at ask',
+      server.sharedFileAccess(paired.secret, false) === true
+      && server.sharedFileAccess(paired.secret, true) === true
+      && server.fileAccess(paired.secret, false) === true
+      && server.fileAccess(paired.secret, true) === false);
     server.config.patchDeviceLink(paired.linkId, { permissionCap: 'full', capabilities: [] });
     check('full tool permission alone cannot grant work sync', server.isSyncSecret(paired.secret) === false && server.isAdminSecret(paired.secret) === false);
     server.config.patchDeviceLink(paired.linkId, { permissionCap: 'ask', capabilities: ['work-sync'] });

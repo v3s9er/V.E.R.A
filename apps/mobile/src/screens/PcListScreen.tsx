@@ -75,7 +75,7 @@ export function PcListScreen({
       return false;
     }
     const candidates = connectionOrigins(pc);
-    let lastError = '보안 접속 주소가 없습니다. PC에서 Quick Link를 시작하거나 Tailscale 주소로 다시 등록하세요.';
+    let lastError = 'HTTPS 접속 주소가 없습니다. PC에서 Cloudflare 또는 Tailscale Serve 주소로 다시 등록하세요.';
     for (let index = 0; index < candidates.length; index++) {
       if (!isCurrent()) return false;
       const candidateOrigin = candidates[index];
@@ -341,7 +341,7 @@ export function PcListScreen({
               placeholderTextColor={colors.faint}
             />
             <Text style={styles.label}>PC 주소</Text>
-            <Text style={styles.addressHelp}>PC 플러그인의 Quick Link HTTPS 주소를 입력하세요. Tailscale을 쓰는 경우에만 100.64/10 주소를 사용할 수 있습니다. 일반 HTTP LAN 주소는 차단됩니다.</Text>
+            <Text style={styles.addressHelp}>PC 플러그인의 Cloudflare HTTPS 주소를 입력하세요. Tailscale은 Serve로 만든 HTTPS 주소만 지원하며, 숫자형 100.64/10 및 일반 HTTP 주소는 차단됩니다.</Text>
             <TextInput
               style={styles.input}
               value={hostPort}

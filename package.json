@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",
@@ -22,7 +22,7 @@
     "notices": "node scripts/third-party-notices.mjs",
     "stage:desktop": "npm run build && node scripts/stage-desktop.mjs",
     "build:installer": "npm run stage:desktop && electron-builder --projectDir packages/desktop --config electron-builder.json --win nsis --x64 --publish never",
-    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && tsx packages/agent/test/qr-security.ts && tsx packages/agent/test/calendar/calendar-sources.test.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs && npm run test:privacy --prefix apps/mobile",
+    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && node packages/agent/test/pairing-secret-storage.mjs && node packages/agent/test/mcp-environment-storage.mjs && node packages/agent/test/desktop-auth-boundary.mjs && tsx packages/agent/test/qr-security.ts && tsx packages/agent/test/calendar/calendar-sources.test.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && tsx packages/web/test/pcs-storage.test.ts && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs && npm run test:privacy --prefix apps/mobile",
     "test:leak": "node --expose-gc packages/agent/test/leak.mjs"
   },
   "devDependencies": {

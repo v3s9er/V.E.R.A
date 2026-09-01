@@ -663,7 +663,7 @@ export function PluginsView() {
               </div>
               <div className={remoteConfig.provider === 'cloudflare-named' ? 'remote-link-notice' : 'dependency-warning'}>
                 {remoteConfig.provider === 'cloudflare-named'
-                  ? '고정 Tunnel은 Cloudflare 계정에 등록한 도메인을 계속 사용합니다. Agent는 loopback에만 남고 cloudflared가 outbound 연결하며, 모든 요청은 Mr.Robot 기기 토큰과 권한 상한을 다시 검사합니다.'
+                  ? '고정 Tunnel은 Cloudflare 계정에 등록한 도메인을 계속 사용합니다. 앱은 Connector 토큰을 로컬 최소 권한 자격증명으로 바꾸고 지정 호스트 → loopback Agent 한 경로만 허용하며 나머지는 404로 차단합니다.'
                   : 'Cloudflare Quick Tunnel은 테스트·개발용 임시 기능입니다. 주소는 다시 시작할 때 바뀌므로 필요한 동안만 켜고 페어링 PIN·기기 토큰을 외부에 공유하지 마세요.'}
               </div>
               <div className="form-grid">
@@ -676,8 +676,8 @@ export function PluginsView() {
               </div>
               {remoteConfig.provider === 'cloudflare-named' && <div className="named-tunnel-setup">
                 <b>Cloudflare에서 한 번만 준비</b>
-                <ol><li>Networking → Tunnels에서 Tunnel을 만듭니다.</li><li>Public Hostname을 위 주소로 만들고 Service를 <code>{remoteConfig.localUrl}</code>로 지정합니다.</li><li>Add a replica에 표시되는 <code>cloudflared … --token eyJ…</code>의 토큰 부분만 붙여넣습니다.</li></ol>
-                <p>토큰은 Windows DPAPI로 암호화되어 현재 Windows 사용자만 복호화할 수 있고, 상태 화면·QR·로그·명령줄에는 반환하지 않습니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
+                <ol><li>Networking → Tunnels에서 이 PC 전용 Tunnel을 만듭니다.</li><li>Public Hostname을 위 주소로 등록합니다.</li><li>Add a replica에 표시되는 <code>cloudflared … --token eyJ…</code>의 토큰 부분만 붙여넣습니다.</li></ol>
+                <p>토큰은 Windows DPAPI로 암호화됩니다. 실행 때만 메모리에서 로컬 자격증명으로 바꾸며, 앱이 만든 정확한 호스트·loopback 경로와 404 catch-all을 사용하므로 대시보드의 다른 origin 경로를 이 Connector가 실행하지 않습니다. 상태·QR·로그·명령줄에는 비밀을 반환하지 않습니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
               </div>}
               <p className="panel-hint">이 방식은 시스템 VPN을 만들지 않고 cloudflared 프로세스 하나가 loopback Agent로 outbound 연결합니다. 일반적으로 금융 앱의 VPN 감지에는 영향을 주지 않지만, 기기·앱별 보안 정책은 다를 수 있습니다.</p>
               {!cloudflared?.installed && <div className="dependency-warning">cloudflared가 없습니다. 아래 설치 버튼 또는 첫 연결 승인 시 Windows winget 사용자 범위로 설치하며 다음 연결에서도 재사용합니다.</div>}

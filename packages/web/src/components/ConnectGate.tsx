@@ -191,12 +191,17 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       };
       const next = upsertPc(await loadPcsForEnvironment(), pc);
       await savePcsForEnvironment(next);
-      setPcs(next);
+      // Electron consumes the short-lived opaque enrollment reference during
+      // save and returns a vault-backed PC id. Reload before connecting so no
+      // long-lived device token ever enters renderer state.
+      const securedNext = window.mrRobotDesktop ? await loadPcsForEnvironment() : next;
+      setPcs(securedNext);
       setName('');
       setHostPort('');
       setPin('');
       setShowAdd(false);
-      const saved = next.find((item) => connectionOrigins(item).includes(endpoint.origin)) ?? next[next.length - 1];
+      const saved = securedNext.find((item) => connectionOrigins(item).includes(endpoint.origin)) ?? securedNext[securedNext.length - 1];
+      if (!saved) throw new Error('저장된 PC 연결 정보를 다시 불러오지 못했습니다.');
       await connectTo(saved);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -53,6 +53,7 @@ const mobileHome = read('apps/mobile/src/screens/HomeScreen.tsx');
 const mobilePcList = read('apps/mobile/src/screens/PcListScreen.tsx');
 const mobilePcsRegistry = read('apps/mobile/src/pcs.ts');
 const mobileRpc = read('apps/mobile/src/pairing.ts');
+const mobileRpcClient = read('apps/mobile/src/rpc.ts');
 const mobileAppConfig = read('apps/mobile/app.json');
 const webRpc = read('packages/web/src/rpc.ts');
 const mobileManifest = read('apps/mobile/android/app/src/main/AndroidManifest.xml');
@@ -100,6 +101,9 @@ if (!routingGraph.includes('graph-health') || !routingGraph.includes('orphanNode
 if (!css.includes('.routing-group-bubble') || !css.includes('.graph-edge.selected') || !css.includes('stroke: #766dff !important')) throw new Error('routing groups and persistent edges lack visual design contracts');
 if (!pcsRegistry.includes('connectionOrigins') || !pcsRegistry.includes('activeOrigin') || !pcsRegistry.includes('originForDiscoveredHost')) throw new Error('desktop registry does not preserve per-address origins for LAN/HTTPS fallback');
 if (!pcsRegistry.includes('if (!result.ok) throw') || pcsRegistry.includes("loadPcs().catch(() => []")) throw new Error('secure desktop registry failures can be mistaken for an empty registry');
+if (!pcsRegistry.includes('sessionStorage.setItem(KEY')
+  || !pcsRegistry.includes('localStorage.removeItem(KEY)')
+  || pcsRegistry.includes('localStorage.setItem(KEY')) throw new Error('browser bearer registry can persist beyond the current tab session');
 if (!connectGate.includes('clientOwner') || !connectGate.includes('ownsClient()') || !connectGate.includes('if (!isCurrent() || !ownsClient()) return false')) throw new Error('connection gate lacks attempt-scoped client ownership guards');
 if (!connectGate.includes('const desktopLocalMode = Boolean(window.mrRobotDesktop && !preferredPc && !manageConnections)')
   || !connectGate.includes('if (desktopLocalMode)')
@@ -133,9 +137,11 @@ if (!pluginsView.includes('mountedRef.current') || !pluginsView.includes('remote
 if (!pluginsView.includes("value=\"cloudflare-named\"") || !pluginsView.includes('고정 공개 호스트명') || !pluginsView.includes('Cloudflare Tunnel 토큰')) throw new Error('named Cloudflare Tunnel cannot be configured directly from the plugin UI');
 if (!pluginsView.includes('clearRemoteTunnelToken') || !pluginsView.includes("name: 'remote-link.verify'") || !pluginsView.includes('Windows DPAPI')) throw new Error('named Tunnel credential lifecycle or public endpoint verification is missing from the UI');
 if (!remoteLink.includes('protectSecret') || !remoteLink.includes('redactRemoteLinkDiagnostics') || !remoteLink.includes('TUNNEL_TOKEN') || remoteLink.includes("'--token', tunnelToken")) throw new Error('named Tunnel token is not protected from storage, diagnostics, and process arguments');
-if (!desktopMain.includes('assertTrustedRenderer(event)') || !desktopMain.includes("redirect: 'error'") || !desktopMain.includes('registeredAllowed') || !desktopMain.includes('MAX_DESKTOP_DOWNLOAD_BYTES')) throw new Error('desktop IPC/download trust boundary can leak a remote token or accept an unbounded redirect');
+if (!remoteLink.includes('localTunnelCredentialsFromToken') || !remoteLink.includes('service: http_status:404') || !remoteLink.includes('cloudflaredEnvironment')) throw new Error('named Tunnel can fall back to remotely-managed extra routes or inherit unrelated credentials');
+if (!desktopMain.includes('assertTrustedRenderer(event)') || !desktopMain.includes("redirect: 'error'") || !desktopMain.includes('resolveDesktopCredential(token, parsed.origin)') || !desktopMain.includes('MAX_DESKTOP_DOWNLOAD_BYTES')) throw new Error('desktop IPC/download trust boundary can leak a remote token or accept an unbounded redirect');
 if (!remoteLink.includes('normalizeNamedTunnelHostname') || !remoteLink.includes('readSmallJson') || !remoteLink.includes("redirect: 'error'")) throw new Error('named Tunnel hostname or verification response is not tightly validated');
 if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"') || !mobileAppConfig.includes('"softwareKeyboardLayoutMode": "resize"') || !mobileHome.includes('!keyboardVisible') || !mobileChat.includes("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}") || !mobileChat.includes('paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
+if (!mobileManifest.includes('android:usesCleartextTraffic="false"') || !mobileAppConfig.includes('"usesCleartextTraffic": false')) throw new Error('Android release can regress to sending device credentials over cleartext HTTP');
 if (!mobileChat.includes('controlBar') || !mobileChat.includes('🤖 단일 모델 선택') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
 if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
@@ -159,12 +165,21 @@ if (!mobileChat.includes('const defaultProvider = providers.find((provider) => p
   || !mobileChat.includes('applyConversationConfiguration(conversationId')
   || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile model, preset, workspace, access, or default-provider settings can race command execution');
 if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyboardShouldPersistTaps="handled"')) throw new Error('mobile PC setup form cannot scroll above the keyboard');
-if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 보안 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
+if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 HTTPS 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
 if (mobileRpc.includes('obj.secret') || mobilePcList.includes('payload.secret') || webRpc.includes('obj.secret')) throw new Error('legacy QR payloads can still import a long-lived device secret');
 if (!mobileRpc.includes("obj.version !== 3") || !webRpc.includes("obj.version !== 3")
   || !mobileRpc.includes("/^(?:\\d{6}|\\d{12})$/.test(obj.pin)") || !webRpc.includes("/^(?:\\d{6}|\\d{12})$/.test(obj.pin)")) throw new Error('QR pairing is not restricted to v3 six- or twelve-digit one-time code payloads');
 if (!mobileRpc.includes('pairingOrigins(payload)') || !mobileRpc.includes('securePairingOrigin')
-  || !webRpc.includes('assertSecurePairingHost')) throw new Error('QR import does not enforce HTTPS or Tailscale origins consistently');
+  || !webRpc.includes('assertSecurePairingHost')) throw new Error('QR import does not enforce HTTPS origins consistently');
+if (mobilePcsRegistry.includes('isTailnetHost') || mobileRpc.includes('isTailnetHost')
+  || pcsRegistry.includes('isTailnetHost') || webRpc.includes('isTailnetHost')
+  || !mobilePcsRegistry.includes("parsed.protocol !== 'https'")
+  || !pcsRegistry.includes("endpoint.protocol !== 'https' && !isLoopbackHost(endpoint.host)")) {
+  throw new Error('raw 100.64/10 HTTP can be mistaken for an authenticated Tailscale route');
+}
+if (![webRpc, mobileRpcClient].every((source) => source.includes('/api/ws-ticket')
+  && source.includes('WS_UPGRADE_TICKET_PROTOCOL_PREFIX')
+  && source.includes('new WebSocket(url, protocols)'))) throw new Error('public WebSocket clients can regress to unauthenticated upgrade admission');
 if (!mobilePcList.includes('scanLockRef.current = true')
   || !mobilePcList.includes('setDetectedPayload(payload)')
   || !mobilePcList.includes('이 PC에 연결')

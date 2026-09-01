@@ -118,9 +118,12 @@ try {
 
   Push-Location $androidRoot
   try {
-    & .\gradlew.bat assembleRelease
+    # Signing passwords are supplied only to this short-lived process. Avoid a
+    # reusable Gradle daemon retaining them in its inherited environment.
+    & .\gradlew.bat --no-daemon assembleRelease
     if ($LASTEXITCODE -ne 0) { throw "Android release build failed: exit $LASTEXITCODE" }
   } finally {
+    & .\gradlew.bat --stop 2>&1 | Out-Null
     Pop-Location
   }
 } finally {

@@ -47,7 +47,7 @@ export function parsePcAddress(raw: string, defaultPort = 8787, defaultProtocol:
   if (!['http', 'https', 'ws', 'wss'].includes(scheme)) throw new Error('PC 주소는 http, https, ws 또는 wss 주소여야 합니다.');
   const protocol: PcProtocol = scheme === 'https' || scheme === 'wss' ? 'https' : 'http';
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  const port = url.port ? Number(url.port) : (/^[a-z][a-z\d+.-]*:\/\//i.test(value) && protocol === 'https' ? 443 : defaultPort);
+  const port = url.port ? Number(url.port) : (protocol === 'https' ? 443 : defaultPort);
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('PC 주소 또는 포트가 올바르지 않습니다.');
   }
@@ -62,20 +62,15 @@ export function originFromParts(protocol: PcProtocol, host: string, port: number
   return `${protocol}://${formatHostPort(host.replace(/^\[|\]$/g, ''), port)}`;
 }
 
-function isTailnetHost(host: string): boolean {
-  const octets = host.replace(/^\[|\]$/g, '').split('.').map(Number);
-  return octets.length === 4
-    && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    && octets[0] === 100
-    && octets[1] >= 64
-    && octets[1] <= 127;
-}
-
-/** Mobile credentials may travel only through HTTPS/WSS or Tailscale. */
+/** Mobile credentials may travel only through authenticated TLS. */
 export function assertSecureRemoteOrigin(value: string): string {
-  const parsed = parsePcAddress(value);
-  if (parsed.protocol !== 'https' && !isTailnetHost(parsed.host)) {
-    throw new Error('평문 Wi-Fi/LAN 연결은 보안을 위해 차단됩니다. PC에서 Cloudflare HTTPS 원격 링크를 시작하거나 Tailscale 주소를 사용하세요.');
+  // A literal 100.64/10 address does not prove that the active route belongs
+  // to Tailscale. If the VPN is down, another route could receive the PIN or
+  // bearer token in plaintext. Bare remote hostnames therefore default to
+  // HTTPS and every non-TLS origin is rejected.
+  const parsed = parsePcAddress(value, 8787, 'https');
+  if (parsed.protocol !== 'https') {
+    throw new Error('평문 원격 연결은 보안을 위해 차단됩니다. Cloudflare 또는 Tailscale Serve의 HTTPS 주소를 사용하세요.');
   }
   return parsed.origin;
 }
@@ -102,7 +97,7 @@ export function connectionOrigins(pc: SavedPc): string[] {
 
 export function httpBaseForPc(pc: SavedPc): string {
   const origin = connectionOrigins(pc)[0];
-  if (!origin) throw new Error('이 PC에 보안 접속 주소가 없습니다. Quick Link 또는 Tailscale로 다시 등록하세요.');
+  if (!origin) throw new Error('이 PC에 HTTPS 접속 주소가 없습니다. Cloudflare 또는 Tailscale Serve 주소로 다시 등록하세요.');
   return origin;
 }
 

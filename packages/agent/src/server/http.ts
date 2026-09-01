@@ -1,7 +1,10 @@
-import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { isIP } from 'node:net';
+import { createConnection, isIP, type Socket } from 'node:net';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
@@ -16,39 +19,64 @@ import type {
   WorkspaceInfo,
 } from '@mr-robot/shared';
 import { mrRobotHome } from '../config.js';
-import type { AuthContext } from './ws.js';
-import { isEncryptedTailnetTransport, isLoopback, isTailnetAddress } from './transport.js';
+import { authPrincipal, webSocketTicketBinding, WsUpgradeTicketAdmissionError, type AuthContext, type WsUpgradeTickets } from './ws.js';
+import { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress, tailscaleInterfaceAddresses } from './transport.js';
+import { FileTransferAdmission, FileTransferAdmissionError, type FileTransferLease } from './transfer-admission.js';
 
-export { isEncryptedTailnetTransport, isLoopback, isTailnetAddress } from './transport.js';
+export { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress } from './transport.js';
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_PUBLIC_FILE_BYTES = 96 * 1024 * 1024;
 const MAX_SYNC_BYTES = 64 * 1024 * 1024;
+const MIN_FREE_DISK_BYTES = 2 * 1024 * 1024 * 1024;
+const SHARED_ROOT_QUOTA_BYTES = 10 * 1024 * 1024 * 1024;
+const MAX_STORAGE_SCAN_ENTRIES = 100_000;
+const DISK_RECHECK_BYTES = 16 * 1024 * 1024;
 const PAIR_WINDOW_MS = 5 * 60_000;
 const PAIR_MAX_FAILURES = 5;
 const TRANSFER_GRANT_TTL_MS = 90_000;
 const MAX_TRANSFER_GRANTS = 1_024;
+const MAX_TRANSFER_GRANTS_PER_PRINCIPAL = 16;
+const TRANSFER_GRANT_ISSUE_WINDOW_MS = 10_000;
+const MAX_TRANSFER_GRANT_ISSUES_PER_WINDOW = 32;
 
 type TransferGrant = {
   kind: 'file' | 'sync';
   path?: string;
+  principal: string;
   expiresAt: number;
 };
 
 class PayloadTooLargeError extends Error {}
+class InsufficientStorageError extends Error {}
 
-export function createByteLimitStream(maxBytes: number, message: string): Transform {
+export type MeteredByteLimitStream = Transform & { readonly transferredBytes: number };
+
+export function createByteLimitStream(maxBytes: number, message: string, diskGuard?: () => void): MeteredByteLimitStream {
   let bytes = 0;
-  return new Transform({
+  let nextDiskCheck = DISK_RECHECK_BYTES;
+  const stream = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       bytes += chunk.length;
       if (bytes > maxBytes) {
         callback(new PayloadTooLargeError(message));
         return;
       }
+      if (diskGuard && bytes >= nextDiskCheck) {
+        try {
+          diskGuard();
+          while (nextDiskCheck <= bytes) nextDiskCheck += DISK_RECHECK_BYTES;
+        } catch (error) {
+          callback(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+      }
       callback(null, chunk);
     },
   });
+  Object.defineProperty(stream, 'transferredBytes', { enumerable: true, get: () => bytes });
+  return stream as MeteredByteLimitStream;
 }
 
 function assertAdvertisedLength(value: string | null | undefined, maxBytes: number, message: string): void {
@@ -61,21 +89,13 @@ function stripIpv6Brackets(hostname: string): string {
   return hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
 }
 
-function isAllowedPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  return parts[0] === 127
-    || parts[0] === 10
-    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
-    || (parts[0] === 192 && parts[1] === 168)
-    || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127);
-}
-
 /**
- * Direct peer pull is intentionally limited to loopback/private device
- * addresses and the two known encrypted transport suffixes. General public
- * URLs, cloud metadata/link-local IPs, redirects and embedded credentials are
- * rejected before a server-side request is made.
+ * Direct peer pull accepts plaintext HTTP only on loopback or a literal
+ * Tailscale 100.64/10 address. Ordinary private-LAN HTTP is deliberately
+ * rejected: otherwise a Wi-Fi observer can race a short-lived transfer grant.
+ * HTTPS accepts local/known relays and user-owned DNS hostnames. Custom public
+ * names are resolved once, rejected if any answer is non-public, then pinned to
+ * the reviewed address while TLS still validates the original hostname.
  */
 export function normalizePeerBase(value: unknown): URL {
   let input: URL;
@@ -88,18 +108,308 @@ export function normalizePeerBase(value: unknown): URL {
   if ((input.pathname && input.pathname !== '/') || input.search || input.hash) throw new Error('원본 PC 주소에는 origin만 입력할 수 있습니다.');
   const hostname = stripIpv6Brackets(input.hostname);
   const ipVersion = isIP(hostname);
-  const privateAddress = ipVersion === 4
-    ? isAllowedPrivateIpv4(hostname)
-    : ipVersion === 6 && (hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd'));
-  const localName = hostname === 'localhost' || /^[a-z0-9][a-z0-9-]{0,62}\.local$/i.test(hostname);
   const encryptedKnownRelay = input.protocol === 'https:'
-    && (/^[a-z0-9-]+\.trycloudflare\.com$/i.test(hostname) || /^[a-z0-9.-]+\.ts\.net$/i.test(hostname));
-  if (!privateAddress && !localName && !encryptedKnownRelay) {
-    throw new Error('등록 가능한 사설 PC 주소 또는 지원되는 HTTPS 원격 링크만 사용할 수 있습니다.');
+    && isKnownEncryptedPeerRelay(hostname);
+  const encryptedCustomDomain = input.protocol === 'https:' && ipVersion === 0 && isDnsPeerHostname(hostname);
+  const safePlaintext = input.protocol === 'http:'
+    && (isLoopback(hostname) || (ipVersion === 4 && isTailnetAddress(hostname)));
+  const safeHttps = input.protocol === 'https:' && (encryptedKnownRelay || encryptedCustomDomain);
+  if (!safePlaintext && !safeHttps) {
+    throw new Error('평문 연결은 이 PC 또는 Tailscale 주소만 허용됩니다. 일반 LAN은 HTTPS 원격 링크를 사용하세요.');
   }
   const port = Number(input.port || (input.protocol === 'https:' ? 443 : 80));
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('원본 PC 포트가 올바르지 않습니다.');
+  if (safeHttps && port !== 443) throw new Error('HTTPS 원본 PC는 표준 443 포트만 사용할 수 있습니다.');
   return new URL(input.origin);
+}
+
+function assertDiskReserve(path: string, incomingBytes: number): void {
+  const stats = statfsSync(path, { bigint: true });
+  const available = stats.bavail * stats.bsize;
+  const required = BigInt(MIN_FREE_DISK_BYTES) + BigInt(Math.max(0, incomingBytes));
+  if (available < required) {
+    throw new InsufficientStorageError('안전 여유 공간 2GB를 남길 수 없어 전송을 중단했습니다. 디스크 공간을 확보해 주세요.');
+  }
+}
+
+function boundedDirectoryBytes(root: string, stopAfter = SHARED_ROOT_QUOTA_BYTES): number {
+  const pending = [root];
+  let entries = 0;
+  let bytes = 0;
+  while (pending.length) {
+    const directory = pending.pop()!;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      entries += 1;
+      if (entries > MAX_STORAGE_SCAN_ENTRIES) {
+        throw new InsufficientStorageError('공유 폴더 항목이 너무 많아 안전하게 용량을 확인할 수 없습니다. 정리 후 다시 시도하세요.');
+      }
+      if (entry.isSymbolicLink()) continue;
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(full);
+      else if (entry.isFile()) bytes += lstatSync(full).size;
+      if (bytes > stopAfter) return bytes;
+    }
+  }
+  return bytes;
+}
+
+function ipv4Number(address: string): number | null {
+  const parts = address.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return (((parts[0]! << 24) >>> 0) + (parts[1]! << 16) + (parts[2]! << 8) + parts[3]!) >>> 0;
+}
+
+function ipv4InCidr(value: number, network: string, prefix: number): boolean {
+  const base = ipv4Number(network);
+  if (base === null) return false;
+  const mask = prefix === 0 ? 0 : (0xffff_ffff << (32 - prefix)) >>> 0;
+  return (value & mask) === (base & mask);
+}
+
+/** True only for an address safe to use as a pinned public HTTPS peer. */
+export function isPublicPeerAddress(address: string): boolean {
+  const hostname = stripIpv6Brackets(address);
+  const version = isIP(hostname);
+  if (version === 4) {
+    const value = ipv4Number(hostname);
+    if (value === null) return false;
+    const blocked: Array<[string, number]> = [
+      ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+      ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+      ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
+      ['224.0.0.0', 4], ['240.0.0.0', 4],
+    ];
+    return !blocked.some(([network, prefix]) => ipv4InCidr(value, network, prefix));
+  }
+  if (version !== 6) return false;
+  const lower = hostname.toLowerCase();
+  if (lower === '::' || lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('ff')) return false;
+  if (/^fe[89ab]/.test(lower) || lower.startsWith('2001:db8:') || lower === '2001:db8::') return false;
+  if (lower.startsWith('::ffff:')) return isPublicPeerAddress(lower.slice('::ffff:'.length));
+  return true;
+}
+
+function isKnownEncryptedPeerRelay(hostname: string): boolean {
+  return /^[a-z0-9-]+\.trycloudflare\.com$/i.test(hostname) || /^[a-z0-9.-]+\.ts\.net$/i.test(hostname);
+}
+
+function isDnsPeerHostname(hostname: string): boolean {
+  if (hostname.length > 253 || !hostname.includes('.') || hostname.endsWith('.') || hostname.endsWith('.local')) return false;
+  return hostname.split('.').every((label) => label.length >= 1 && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
+}
+
+class OneShotHttpAgent extends HttpAgent {
+  private pendingSocket: Socket | undefined;
+
+  constructor(socket: Socket) {
+    super({ keepAlive: false, maxSockets: 1 });
+    this.pendingSocket = socket;
+  }
+
+  override createConnection(): Socket {
+    const socket = this.pendingSocket;
+    this.pendingSocket = undefined;
+    if (!socket) throw new Error('검증된 원본 PC 연결은 한 번만 사용할 수 있습니다.');
+    return socket;
+  }
+}
+
+async function connectVerifiedPlainPeer(base: URL, signal: AbortSignal): Promise<Socket> {
+  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('원본 PC 연결이 취소되었습니다.');
+  const hostname = stripIpv6Brackets(base.hostname);
+  const tailnetRequested = isTailnetAddress(hostname);
+  const trustedTailnetAddresses = tailscaleInterfaceAddresses();
+  const localAddress = tailnetRequested ? [...trustedTailnetAddresses][0] : undefined;
+  if (tailnetRequested && !localAddress) {
+    throw new Error('Tailscale 주소를 사용하려면 이 PC의 Tailscale 어댑터가 연결되어 있어야 합니다.');
+  }
+
+  const socket = createConnection({
+    host: hostname,
+    port: Number(base.port || 80),
+    ...(localAddress ? { localAddress } : {}),
+  });
+  return await new Promise<Socket>((resolveSocket, rejectSocket) => {
+    let settled = false;
+    const timeout = setTimeout(() => fail(new Error('원본 PC 연결 시간이 초과되었습니다.')), 8_000);
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+      socket.off('connect', onConnect);
+      socket.off('error', fail);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      rejectSocket(error instanceof Error ? error : new Error(String(error)));
+    };
+    const onAbort = (): void => fail(signal.reason instanceof Error ? signal.reason : new Error('원본 PC 연결이 취소되었습니다.'));
+    const onConnect = (): void => {
+      if (settled) return;
+      const remote = String(socket.remoteAddress ?? '');
+      const local = String(socket.localAddress ?? '');
+      const expectedTransport = tailnetRequested
+        ? isEncryptedTailnetTransport(remote, local, trustedTailnetAddresses)
+        : isLoopback(hostname) && isSecurePlainPeerTransport(remote, local, trustedTailnetAddresses);
+      if (!expectedTransport) {
+        fail(new Error('원본 PC의 실제 네트워크 경로가 loopback/Tailscale 보안 조건과 일치하지 않습니다.'));
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolveSocket(socket);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    socket.once('connect', onConnect);
+    socket.once('error', fail);
+  });
+}
+
+export async function fetchVerifiedPlainPeer(
+  url: URL,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<globalThis.Response> {
+  const socket = await connectVerifiedPlainPeer(url, signal);
+  const agent = new OneShotHttpAgent(socket);
+  return await new Promise<globalThis.Response>((resolveResponse, rejectResponse) => {
+    const rejectAndDestroy = (error: unknown): void => {
+      agent.destroy();
+      socket.destroy();
+      rejectResponse(error instanceof Error ? error : new Error(String(error)));
+    };
+    const request = httpRequest(url, { agent, headers, method: 'GET', signal }, (upstream) => {
+      try {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(upstream.headers)) {
+          for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+            responseHeaders.append(name, String(item));
+          }
+        }
+        const status = upstream.statusCode ?? 502;
+        const cleanup = (): void => agent.destroy();
+        upstream.once('end', cleanup);
+        upstream.once('close', cleanup);
+
+        // Fetch responses for these statuses must never expose a body. Passing
+        // the IncomingMessage stream to Response would synchronously throw for
+        // a valid 204/205/304 response inside this event callback, escaping the
+        // promise as an uncaught exception. Destroy a protocol-violating body
+        // promptly rather than buffering it, while preserving status/headers.
+        if (status === 204 || status === 205 || status === 304) {
+          upstream.destroy();
+          agent.destroy();
+          socket.destroy();
+          resolveResponse(new globalThis.Response(null, {
+            status,
+            statusText: upstream.statusMessage,
+            headers: responseHeaders,
+          }));
+          return;
+        }
+
+        resolveResponse(new globalThis.Response(Readable.toWeb(upstream) as never, {
+          status,
+          statusText: upstream.statusMessage,
+          headers: responseHeaders,
+        }));
+      } catch (error) {
+        upstream.destroy();
+        rejectAndDestroy(error);
+      }
+    });
+    request.once('error', rejectAndDestroy);
+    request.end();
+  });
+}
+
+async function fetchPinnedPublicHttpsPeer(
+  url: URL,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<globalThis.Response> {
+  const hostname = stripIpv6Brackets(url.hostname);
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0 || addresses.some((entry) => !isPublicPeerAddress(entry.address))) {
+    throw new Error('원본 PC 도메인이 공인 HTTPS 주소로만 확인되지 않았습니다.');
+  }
+  // Prefer IPv4 when both families are public; many Windows hosts publish an
+  // IPv6 route that is not actually usable outside the LAN.
+  const selected = addresses.find((entry) => entry.family === 4) ?? addresses[0]!;
+  return await new Promise<globalThis.Response>((resolveResponse, rejectResponse) => {
+    let settled = false;
+    let request: ReturnType<typeof httpsRequest>;
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      request?.destroy();
+      rejectResponse(error instanceof Error ? error : new Error(String(error)));
+    };
+    request = httpsRequest({
+      protocol: 'https:',
+      hostname: selected.address,
+      port: Number(url.port || 443),
+      servername: hostname,
+      method: 'GET',
+      path: `${url.pathname}${url.search}`,
+      headers: { ...headers, host: url.host, connection: 'close' },
+      rejectUnauthorized: true,
+      signal,
+    }, (upstream) => {
+      try {
+        const status = upstream.statusCode ?? 502;
+        if (status >= 300 && status < 400) {
+          upstream.destroy();
+          fail(new Error('원본 PC HTTPS 리디렉션은 허용되지 않습니다.'));
+          return;
+        }
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(upstream.headers)) {
+          for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+            responseHeaders.append(name, String(item));
+          }
+        }
+        if (status === 204 || status === 205 || status === 304) {
+          settled = true;
+          upstream.destroy();
+          resolveResponse(new globalThis.Response(null, {
+            status,
+            statusText: upstream.statusMessage,
+            headers: responseHeaders,
+          }));
+          return;
+        }
+        settled = true;
+        resolveResponse(new globalThis.Response(Readable.toWeb(upstream) as never, {
+          status,
+          statusText: upstream.statusMessage,
+          headers: responseHeaders,
+        }));
+      } catch (error) {
+        upstream.destroy();
+        fail(error);
+      }
+    });
+    request.setTimeout(8_000, () => fail(new Error('원본 PC HTTPS 연결 시간이 초과되었습니다.')));
+    request.once('error', fail);
+    request.end();
+  });
+}
+
+async function fetchPeer(url: URL, headers: Record<string, string>, signal: AbortSignal): Promise<globalThis.Response> {
+  if (url.protocol === 'http:') return await fetchVerifiedPlainPeer(url, headers, signal);
+  const hostname = stripIpv6Brackets(url.hostname);
+  if (isIP(hostname) === 0 && !isKnownEncryptedPeerRelay(hostname)) {
+    return await fetchPinnedPublicHttpsPeer(url, headers, signal);
+  }
+  return await fetch(url, { headers, redirect: 'error', signal });
+}
+
+async function cancelResponseBody(response: globalThis.Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* best-effort socket cleanup */ }
 }
 
 export function browserOriginAllowed(origin: string | undefined, hostHeader: string | undefined, remote: string, cloudflareRay?: string): boolean {
@@ -279,9 +589,15 @@ function localOf(req: Request): string {
   return String(req.socket.localAddress ?? '').replace(/^::ffff:/, '');
 }
 
-export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfers?: Set<AbortController>): Express {
+export function createHttpApi(
+  host: HttpApiHost,
+  webDir: string | undefined,
+  activeTransfers: Set<AbortController> | undefined,
+  upgradeTickets: WsUpgradeTickets,
+): Express {
   const app = express();
   app.disable('x-powered-by');
+  app.set('env', 'production');
   // Authentication and transport policy are path-sensitive. Reject
   // case-variant route aliases instead of relying on Express's permissive
   // default, then keep the normalized middleware check below as defence in
@@ -290,27 +606,60 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
   const sharedRoot = resolve(mrRobotHome(), 'shared');
   mkdirSync(sharedRoot, { recursive: true });
   const transferGrants = new Map<string, TransferGrant>();
+  const transferGrantIssues = new Map<string, number[]>();
+  const transferAdmission = new FileTransferAdmission();
+  let sharedWriteReserved = 0;
+
+  const reserveSharedWrite = (bytes: number): (() => void) => {
+    assertDiskReserve(sharedRoot, bytes);
+    const used = boundedDirectoryBytes(sharedRoot);
+    if (used + sharedWriteReserved + bytes > SHARED_ROOT_QUOTA_BYTES) {
+      throw new InsufficientStorageError('Mr.Robot 공유 폴더는 최대 10GB까지 사용할 수 있습니다. 기존 파일을 정리해 주세요.');
+    }
+    sharedWriteReserved += bytes;
+    let reserved = true;
+    return () => {
+      if (!reserved) return;
+      reserved = false;
+      sharedWriteReserved = Math.max(0, sharedWriteReserved - bytes);
+    };
+  };
 
   const pruneTransferGrants = (): void => {
     const now = Date.now();
     for (const [token, grant] of transferGrants) {
       if (grant.expiresAt <= now) transferGrants.delete(token);
     }
-    if (transferGrants.size < MAX_TRANSFER_GRANTS) return;
-    const overflow = transferGrants.size - MAX_TRANSFER_GRANTS + 1;
-    const oldest = [...transferGrants.entries()]
-      .sort((a, b) => a[1].expiresAt - b[1].expiresAt)
-      .slice(0, overflow);
-    for (const [token] of oldest) transferGrants.delete(token);
+    const cutoff = now - TRANSFER_GRANT_ISSUE_WINDOW_MS;
+    for (const [principal, issues] of transferGrantIssues) {
+      const retained = issues.filter((issuedAt) => issuedAt > cutoff);
+      if (retained.length) transferGrantIssues.set(principal, retained);
+      else transferGrantIssues.delete(principal);
+    }
   };
   const issueTransferGrant = (grant: Omit<TransferGrant, 'expiresAt'>): { grant: string; expiresAt: number } => {
     pruneTransferGrants();
+    const outstanding = [...transferGrants.values()].filter((item) => item.principal === grant.principal).length;
+    if (outstanding >= MAX_TRANSFER_GRANTS_PER_PRINCIPAL) {
+      throw new FileTransferAdmissionError('이 기기의 미사용 1회성 전송권이 너무 많습니다.');
+    }
+    const issues = transferGrantIssues.get(grant.principal) ?? [];
+    if (issues.length >= MAX_TRANSFER_GRANT_ISSUES_PER_WINDOW) {
+      throw new FileTransferAdmissionError('이 기기가 1회성 전송권을 너무 자주 요청했습니다.');
+    }
+    if (transferGrants.size >= MAX_TRANSFER_GRANTS) {
+      // Never evict a grant owned by another principal. Global saturation is a
+      // transient admission failure, not authority to break another transfer.
+      throw new FileTransferAdmissionError('1회성 전송권 저장소가 찼습니다. 잠시 후 다시 시도하세요.');
+    }
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + TRANSFER_GRANT_TTL_MS;
     transferGrants.set(token, { ...grant, expiresAt });
+    issues.push(Date.now());
+    transferGrantIssues.set(grant.principal, issues);
     return { grant: token, expiresAt };
   };
-  const consumeTransferGrant = (req: Request, kind: TransferGrant['kind'], path?: string): void => {
+  const consumeTransferGrant = (req: Request, kind: TransferGrant['kind'], path?: string): TransferGrant => {
     const token = String(req.header('x-mr-robot-transfer') ?? '');
     if (token.length < 32 || token.length > 256) throw new Error('1회성 전송 권한이 필요합니다.');
     const grant = transferGrants.get(token);
@@ -320,6 +669,7 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     if (!grant || grant.expiresAt <= Date.now() || grant.kind !== kind || (kind === 'file' && grant.path !== path)) {
       throw new Error('1회성 전송 권한이 만료되었거나 요청과 일치하지 않습니다.');
     }
+    return grant;
   };
 
   // Native clients send no Origin. Browser clients are restricted to the
@@ -393,6 +743,10 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
       res.status(413).json({ error: 'JSON 요청은 최대 1MB까지 허용됩니다.' });
       return;
     }
+    if (detail.type === 'entity.parse.failed' || (detail.status === 400 && error instanceof SyntaxError)) {
+      res.status(400).json({ error: 'JSON 요청 형식이 올바르지 않습니다.' });
+      return;
+    }
     next(error);
   });
 
@@ -410,7 +764,9 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     res.status(403).json({ error: 'administrator permission required' });
   };
   const requireSync = (req: Request, res: Response, next: NextFunction): void => {
-    if (host.isSyncSecret(String(req.header('x-mr-robot-token') ?? ''))) { next(); return; }
+    const token = String(req.header('x-mr-robot-token') ?? '');
+    const auth = host.authenticate(token);
+    if (auth && host.isSyncSecret(token)) { res.locals.mrRobotAuth = auth; next(); return; }
     res.status(403).json({ error: '이 기기의 작업 동기화 권한이 꺼져 있거나 읽기 전용 정책으로 제한되어 있습니다. PC의 연결 기기 설정에서 작업 동기화를 허용하세요.' });
   };
   const requestAuth = (res: Response): AuthContext => res.locals.mrRobotAuth as AuthContext;
@@ -454,6 +810,26 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
 
   app.get('/api/ping', (_req, res) => {
     res.json({ ok: true, app: 'mr-robot' });
+  });
+
+  // Public WebSockets are admitted only after this authenticated HTTPS step.
+  // The returned capability is memory-only, source/host/principal-bound,
+  // expires quickly and is deleted before its first upgrade completes.
+  app.post('/api/ws-ticket', requireAuth, (req, res) => {
+    try {
+      const binding = webSocketTicketBinding({
+        directRemote: remoteOf(req),
+        directLocal: localOf(req),
+        hostHeader: req.header('host'),
+        cloudflareConnectingIp: req.header('cf-connecting-ip'),
+        cloudflareRay: req.header('cf-ray'),
+      });
+      res.json(upgradeTickets.issue(binding.source, binding.audience, authPrincipal(requestAuth(res))));
+    } catch (error) {
+      if (!(error instanceof WsUpgradeTicketAdmissionError)) throw error;
+      res.setHeader('Retry-After', '2');
+      res.status(error.status).json({ error: error.message });
+    }
   });
 
   // Never return the administrator secret over HTTP. Electron receives its
@@ -514,27 +890,38 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
   };
   const requireWorkspaceFileAccess = (write: boolean) => (req: Request, res: Response, next: NextFunction): void => {
     const token = String(req.header('x-mr-robot-token') ?? '');
-    if (host.fileAccess(token, write)) { next(); return; }
+    const auth = host.authenticate(token);
+    if (auth && host.fileAccess(token, write)) { res.locals.mrRobotAuth = auth; next(); return; }
     res.status(403).json({ error: write ? '이 기기에는 작업 폴더 쓰기 권한이 없습니다.' : '이 기기에는 작업 폴더 읽기 권한이 없습니다.' });
   };
   const requireSharedFileAccess = (write: boolean) => (req: Request, res: Response, next: NextFunction): void => {
     const token = String(req.header('x-mr-robot-token') ?? '');
-    if (host.sharedFileAccess(token, write)) { next(); return; }
+    const auth = host.authenticate(token);
+    if (auth && host.sharedFileAccess(token, write)) { res.locals.mrRobotAuth = auth; next(); return; }
     res.status(403).json({ error: write ? '이 기기에는 기기 간 공유 폴더 쓰기 권한이 없습니다.' : '이 기기에는 기기 간 공유 폴더 읽기 권한이 없습니다.' });
   };
   const sendRouteError = (res: Response, error: unknown, fallbackStatus = 400): void => {
     if (res.destroyed || res.headersSent) return;
-    res.status(error instanceof PayloadTooLargeError ? 413 : fallbackStatus)
+    const status = error instanceof PayloadTooLargeError ? 413
+      : error instanceof InsufficientStorageError ? 507
+        : error instanceof FileTransferAdmissionError ? error.status
+          : fallbackStatus;
+    if (error instanceof FileTransferAdmissionError) res.setHeader('Retry-After', '30');
+    res.status(status)
       .json({ error: error instanceof Error ? error.message : String(error) });
   };
+  const transferPrincipal = (res: Response): string => authPrincipal(requestAuth(res));
+  const incomingFileLimit = (req: Request): number => cloudflarePairClient(req) ? MAX_PUBLIC_FILE_BYTES : MAX_FILE_BYTES;
+  const fileLimitMessage = (limit: number): string => limit === MAX_PUBLIC_FILE_BYTES
+    ? '공개 원격 업로드는 파일 하나당 최대 96MB입니다. 더 큰 파일은 로컬 또는 검증된 PC 간 전송을 사용하세요.'
+    : '파일은 최대 2GB까지 전송할 수 있습니다.';
   const assertPeer = async (base: URL): Promise<void> => {
     const pingUrl = new URL('/api/ping', base);
-    const response = await fetch(pingUrl, {
-      redirect: 'error',
-      signal: AbortSignal.timeout(8_000),
-      headers: { accept: 'application/json' },
-    });
-    if (!response.ok) throw new Error(`원본 주소에서 Mr.Robot Agent를 확인할 수 없습니다. (HTTP ${response.status})`);
+    const response = await fetchPeer(pingUrl, { accept: 'application/json' }, AbortSignal.timeout(8_000));
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new Error(`원본 주소에서 Mr.Robot Agent를 확인할 수 없습니다. (HTTP ${response.status})`);
+    }
     const ping = await readJsonResponseLimited(response, 16 * 1024) as { ok?: unknown; app?: unknown };
     if (ping.ok !== true || ping.app !== 'mr-robot') throw new Error('원본 주소가 Mr.Robot Agent로 확인되지 않았습니다.');
   };
@@ -557,31 +944,45 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : String(err) }); }
   });
   app.get('/api/workspaces/download', requireWorkspaceFileAccess(false), (req, res) => {
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
     try {
       const { target } = workspacePath(req.query.workspaceId, req.query.path); const stat = statSync(target);
       if (!stat.isFile()) throw new Error('다운로드할 파일이 아닙니다.');
+      if (stat.size > MAX_FILE_BYTES) throw new PayloadTooLargeError('다운로드는 파일 하나당 최대 2GB입니다.');
+      lease = transferAdmission.acquire(transferPrincipal(res), stat.size);
+      transfer = transferAbort(req, res, activeTransfers);
       const name = basename(target).replace(/[\r\n"]/g, '_');
       res.setHeader('Content-Type', 'application/octet-stream'); res.setHeader('Content-Length', String(stat.size));
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
       void pipeline(createReadStream(target), res, { signal: transfer.signal })
         .catch(() => { if (!res.destroyed) res.destroy(); })
-        .finally(transfer.cleanup);
-    } catch (err) { transfer.cleanup(); res.status(404).json({ error: err instanceof Error ? err.message : String(err) }); }
+        .finally(() => { transfer?.cleanup(); lease?.settle(stat.size); });
+    } catch (err) {
+      transfer?.cleanup(); lease?.settle(0); sendRouteError(res, err, 404);
+    }
   });
   app.put('/api/workspaces/upload', requireWorkspaceFileAccess(true), async (req, res) => {
     let temp = '';
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
+    let meter: MeteredByteLimitStream | undefined;
     try {
-      assertAdvertisedLength(req.header('content-length'), MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.');
+      const limit = incomingFileLimit(req);
+      const limitMessage = fileLimitMessage(limit);
+      assertAdvertisedLength(req.header('content-length'), limit, limitMessage);
+      lease = transferAdmission.acquire(transferPrincipal(res), limit);
+      transfer = transferAbort(req, res, activeTransfers);
       const { workspace, root, target: requestedTarget } = workspacePath(req.query.workspaceId, req.query.path);
+      assertDiskReserve(root, limit);
       const prepared = prepareFileDestination(root, requestedTarget, 'upload');
       const target = prepared.target; temp = prepared.temp;
-      await pipeline(req, createByteLimitStream(MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.'), createWriteStream(temp, { flags: 'wx' }), { signal: transfer.signal });
+      meter = createByteLimitStream(limit, limitMessage, () => assertDiskReserve(dirname(temp), 0));
+      await pipeline(req, meter, createWriteStream(temp, { flags: 'wx' }), { signal: transfer.signal });
       revalidateDestination(root, target, temp); renameSync(temp, target);
       res.json({ ok: true, name: basename(target), path: relative(workspace.path, target).replaceAll('\\', '/'), size: statSync(target).size });
     } catch (err) { if (temp && existsSync(temp)) unlinkSync(temp); sendRouteError(res, err); }
-    finally { transfer.cleanup(); }
+    finally { transfer?.cleanup(); lease?.settle(meter?.transferredBytes ?? 0); }
   });
 
   // Token-free AI usage: these routes stream bytes directly between paired devices.
@@ -615,29 +1016,36 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
         const file = sharedPath(req.body?.path);
         if (!statSync(file).isFile()) throw new Error('전송할 일반 파일을 찾을 수 없습니다.');
         const path = relative(sharedRoot, file).replaceAll('\\', '/');
-        res.json(issueTransferGrant({ kind, path }));
+        res.json(issueTransferGrant({ kind, path, principal: authPrincipal(requestAuth(res)) }));
         return;
       }
       if (kind === 'sync') {
         if (!host.isSyncSecret(token)) throw new Error('이 기기에는 작업 동기화 전송권이 없습니다. PC의 연결 기기 설정을 확인하세요.');
-        res.json(issueTransferGrant({ kind }));
+        res.json(issueTransferGrant({ kind, principal: authPrincipal(requestAuth(res)) }));
         return;
       }
       throw new Error('지원되지 않는 전송 권한 종류입니다.');
     } catch (err) {
-      res.status(403).json({ error: err instanceof Error ? err.message : String(err) });
+      sendRouteError(res, err, 403);
     }
   });
 
   app.get('/api/files/download', (req, res) => {
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
     try {
       const file = sharedPath(req.query.path);
       const stat = statSync(file);
       if (!stat.isFile()) throw new Error('다운로드할 파일이 아닙니다.');
+      if (stat.size > MAX_FILE_BYTES) throw new PayloadTooLargeError('다운로드는 파일 하나당 최대 2GB입니다.');
       const path = relative(sharedRoot, file).replaceAll('\\', '/');
       const token = String(req.header('x-mr-robot-token') ?? '');
-      if (!host.sharedFileAccess(token, false)) consumeTransferGrant(req, 'file', path);
+      const auth = host.authenticate(token);
+      const principal = auth && host.sharedFileAccess(token, false)
+        ? authPrincipal(auth)
+        : consumeTransferGrant(req, 'file', path).principal;
+      lease = transferAdmission.acquire(principal, stat.size);
+      transfer = transferAbort(req, res, activeTransfers);
       const name = basename(file).replace(/[\r\n"]/g, '_');
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', String(stat.size));
@@ -645,21 +1053,31 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
       res.setHeader('X-Mr-Robot-File-Name', encodeURIComponent(name));
       void pipeline(createReadStream(file), res, { signal: transfer.signal })
         .catch(() => { if (!res.destroyed) res.destroy(); })
-        .finally(transfer.cleanup);
+        .finally(() => { transfer?.cleanup(); lease?.settle(stat.size); });
     } catch (err) {
-      transfer.cleanup();
-      res.status(403).json({ error: err instanceof Error ? err.message : String(err) });
+      transfer?.cleanup();
+      lease?.settle(0);
+      sendRouteError(res, err, 403);
     }
   });
 
   app.put('/api/files/upload', requireSharedFileAccess(true), async (req, res) => {
     let temp = '';
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
+    let releaseShared: (() => void) | undefined;
+    let meter: MeteredByteLimitStream | undefined;
     try {
-      assertAdvertisedLength(req.header('content-length'), MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.');
+      const limit = incomingFileLimit(req);
+      const limitMessage = fileLimitMessage(limit);
+      assertAdvertisedLength(req.header('content-length'), limit, limitMessage);
+      lease = transferAdmission.acquire(transferPrincipal(res), limit);
+      releaseShared = reserveSharedWrite(limit);
+      transfer = transferAbort(req, res, activeTransfers);
       const prepared = prepareFileDestination(sharedRoot, sharedPath(req.query.path), 'upload');
       const file = prepared.target; temp = prepared.temp;
-      await pipeline(req, createByteLimitStream(MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.'), createWriteStream(temp, { flags: 'wx' }), { signal: transfer.signal });
+      meter = createByteLimitStream(limit, limitMessage, () => assertDiskReserve(dirname(temp), 0));
+      await pipeline(req, meter, createWriteStream(temp, { flags: 'wx' }), { signal: transfer.signal });
       revalidateDestination(sharedRoot, file, temp);
       renameSync(temp, file);
       const stat = statSync(file);
@@ -667,13 +1085,25 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     } catch (err) {
       if (temp && existsSync(temp)) unlinkSync(temp);
       sendRouteError(res, err);
-    } finally { transfer.cleanup(); }
+    } finally {
+      transfer?.cleanup();
+      releaseShared?.();
+      lease?.settle(meter?.transferredBytes ?? 0);
+    }
   });
 
   app.post('/api/files/pull', requireSharedFileAccess(true), async (req, res) => {
     let temp = '';
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
+    let releaseShared: (() => void) | undefined;
+    let meter: MeteredByteLimitStream | undefined;
     try {
+      const limit = incomingFileLimit(req);
+      const limitMessage = fileLimitMessage(limit);
+      lease = transferAdmission.acquire(transferPrincipal(res), limit);
+      releaseShared = reserveSharedWrite(limit);
+      transfer = transferAbort(req, res, activeTransfers);
       const sourceBase = normalizePeerBase(req.body?.sourceBase);
       const grant = sourceGrant(req.body?.sourceGrant);
       await assertPeer(sourceBase);
@@ -682,16 +1112,20 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
       const target = prepared.target; temp = prepared.temp;
       const sourceUrl = new URL('/api/files/download', sourceBase);
       sourceUrl.searchParams.set('path', sourcePath);
-      const upstream = await fetch(sourceUrl, {
-        headers: { 'x-mr-robot-transfer': grant },
-        redirect: 'error',
-        signal: AbortSignal.any([transfer.signal, AbortSignal.timeout(30 * 60_000)]),
-      });
-      if (!upstream.ok || !upstream.body) throw new Error(`원본 PC 파일을 열 수 없습니다. (HTTP ${upstream.status})`);
-      assertAdvertisedLength(upstream.headers.get('content-length'), MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.');
+      const upstream = await fetchPeer(
+        sourceUrl,
+        { 'x-mr-robot-transfer': grant },
+        AbortSignal.any([transfer.signal, AbortSignal.timeout(30 * 60_000)]),
+      );
+      if (!upstream.ok || !upstream.body) {
+        await cancelResponseBody(upstream);
+        throw new Error(`원본 PC 파일을 열 수 없습니다. (HTTP ${upstream.status})`);
+      }
+      assertAdvertisedLength(upstream.headers.get('content-length'), limit, limitMessage);
+      meter = createByteLimitStream(limit, limitMessage, () => assertDiskReserve(dirname(temp), 0));
       await pipeline(
         Readable.fromWeb(upstream.body as never),
-        createByteLimitStream(MAX_FILE_BYTES, '파일은 최대 2GB까지 전송할 수 있습니다.'),
+        meter,
         createWriteStream(temp, { flags: 'wx' }),
         { signal: transfer.signal },
       );
@@ -702,16 +1136,37 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
     } catch (err) {
       if (temp && existsSync(temp)) unlinkSync(temp);
       sendRouteError(res, err);
-    } finally { transfer.cleanup(); }
+    } finally {
+      transfer?.cleanup();
+      releaseShared?.();
+      lease?.settle(meter?.transferredBytes ?? 0);
+    }
   });
 
   app.get('/api/sync/snapshot', (req, res) => {
+    let lease: FileTransferLease | undefined;
     try {
       const token = String(req.header('x-mr-robot-token') ?? '');
-      if (!host.isSyncSecret(token)) consumeTransferGrant(req, 'sync');
-      res.json(host.syncSnapshot());
+      const auth = host.authenticate(token);
+      const principal = auth && host.isSyncSecret(token)
+        ? authPrincipal(auth)
+        : consumeTransferGrant(req, 'sync').principal;
+      const serialized = JSON.stringify(host.syncSnapshot());
+      const bytes = Buffer.byteLength(serialized, 'utf8');
+      if (bytes > MAX_SYNC_BYTES) throw new PayloadTooLargeError('동기화 데이터가 허용 크기를 초과합니다.');
+      lease = transferAdmission.acquire(principal, bytes);
+      let settled = false;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        lease?.settle(bytes);
+      };
+      res.once('finish', settle);
+      res.once('close', settle);
+      res.type('application/json').send(serialized);
     } catch (err) {
-      res.status(403).json({ error: err instanceof Error ? err.message : String(err) });
+      lease?.settle(0);
+      sendRouteError(res, err, 403);
     }
   });
 
@@ -719,23 +1174,32 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
   // merge preserves divergent branches as conflict copies; access/workspace
   // decisions remain destination-local and the read-only ceilings still win.
   app.post('/api/sync/pull', requireSync, async (req, res) => {
-    const transfer = transferAbort(req, res, activeTransfers);
+    let transfer: ReturnType<typeof transferAbort> | undefined;
+    let lease: FileTransferLease | undefined;
+    let transferredBytes = 0;
     try {
+      lease = transferAdmission.acquire(transferPrincipal(res), MAX_SYNC_BYTES);
+      transfer = transferAbort(req, res, activeTransfers);
       const sourceBase = normalizePeerBase(req.body?.sourceBase);
       const grant = sourceGrant(req.body?.sourceGrant);
       await assertPeer(sourceBase);
       const sourceUrl = new URL('/api/sync/snapshot', sourceBase);
-      const upstream = await fetch(sourceUrl, {
-        headers: { 'x-mr-robot-transfer': grant },
-        redirect: 'error',
-        signal: AbortSignal.any([transfer.signal, AbortSignal.timeout(2 * 60_000)]),
-      });
-      if (!upstream.ok) throw new Error(`원본 PC 동기화 데이터를 읽을 수 없습니다. (HTTP ${upstream.status})`);
-      const result = host.mergeSyncSnapshot(await readJsonResponseLimited(upstream, MAX_SYNC_BYTES));
+      const upstream = await fetchPeer(
+        sourceUrl,
+        { 'x-mr-robot-transfer': grant },
+        AbortSignal.any([transfer.signal, AbortSignal.timeout(2 * 60_000)]),
+      );
+      if (!upstream.ok) {
+        await cancelResponseBody(upstream);
+        throw new Error(`원본 PC 동기화 데이터를 읽을 수 없습니다. (HTTP ${upstream.status})`);
+      }
+      const snapshot = await readJsonResponseLimited(upstream, MAX_SYNC_BYTES);
+      transferredBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
+      const result = host.mergeSyncSnapshot(snapshot);
       res.json({ ok: true, ...result, transport: 'direct-device-sync', aiTokens: 0 });
     } catch (err) {
       sendRouteError(res, err);
-    } finally { transfer.cleanup(); }
+    } finally { transfer?.cleanup(); lease?.settle(transferredBytes); }
   });
 
   app.delete('/api/files', requireSharedFileAccess(true), (req, res) => {
@@ -820,6 +1284,18 @@ export function createHttpApi(host: HttpApiHost, webDir?: string, activeTransfer
         .send('Mr.Robot agent is running. Build packages/web for the UI, or connect with the mobile app.');
     });
   }
+
+  // Never let Express's development error page disclose stack traces,
+  // absolute install paths, dependency versions, or request internals through
+  // the public tunnel. Route-specific safe errors above remain unchanged.
+  app.use((_error: unknown, req: Request, res: Response, _next: NextFunction) => {
+    if (res.headersSent) {
+      if (!res.destroyed) res.destroy();
+      return;
+    }
+    const requestId = randomUUID();
+    res.status(500).json({ error: '요청을 처리하지 못했습니다.', requestId, path: req.path.startsWith('/api/') ? undefined : 'redacted' });
+  });
 
   return app;
 }

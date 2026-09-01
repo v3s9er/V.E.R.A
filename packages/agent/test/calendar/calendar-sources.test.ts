@@ -555,12 +555,12 @@ if (process.platform === 'win32') {
 const repositoryRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 for (const relative of ['package.json', 'packages/agent/package.json', 'packages/desktop/package.json', 'packages/shared/package.json', 'packages/web/package.json', 'apps/mobile/package.json']) {
   const manifest = JSON.parse(readFileSync(join(repositoryRoot, relative), 'utf8')) as { version?: string };
-  assert.equal(manifest.version, '0.3.7', `${relative} version must match the 0.3.7 release`);
+  assert.equal(manifest.version, '0.3.8', `${relative} version must match the 0.3.8 release`);
 }
 const mobileApp = JSON.parse(readFileSync(join(repositoryRoot, 'apps/mobile/app.json'), 'utf8')) as { expo?: { version?: string; android?: { versionCode?: number } } };
-assert.equal(mobileApp.expo?.version, '0.3.7');
-assert.equal(mobileApp.expo?.android?.versionCode, 12);
-assert.equal(VERSION, '0.3.7');
+assert.equal(mobileApp.expo?.version, '0.3.8');
+assert.equal(mobileApp.expo?.android?.versionCode, 13);
+assert.equal(VERSION, '0.3.8');
 assert.equal(plugin.manifest.version, '0.3.7');
 
 console.log('calendar source tests passed');

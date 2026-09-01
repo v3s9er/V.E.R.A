@@ -2,6 +2,34 @@ export { pairingOrigins, parsePairingPayload } from './pairing';
 
 export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | 'online';
 
+// The mobile package is independently bundled by Expo, so keep these two
+// wire constants synchronized with @mr-robot/shared without adding a Node
+// workspace dependency to the APK bundle.
+const WS_RPC_PROTOCOL = 'mr-robot-rpc-v1';
+const WS_UPGRADE_TICKET_PROTOCOL_PREFIX = 'mr-robot-ticket.';
+interface WsUpgradeTicketInfo { protocol: string; expiresAt: number }
+
+async function publicWebSocketProtocols(url: string, secret: string, signal: AbortSignal): Promise<string[] | undefined> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'wss:') return undefined;
+  const endpoint = new URL('/api/ws-ticket', `https://${parsed.host}`);
+  const response = await fetch(endpoint.toString(), {
+    method: 'POST',
+    headers: { 'x-mr-robot-token': secret, accept: 'application/json' },
+    signal,
+  });
+  if (!response.ok) throw new Error(`WebSocket 보안 티켓 발급 실패 (HTTP ${response.status})`);
+  const ticket = await response.json() as WsUpgradeTicketInfo;
+  if (typeof ticket.protocol !== 'string'
+    || !ticket.protocol.startsWith(WS_UPGRADE_TICKET_PROTOCOL_PREFIX)
+    || !/^[A-Za-z0-9_-]{43}$/.test(ticket.protocol.slice(WS_UPGRADE_TICKET_PROTOCOL_PREFIX.length))
+    || !Number.isFinite(ticket.expiresAt)
+    || ticket.expiresAt <= Date.now()) {
+    throw new Error('WebSocket 보안 티켓 응답이 올바르지 않습니다.');
+  }
+  return [WS_RPC_PROTOCOL, ticket.protocol];
+}
+
 /** WebSocket RPC client for React Native. */
 export class MrRobotClient {
   private ws: WebSocket | null = null;
@@ -27,15 +55,15 @@ export class MrRobotClient {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
-      const ws = new WebSocket(url);
-      this.ws = ws;
+      let ws: WebSocket | null = null;
+      const admissionController = new AbortController();
 
       const finish = (error?: Error): void => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         timer = null;
-        const isCurrent = generation === this.connectionGeneration && this.ws === ws;
+        const isCurrent = generation === this.connectionGeneration && (ws === null || this.ws === ws);
         if (this.cancelConnect === cancelAttempt) this.cancelConnect = null;
         if (!isCurrent) {
           reject(error ?? new Error('새 연결 시도로 대체되었습니다.'));
@@ -44,9 +72,9 @@ export class MrRobotClient {
         if (error) {
           this.connected = false;
           this.authed = false;
-          if (this.ws === ws) this.ws = null;
+          if (ws !== null && this.ws === ws) this.ws = null;
           this.setState('offline');
-          try { ws.close(); } catch { /* 이미 닫힌 소켓 */ }
+          try { ws?.close(); } catch { /* 이미 닫힌 소켓 */ }
           reject(error);
         } else {
           this.setState('online');
@@ -54,42 +82,53 @@ export class MrRobotClient {
         }
       };
 
-      const cancelAttempt = (error: Error): void => finish(error);
+      const cancelAttempt = (error: Error): void => {
+        admissionController.abort(error);
+        try { ws?.close(); } catch { /* 이미 닫힌 소켓 */ }
+        finish(error);
+      };
       this.cancelConnect = cancelAttempt;
 
-      timer = setTimeout(() => finish(new Error('연결 또는 인증 시간이 초과되었습니다.')), timeoutMs);
+      timer = setTimeout(() => cancelAttempt(new Error('연결 또는 인증 시간이 초과되었습니다.')), timeoutMs);
 
-      ws.onopen = () => {
-        if (generation !== this.connectionGeneration) { ws.close(); return; }
-        this.connected = true;
-        this.setState('authenticating');
-        const authTimeout = Math.max(1000, timeoutMs - 250);
-        void this.call('auth', { secret }, authTimeout)
-          .then((result) => {
-            this.authed = Boolean((result as { ok?: boolean })?.ok);
-            if (!this.authed) throw new Error('인증 실패: 시크릿이 일치하지 않습니다.');
-            finish();
-          })
-          .catch((error: Error) => finish(error));
-      };
-      ws.onmessage = (event) => {
-        if (generation === this.connectionGeneration) this.onMessage(String(event.data));
-      };
-      ws.onerror = () => finish(new Error('연결 오류'));
-      ws.onclose = () => {
-        if (generation !== this.connectionGeneration || this.ws !== ws) return;
-        const wasAuthenticated = this.authed;
-        this.settlePending(new Error('연결이 끊어졌습니다.'));
-        if (settled) {
-          this.connected = false;
-          this.authed = false;
-          this.ws = null;
-          this.setState('offline');
-        } else {
-          finish(new Error('연결이 종료되었습니다.'));
-        }
-        if (wasAuthenticated && !this.closedByUser) this.onClose?.();
-      };
+      void publicWebSocketProtocols(url, secret, admissionController.signal).then((protocols) => {
+        if (settled || generation !== this.connectionGeneration) return;
+        ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+        this.ws = ws;
+        ws.onopen = () => {
+          if (generation !== this.connectionGeneration) { ws?.close(); return; }
+          this.connected = true;
+          this.setState('authenticating');
+          const authTimeout = Math.max(1000, timeoutMs - 250);
+          void this.call('auth', { secret }, authTimeout)
+            .then((result) => {
+              this.authed = Boolean((result as { ok?: boolean })?.ok);
+              if (!this.authed) throw new Error('인증 실패: 시크릿이 일치하지 않습니다.');
+              finish();
+            })
+            .catch((error: Error) => finish(error));
+        };
+        ws.onmessage = (event) => {
+          if (generation === this.connectionGeneration) this.onMessage(String(event.data));
+        };
+        ws.onerror = () => finish(new Error('연결 오류'));
+        ws.onclose = () => {
+          if (generation !== this.connectionGeneration || this.ws !== ws) return;
+          const wasAuthenticated = this.authed;
+          this.settlePending(new Error('연결이 끊어졌습니다.'));
+          if (settled) {
+            this.connected = false;
+            this.authed = false;
+            this.ws = null;
+            this.setState('offline');
+          } else {
+            finish(new Error('연결이 종료되었습니다.'));
+          }
+          if (wasAuthenticated && !this.closedByUser) this.onClose?.();
+        };
+      }).catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 

@@ -7,6 +7,20 @@
  * clients that cannot hold a socket (e.g. a plain fetch ping).
  */
 
+/**
+ * Public WSS clients first obtain a short-lived, single-use admission ticket
+ * over authenticated HTTPS.  The generic protocol is echoed by the server;
+ * the ticket-bearing protocol is consumed during the HTTP upgrade and is
+ * never echoed back to the client.
+ */
+export const WS_RPC_PROTOCOL = 'mr-robot-rpc-v1';
+export const WS_UPGRADE_TICKET_PROTOCOL_PREFIX = 'mr-robot-ticket.';
+
+export interface WsUpgradeTicketInfo {
+  protocol: string;
+  expiresAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // RPC envelope
 // ---------------------------------------------------------------------------
@@ -555,7 +569,7 @@ export interface NetworkSettings {
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
 
 /** Narrow, independently revocable privileges granted to a paired device. */
-export type DeviceCapability = 'work-sync' | 'private-calendar';
+export type DeviceCapability = 'work-sync' | 'private-calendar' | 'file-transfer';
 
 export interface SafetySettings {
   /** read-only < ask < workspace < full. Legacy confirm is migrated to ask. */

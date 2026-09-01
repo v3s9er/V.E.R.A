@@ -1,11 +1,13 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { delimiter, join } from 'node:path';
 import type { RemoteLinkConfig, RemoteLinkStatus, RemoteTransportProviderInfo } from '@mr-robot/shared';
 import { SecretVault } from '../secrets.js';
 import type { PluginContext } from './context.js';
 import type { MrRobotPlugin } from './loader.js';
+import { mrRobotHome } from '../config.js';
 
 const PLUGIN_ID = 'remote-link';
 const QUICK_TUNNEL_HOST = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
@@ -50,6 +52,8 @@ function boundedAppend(current: string, chunk: Buffer | string): string {
 export function redactRemoteLinkDiagnostics(value: string): string {
   return value
     .replace(/\beyJ[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]{10,}){0,2}\b/g, '[REDACTED_TUNNEL_TOKEN]')
+    .replace(/"TunnelSecret"\s*:\s*"[^"]+"/gi, '"TunnelSecret":"[REDACTED]"')
+    .replace(/\bTUNNEL_CRED_CONTENTS\s*[=:]\s*(?:\{[^\r\n]*\}|[^\s,;]+)/gi, 'TUNNEL_CRED_CONTENTS=[REDACTED]')
     .replace(/\b(?:token|tunnel_token|TUNNEL_TOKEN)\s*[=:]\s*[^\s,;]+/gi, 'token=[REDACTED]');
 }
 
@@ -145,7 +149,10 @@ export function verifyCloudflaredExecutable(candidate: string): CloudflaredExecu
   const executable = canonicalExecutable(candidate);
   if (!executable) return { trusted: false, diagnostic: '실행 파일이 없거나 일반 파일이 아닙니다.' };
   if (process.platform !== 'win32') {
-    return { trusted: true, executable, diagnostic: 'cloudflared canonical file 확인 완료 (non-Windows).' };
+    // This desktop release can authenticate the Cloudflare publisher only via
+    // Windows Authenticode. Treating a PATH binary as trusted elsewhere would
+    // hand an attacker both code execution and the decrypted Tunnel token.
+    return { trusted: false, executable, diagnostic: '이 릴리스의 Cloudflare Remote Link는 Windows Authenticode 검증 환경에서만 실행할 수 있습니다.' };
   }
 
   const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
@@ -259,6 +266,65 @@ function normalizeTunnelToken(value: unknown): string {
   return token;
 }
 
+export interface LocalTunnelCredentials {
+  tunnelId: string;
+  contents: string;
+}
+
+/** Convert a remotely-managed connector token into local credentials in memory. */
+export function localTunnelCredentialsFromToken(value: unknown): LocalTunnelCredentials {
+  const token = normalizeTunnelToken(value);
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('Tunnel 토큰을 로컬 최소 권한 자격증명으로 변환할 수 없습니다. Cloudflare Connector 토큰을 다시 복사하세요.');
+  }
+  const raw = decoded as { a?: unknown; t?: unknown; s?: unknown };
+  const accountTag = String(raw.a ?? '');
+  const tunnelId = String(raw.t ?? '').toLowerCase();
+  const tunnelSecret = String(raw.s ?? '');
+  if (!/^[a-z0-9_-]{8,128}$/i.test(accountTag)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tunnelId)
+    || !/^[a-z0-9+/_=-]{20,512}$/i.test(tunnelSecret)) {
+    throw new Error('Tunnel 토큰 필드가 Cloudflare Connector 형식과 일치하지 않습니다.');
+  }
+  return {
+    tunnelId,
+    contents: JSON.stringify({ AccountTag: accountTag, TunnelSecret: tunnelSecret, TunnelID: tunnelId }),
+  };
+}
+
+export function localTunnelIngressConfig(tunnelId: string, hostname: string, localUrl: string): string {
+  // All values have already passed strict hostname/UUID/loopback-origin
+  // normalization. JSON string quoting is valid YAML and prevents injection.
+  return [
+    `tunnel: ${JSON.stringify(tunnelId)}`,
+    'ingress:',
+    `  - hostname: ${JSON.stringify(hostname)}`,
+    `    service: ${JSON.stringify(localUrl)}`,
+    '  - service: http_status:404',
+    '',
+  ].join('\n');
+}
+
+function cloudflaredEnvironment(credentialsContents?: string, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const allowed = [
+    'PATH', 'PATHEXT', 'SystemRoot', 'windir', 'ComSpec',
+    'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
+    'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+    'OS', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'LANG', 'LC_ALL',
+  ];
+  const entries = Object.entries(source);
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of allowed) {
+    const found = entries.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    if (found && typeof found[1] === 'string') env[name] = found[1];
+  }
+  if (credentialsContents) env.TUNNEL_CRED_CONTENTS = credentialsContents;
+  return env;
+}
+
 export interface RemoteLinkRuntime {
   findExecutable?: () => string | undefined;
   verifyExecutable?: (candidate: string) => CloudflaredExecutableTrust;
@@ -266,6 +332,7 @@ export interface RemoteLinkRuntime {
   protectSecret?: (value: string) => string;
   unprotectSecret?: (value: string) => string;
   fetchUrl?: typeof fetch;
+  runtimeDirectory?: string;
 }
 
 function providerInventory(cloudflaredPath?: string, trustDiagnostic?: string): RemoteTransportProviderInfo[] {
@@ -336,6 +403,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
   const protectSecret = runtime.protectSecret ?? ((value: string) => vault.protect(value));
   const unprotectSecret = runtime.unprotectSecret ?? ((value: string) => vault.unprotect(value));
   const fetchUrl = runtime.fetchUrl ?? fetch;
+  const runtimeDirectory = runtime.runtimeDirectory ?? join(mrRobotHome(), 'runtime');
   let processHandle: ChildProcess | null = null;
   const liveChildren = new Set<ChildProcess>();
   let operationGeneration = 0;
@@ -351,13 +419,14 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
   // are deliberately separate. A temporary Quick Tunnel must never overwrite a
   // named tunnel hostname, auto-start preference, or DPAPI-protected token.
   let activeConfig: RemoteLinkConfig | null = null;
+  let activeCloudflaredConfigPath: string | null = null;
   let activeTransientQuick = false;
 
   return {
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.3.6',
+      version: '0.3.8',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',
@@ -413,9 +482,11 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         const active = processHandle;
         const pending = pendingStart;
         const wasTransientQuick = activeTransientQuick;
+        const stoppedConfigPath = activeCloudflaredConfigPath;
         pendingStart = null;
         processHandle = null;
         activeConfig = null;
+        activeCloudflaredConfigPath = null;
         activeTransientQuick = false;
         publicUrl = undefined;
         startedAt = undefined;
@@ -425,6 +496,9 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (active) {
           await terminateChild(ctx, active);
           liveChildren.delete(active);
+        }
+        if (stoppedConfigPath) {
+          try { unlinkSync(stoppedConfigPath); } catch { /* already removed with the child */ }
         }
         // A newer start may have taken ownership while this old process was
         // shutting down. Its state must never be overwritten by stop(A).
@@ -464,12 +538,25 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
 
         const stored = ctx.storage.get<StoredRemoteLinkConfig>('config');
         let tunnelToken = '';
+        let localCredentials: LocalTunnelCredentials | undefined;
+        let cloudflaredConfigPath: string | undefined;
         if (config.provider === 'cloudflare-named') {
           if (!config.hostname) throw new Error('Cloudflare 고정 호스트명을 먼저 저장하세요.');
           if (!stored?.tunnelTokenProtected) throw new Error('Cloudflare Tunnel 토큰을 먼저 저장하세요.');
           try {
             tunnelToken = normalizeTunnelToken(unprotectSecret(stored.tunnelTokenProtected));
+            localCredentials = localTunnelCredentialsFromToken(tunnelToken);
+            mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+            cloudflaredConfigPath = join(runtimeDirectory, `cloudflared-${randomUUID()}.yml`);
+            writeFileSync(
+              cloudflaredConfigPath,
+              localTunnelIngressConfig(localCredentials.tunnelId, config.hostname, config.localUrl),
+              { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+            );
           } catch (error) {
+            if (cloudflaredConfigPath) {
+              try { unlinkSync(cloudflaredConfigPath); } catch { /* no file was committed */ }
+            }
             throw new Error(`저장된 Tunnel 토큰을 읽을 수 없습니다. 이 Windows 계정에서 토큰을 다시 저장하세요. (${error instanceof Error ? error.message : String(error)})`);
           }
         }
@@ -481,20 +568,24 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           let child: ChildProcess;
           try {
             const args = config.provider === 'cloudflare-named'
-              ? ['tunnel', '--no-autoupdate', 'run']
+              ? ['tunnel', '--config', cloudflaredConfigPath!, '--no-autoupdate', 'run', localCredentials!.tunnelId]
               : ['tunnel', '--no-autoupdate', '--url', config.localUrl];
             const childEnv = config.provider === 'cloudflare-named'
-              ? { ...process.env, TUNNEL_TOKEN: tunnelToken }
-              : process.env;
+              ? cloudflaredEnvironment(localCredentials!.contents)
+              : cloudflaredEnvironment();
             child = spawnProcess(executable, args, {
               shell: false,
               windowsHide: true,
               stdio: ['ignore', 'pipe', 'pipe'],
               env: childEnv,
             });
-            if (config.provider === 'cloudflare-named') delete childEnv.TUNNEL_TOKEN;
+            if (config.provider === 'cloudflare-named') delete childEnv.TUNNEL_CRED_CONTENTS;
             tunnelToken = '';
+            if (localCredentials) localCredentials.contents = '';
           } catch (error) {
+            if (cloudflaredConfigPath) {
+              try { unlinkSync(cloudflaredConfigPath); } catch { /* file may not have been created */ }
+            }
             const message = error instanceof Error ? error.message : String(error);
             if (operation === operationGeneration) {
               lastError = message;
@@ -505,6 +596,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           }
           processHandle = child;
           activeConfig = config;
+          activeCloudflaredConfigPath = cloudflaredConfigPath ?? null;
           activeTransientQuick = transientQuick;
           liveChildren.add(child);
           child.once('close', () => liveChildren.delete(child));
@@ -516,12 +608,18 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           const clearPending = (): void => {
             if (pendingStart?.generation === operation && pendingStart.child === child) pendingStart = null;
           };
+          const cleanupChildConfig = (): void => {
+            if (!cloudflaredConfigPath) return;
+            try { unlinkSync(cloudflaredConfigPath); } catch { /* already removed by stop */ }
+            if (activeCloudflaredConfigPath === cloudflaredConfigPath) activeCloudflaredConfigPath = null;
+          };
 
           const cancel = (reason: Error): void => {
             if (settled) return;
             settled = true;
             clearStartTimer();
             clearPending();
+            cleanupChildConfig();
             reject(reason);
           };
           pendingStart = { generation: operation, child, cancel };
@@ -546,6 +644,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
               emitStatus();
             }
             void terminateChild(ctx, child);
+            cleanupChildConfig();
             reject(new Error(detail));
           };
 
@@ -569,6 +668,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           child.stderr?.on('data', onData);
           child.once('error', (error) => fail(error.message));
           child.once('close', (code, signal) => {
+            cleanupChildConfig();
             if (!ownsCurrentProcess()) return;
             diagnostics = redactRemoteLinkDiagnostics(childDiagnostics);
             if (!settled) {
@@ -577,6 +677,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
             }
             processHandle = null;
             activeConfig = null;
+            activeCloudflaredConfigPath = null;
             activeTransientQuick = false;
             publicUrl = undefined;
             startedAt = undefined;

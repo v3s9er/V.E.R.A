@@ -240,6 +240,61 @@ const singleCascadeResult = await singleCascadeLoop.run([], '짧게 답해줘', 
 });
 check('single-mode cascade invokes only one selected model', singleCascadeCalls === 1 && singleCascadeResult.text === 'single-only', `${singleCascadeCalls} / ${singleCascadeResult.text}`);
 
+let settledSuccessUsage;
+let boundedOutputTokens = 0;
+let reservedMaximum = 0;
+const accountedProvider = {
+  ...singleCascadeProvider, id: 'accounted-provider', label: 'Accounted Provider', model: 'accounted-provider',
+  async chat(req) {
+    boundedOutputTokens = req.maxTokens;
+    return { text: 'accounted', toolCalls: [], usage: { promptTokens: 8, completionTokens: 3 } };
+  },
+};
+const accountedLoop = new AgentLoop({ default: () => accountedProvider }, { execute: async () => '{}' });
+await accountedLoop.run([], '예산 정산 테스트', {
+  reserveModelCall: (kind, maximumTokens) => {
+    reservedMaximum = maximumTokens;
+    return { finish: (usage) => { settledSuccessUsage = usage; return true; } };
+  },
+});
+check('API calls reserve a conservative maximum before provider execution and cap output',
+  reservedMaximum > 8 + 3 && boundedOutputTokens === 4096, `${reservedMaximum} / ${boundedOutputTokens}`);
+check('successful provider usage settles the exact call reservation',
+  settledSuccessUsage?.promptTokens === 8 && settledSuccessUsage?.completionTokens === 3);
+
+let failureProviderCalls = 0;
+let failureSettlement = 'not-settled';
+const failingProvider = {
+  ...singleCascadeProvider, id: 'failing-provider', label: 'Failing Provider', model: 'failing-provider',
+  async chat() { failureProviderCalls++; throw new Error('synthetic provider failure'); },
+};
+const failingLoop = new AgentLoop({ default: () => failingProvider }, { execute: async () => '{}' });
+let providerFailureSurfaced = false;
+try {
+  await failingLoop.run([], '실패 정산 테스트', {
+    reserveModelCall: () => ({
+      finish: (usage) => { failureSettlement = usage === undefined ? 'fallback' : 'exact'; return true; },
+    }),
+  });
+} catch { providerFailureSurfaced = true; }
+check('provider exceptions retain the pre-call reservation as fallback debt',
+  providerFailureSurfaced && failureProviderCalls === 1 && failureSettlement === 'fallback');
+
+let rejectedProviderCalls = 0;
+const rejectedProvider = {
+  ...singleCascadeProvider, id: 'rejected-provider', label: 'Rejected Provider', model: 'rejected-provider',
+  async chat() { rejectedProviderCalls++; return { text: 'unsafe', toolCalls: [], usage: { promptTokens: 1, completionTokens: 1 } }; },
+};
+const rejectedLoop = new AgentLoop({ default: () => rejectedProvider }, { execute: async () => '{}' });
+let reservationFailureSurfaced = false;
+try {
+  await rejectedLoop.run([], '동시 예산 거절 테스트', {
+    reserveModelCall: () => { throw new Error('token reservation exhausted'); },
+  });
+} catch { reservationFailureSurfaced = true; }
+check('an exhausted reservation rejects before any provider token can be spent',
+  reservationFailureSurfaced && rejectedProviderCalls === 0);
+
 // Equivalent JSON arguments must share one repeat signature even when a model
 // changes object key order. Two consecutive blocked rounds end the paid loop.
 let repeatedProviderCalls = 0;

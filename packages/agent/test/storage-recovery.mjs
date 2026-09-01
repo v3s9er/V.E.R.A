@@ -70,7 +70,7 @@ console.log('3. one unavailable DPAPI secret does not discard other settings or 
   const dir = join(home, 'config-secret');
   const initial = new ConfigStore(dir);
   const persisted = JSON.parse(readFileSync(initial.file, 'utf8'));
-  const pairingSecret = persisted.pairing.secret;
+  const pairingSecret = initial.pairing.secret;
   const protectedValue = 'dpapi:v1:not-valid-dpapi-ciphertext';
   persisted.providers = [{
     id: 'unavailable-provider',
@@ -89,29 +89,27 @@ console.log('3. one unavailable DPAPI secret does not discard other settings or 
   loaded.updateSettings({ deviceName: 'preserved-after-secret-failure' });
   const saved = JSON.parse(readFileSync(initial.file, 'utf8'));
   check('later saves retain unavailable ciphertext instead of deleting it', saved.providers[0].apiKeyProtected === protectedValue && saved.providers[0].apiKey === undefined);
-  check('later saves preserve unrelated pairing state', saved.pairing.secret === pairingSecret);
+  check('later saves preserve unrelated pairing state in memory', loaded.pairing.secret === pairingSecret);
+  check('administrator pairing secret and PIN stay out of JSON', saved.pairing.secret === undefined && saved.pairing.pin === undefined && saved.pairing.pinCreatedAt === undefined);
   check('DPAPI failure does not quarantine an otherwise valid config', corruptCopies(dir, 'config.json').length === 0);
 }
 
-console.log('4. legacy pairing data receives pinCreatedAt and regeneration refreshes it');
+console.log('4. short pairing PIN is process-local and regeneration never persists it');
 {
   const dir = join(home, 'config-pin-migration');
-  const original = new ConfigStore(dir);
-  const persisted = JSON.parse(readFileSync(original.file, 'utf8'));
-  delete persisted.pairing.pinCreatedAt;
-  writeFileSync(original.file, JSON.stringify(persisted, null, 2), 'utf8');
-
-  const migrated = new ConfigStore(dir);
-  check('legacy PIN timestamp migrates from pairing createdAt', migrated.pinCreatedAt === persisted.pairing.createdAt);
-  const beforeTimestamp = migrated.pinCreatedAt;
-  const beforePin = migrated.pin;
-  migrated.regeneratePin();
-  const savedPairing = JSON.parse(readFileSync(migrated.file, 'utf8')).pairing;
+  const store = new ConfigStore(dir);
+  const beforeTimestamp = store.pinCreatedAt;
+  const beforePin = store.pin;
+  const persistedBefore = readFileSync(store.file, 'utf8');
+  store.regeneratePin();
+  const savedPairing = JSON.parse(readFileSync(store.file, 'utf8')).pairing;
   const collisionFallback = nextPairingPin(beforePin, () => beforePin);
-  check('regeneratePin refreshes the PIN timestamp', migrated.pinCreatedAt >= beforeTimestamp && savedPairing.pinCreatedAt === migrated.pinCreatedAt);
+  check('regeneratePin refreshes the in-memory PIN timestamp', store.pinCreatedAt >= beforeTimestamp);
   check('pairing PIN uses a six-digit generator contract', /^\d{6}$/.test(generatePin()));
   check('collision fallback cannot reissue the consumed PIN', collisionFallback !== beforePin && /^\d{6}$/.test(collisionFallback));
-  check('regeneratePin persists a fresh six-digit PIN', migrated.pin !== beforePin && savedPairing.pin === migrated.pin && /^\d{6}$/.test(migrated.pin));
+  check('regeneratePin issues a fresh six-digit PIN', store.pin !== beforePin && /^\d{6}$/.test(store.pin));
+  check('PIN regeneration performs no disk write', readFileSync(store.file, 'utf8') === persistedBefore);
+  check('saved pairing metadata contains no reusable PIN', savedPairing.pin === undefined && savedPairing.pinCreatedAt === undefined);
 }
 
 console.log('5. conversations recover from backup and keep corrupt source bytes');
