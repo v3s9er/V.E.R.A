@@ -50,6 +50,7 @@ const dependenciesSource = read('packages/agent/src/dependencies.ts');
 const desktopMain = read('packages/desktop/main.mjs');
 const mobileChat = read('apps/mobile/src/screens/ChatScreen.tsx');
 const mobileHome = read('apps/mobile/src/screens/HomeScreen.tsx');
+const mobileApp = read('apps/mobile/App.tsx');
 const mobilePcList = read('apps/mobile/src/screens/PcListScreen.tsx');
 const mobilePcsRegistry = read('apps/mobile/src/pcs.ts');
 const mobileRpc = read('apps/mobile/src/pairing.ts');
@@ -111,6 +112,10 @@ if (!connectGate.includes('const desktopLocalMode = Boolean(window.mrRobotDeskto
   || !connectGate.includes('await connectTo(localPc, false)')
   || !connectGate.includes('로컬 에이전트를 준비하는 중')) throw new Error('desktop local startup or explicit connection-manager routing can regress');
 if (!connectGate.includes('if (manageConnections)') || !profileMenu.includes('원격 PC 추가·관리') || !profileMenu.includes('로컬 에이전트 · 준비됨')) throw new Error('desktop optional remote-PC management is not separated from local startup');
+if (!chat.includes('aria-label="실행 PC"')
+  || !chat.includes('onSwitchExecutionPc?.(event.target.value)')
+  || !app.includes('executionPcs={pcList}')
+  || !profileMenu.includes('실행 PC 선택')) throw new Error('desktop chat cannot explicitly change its active execution host');
 if (!connectGate.includes("/^(?:\\d{6}|\\d{12})$/.test(pin)") || !connectGate.includes("slice(0, 12)") || !connectGate.includes('외출용 12자리 일회용 코드')) throw new Error('desktop remote-PC registration does not accept the stronger travel handoff code');
 if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
 if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
@@ -177,6 +182,10 @@ if (!mobileChat.includes('const defaultProvider = providers.find((provider) => p
   || !mobileChat.includes('applyConversationConfiguration(conversationId')
   || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile model, preset, workspace, access, or default-provider settings can race command execution');
 if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyboardShouldPersistTaps="handled"')) throw new Error('mobile PC setup form cannot scroll above the keyboard');
+if (!mobileHome.includes('고정된 모체 PC 없이')
+  || !mobileHome.includes('onSelectPc(candidate)')
+  || !mobileHome.includes('PC 추가·연결 관리')
+  || !mobileApp.includes('selectExecutionPcRef')) throw new Error('mobile cannot directly choose or change an independent execution PC');
 if (!mobilePcsRegistry.includes("if (!origin) throw new Error('이 PC에 HTTPS 접속 주소가 없습니다.")) throw new Error('mobile HTTP calls can fall back to an unsafe plaintext LAN origin');
 if (mobileRpc.includes('obj.secret') || mobilePcList.includes('payload.secret') || webRpc.includes('obj.secret')) throw new Error('legacy QR payloads can still import a long-lived device secret');
 if (!mobileRpc.includes("obj.version !== 3") || !webRpc.includes("obj.version !== 3")

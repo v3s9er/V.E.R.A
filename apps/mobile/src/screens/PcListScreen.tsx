@@ -331,7 +331,7 @@ export function PcListScreen({
     <View style={styles.root}>
       <View style={[styles.header, { paddingTop: Math.max(insets.top + 18, 38) }]}>
         <Text style={styles.logo}>Mr.Robot</Text>
-        <Text style={styles.sub}>{pcs.length ? '연결할 PC를 선택하세요' : '모바일 연결 마법사'}</Text>
+        <Text style={styles.sub}>{pcs.length ? `등록된 PC ${pcs.length.toLocaleString()}대 · 실행 대상을 선택하세요` : '모바일 연결 마법사'}</Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.list}>
@@ -363,7 +363,7 @@ export function PcListScreen({
                 onPress={() => void connect(pc)}
                 disabled={connectingId !== null}
               >
-                {connectingId === pc.id ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.connectText}>연결</Text>}
+                {connectingId === pc.id ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.connectText}>이 PC에서 실행</Text>}
               </TouchableOpacity>
               <TouchableOpacity style={[styles.deleteBtn, connectingId !== null && styles.btnDisabled]} onPress={() => void deletePc(pc.id)} disabled={connectingId !== null}>
                 <Text style={styles.deleteText}>✕</Text>

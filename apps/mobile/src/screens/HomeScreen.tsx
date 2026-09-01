@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Keyboard, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Keyboard, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { AppConnectionState } from '../../App';
 import type { MrRobotClient } from '../rpc';
@@ -23,18 +23,23 @@ const TABS: Array<{ key: Tab; label: string; icon: string }> = [
 export function HomeScreen({
   client,
   pc,
+  pcs,
   connectionState,
   onRetryConnection,
-  onSwitchPc,
+  onSelectPc,
+  onManagePcs,
 }: {
   client: MrRobotClient;
   pc: SavedPc;
+  pcs: SavedPc[];
   connectionState: AppConnectionState;
   onRetryConnection: () => void;
-  onSwitchPc: () => void;
+  onSelectPc: (pc: SavedPc) => void;
+  onManagePcs: () => void;
 }) {
   const [tab, setTab] = useState<Tab>('chat');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [showPcPicker, setShowPcPicker] = useState(false);
   const insets = useSafeAreaInsets();
   const authenticated = connectionState === 'connected' && client.authed;
 
@@ -49,14 +54,14 @@ export function HomeScreen({
       <View style={[styles.header, { paddingTop: Math.max(insets.top, 12) }]}>
         <View style={{ flex: 1 }}>
           <Text style={styles.pcName} numberOfLines={1}>
-            🖥️ {pc.name}
+            실행 PC · {pc.name}
           </Text>
           <Text style={styles.pcAddr} numberOfLines={1}>
             {connectionOrigins(pc)[0] ?? '보안 접속 주소 없음'}
           </Text>
         </View>
-        <TouchableOpacity style={styles.switchBtn} onPress={onSwitchPc}>
-          <Text style={styles.switchText}>PC 전환</Text>
+        <TouchableOpacity style={styles.switchBtn} onPress={() => setShowPcPicker(true)} accessibilityLabel="실행 PC 선택">
+          <Text style={styles.switchText}>변경⌄</Text>
         </TouchableOpacity>
       </View>
 
@@ -87,6 +92,40 @@ export function HomeScreen({
           </TouchableOpacity>
         ))}
       </View>}
+
+      <Modal visible={showPcPicker} transparent animationType="fade" onRequestClose={() => setShowPcPicker(false)}>
+        <View style={[styles.pickerBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+          <View style={styles.pickerCard}>
+            <View style={styles.pickerHeading}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pickerTitle}>실행 PC 선택</Text>
+                <Text style={styles.pickerCopy}>고정된 모체 PC 없이, 지금 명령을 처리할 에이전트를 선택합니다.</Text>
+              </View>
+              <TouchableOpacity style={styles.pickerClose} onPress={() => setShowPcPicker(false)} accessibilityLabel="실행 PC 선택 닫기"><Text style={styles.pickerCloseText}>×</Text></TouchableOpacity>
+            </View>
+            <ScrollView style={styles.pickerList} contentContainerStyle={styles.pickerListContent}>
+              {pcs.map((candidate) => {
+                const selected = candidate.id === pc.id;
+                return <TouchableOpacity
+                  key={candidate.id}
+                  style={[styles.pickerPc, selected && styles.pickerPcSelected]}
+                  disabled={selected}
+                  accessibilityState={{ selected }}
+                  onPress={() => {
+                    setShowPcPicker(false);
+                    onSelectPc(candidate);
+                  }}
+                >
+                  <View style={styles.pickerPcIcon}><Text>🖥️</Text></View>
+                  <View style={{ flex: 1 }}><Text style={styles.pickerPcName} numberOfLines={1}>{candidate.name}</Text><Text style={styles.pickerPcRoute} numberOfLines={1}>{connectionOrigins(candidate)[0] ?? '보안 접속 주소 없음'}</Text></View>
+                  <Text style={[styles.pickerPcState, selected && styles.pickerPcStateSelected]}>{selected ? '현재 실행' : '선택'}</Text>
+                </TouchableOpacity>;
+              })}
+            </ScrollView>
+            <TouchableOpacity style={styles.manageBtn} onPress={() => { setShowPcPicker(false); onManagePcs(); }}><Text style={styles.manageBtnText}>＋ PC 추가·연결 관리</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -129,4 +168,22 @@ const styles = StyleSheet.create({
   tabIcon: { fontSize: 20, opacity: 0.45 },
   tabLabel: { fontSize: 11, color: colors.faint, fontWeight: '600' },
   tabActive: { color: colors.accent, opacity: 1 },
+  pickerBackdrop: { flex: 1, justifyContent: 'center', paddingHorizontal: 18, backgroundColor: 'rgba(2,5,12,.78)' },
+  pickerCard: { width: '100%', maxHeight: '78%', padding: 16, gap: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: '#111729' },
+  pickerHeading: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  pickerTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  pickerCopy: { marginTop: 5, color: colors.dim, fontSize: 12, lineHeight: 17 },
+  pickerClose: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm },
+  pickerCloseText: { color: colors.dim, fontSize: 22, lineHeight: 24 },
+  pickerList: { flexGrow: 0 },
+  pickerListContent: { gap: 8 },
+  pickerPc: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, backgroundColor: 'rgba(255,255,255,.025)' },
+  pickerPcSelected: { borderColor: 'rgba(124,92,255,.72)', backgroundColor: 'rgba(124,92,255,.14)' },
+  pickerPcIcon: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, backgroundColor: 'rgba(124,92,255,.12)' },
+  pickerPcName: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  pickerPcRoute: { marginTop: 3, color: colors.faint, fontSize: 10.5 },
+  pickerPcState: { color: colors.accent2, fontSize: 11, fontWeight: '800' },
+  pickerPcStateSelected: { color: colors.accent },
+  manageBtn: { alignItems: 'center', padding: 12, borderWidth: 1, borderColor: 'rgba(34,211,238,.38)', borderRadius: radius.md, backgroundColor: 'rgba(34,211,238,.08)' },
+  manageBtnText: { color: colors.accent2, fontSize: 13, fontWeight: '800' },
 });

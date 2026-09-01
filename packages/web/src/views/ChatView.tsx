@@ -87,11 +87,15 @@ const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detai
   { value: 'full', label: '전체 허용', short: '전체', detail: '기기 권한 상한 안에서 PC 전체 작업을 허용합니다.' },
 ];
 
-export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc }: {
+export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc }: {
   profile?: ReactNode;
   voiceCommand?: { id: number; text: string } | null;
   onVoiceCommandHandled?: (id: number) => void;
   activePc?: SavedPc | null;
+  /** Every independently paired agent host available to this controller. */
+  executionPcs?: SavedPc[];
+  /** Changes the agent host that will receive subsequent conversation work. */
+  onSwitchExecutionPc?: (id: string) => void;
 }) {
   const { client } = useMrRobot();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -750,6 +754,16 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? (status || '작업 준비 중') : activeModeLabel}</span>
             </div>
             <div className="chat-quick-controls">
+              {activePc && executionPcs.length > 0 && <Select
+                className="execution-pc-select"
+                aria-label="실행 PC"
+                title="명령과 파일 작업을 실행할 PC"
+                value={activePc.id}
+                onChange={(event) => onSwitchExecutionPc?.(event.target.value)}
+                disabled={busy || executionConfigSaving || executionPcs.length < 2}
+              >
+                {executionPcs.map((pc) => <option key={pc.id} value={pc.id}>실행 PC · {pc.name}</option>)}
+              </Select>}
               <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => {
                 const target = selectedRef.current;
                 if (!target) return;

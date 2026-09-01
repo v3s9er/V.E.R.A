@@ -319,7 +319,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
               </div>
             </div>
             <div className="pc-actions">
-              <Button onClick={() => void connectTo(pc)}>연결</Button>
+              <Button onClick={() => void connectTo(pc)}>이 PC에서 실행</Button>
               <Button variant="ghost" onClick={() => void deletePc(pc.id)} title="등록 해제">
                 ✕
               </Button>

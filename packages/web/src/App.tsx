@@ -187,11 +187,11 @@ export function App() {
                   className="input pc-switch"
                   value={activePc?.id ?? ''}
                   onChange={(e) => switchPc(e.target.value)}
-                  title="PC 전환"
+                  title="실행 PC 전환"
                 >
                   {pcList.map((pc) => (
                     <option key={pc.id} value={pc.id}>
-                      🖥️ {pc.name} · {pc.activeOrigin ?? pc.origins?.[0] ?? `${pc.host}:${pc.port}`}
+                      실행 PC · {pc.name} · {pc.activeOrigin ?? pc.origins?.[0] ?? `${pc.host}:${pc.port}`}
                     </option>
                   ))}
                 </select>
@@ -221,6 +221,8 @@ export function App() {
           </header>}
           {view === 'chat' && <ChatView
             activePc={activePc}
+            executionPcs={pcList}
+            onSwitchExecutionPc={switchPc}
             profile={<ProfileMenu standalone={desktopStandalone} embedded view={view} onChange={setView} deviceName={activePc?.name ?? ''} connected={connected} pcs={pcList} activePcId={activePc?.id} onSwitchPc={switchPc} onDisconnect={disconnect} onManagePcs={openConnectionManager} />}
             voiceCommand={voiceCommands[0] ?? null}
             onVoiceCommandHandled={(id) => setVoiceCommands((queued) => queued.filter((command) => command.id !== id))}

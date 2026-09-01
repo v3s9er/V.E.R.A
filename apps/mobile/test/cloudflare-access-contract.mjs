@@ -217,6 +217,19 @@ check('device bearer is bound to the one origin that issued it',
   pcsRuntime.connectionOrigins(unsignedAlternate).length === 1
   && pcsRuntime.connectionOrigins(unsignedAlternate)[0] === 'https://robot.example.com:443'
   && pcsRuntime.pcAuthenticatedHeaders(unsignedAlternate, 'https://attacker.invalid:443/api/ping')['x-mr-robot-token'] === undefined);
+const mobileMesh = await pcsRuntime.upsertPc(reloaded, {
+  name: 'Second execution PC',
+  host: 'laptop.example.com',
+  protocol: 'https',
+  port: 443,
+  origins: ['https://laptop.example.com:443'],
+  activeOrigin: 'https://laptop.example.com:443',
+  credentialOrigin: 'https://laptop.example.com:443',
+  secret: 'second-agent-bearer',
+});
+check('mobile registry keeps independently authenticated execution PCs side by side', mobileMesh.length === 2
+  && mobileMesh[0].id === runtimePc.id
+  && pcsRuntime.connectionOrigins(mobileMesh[1])[0] === 'https://laptop.example.com:443');
 await pcsRuntime.savePcs([]);
 check('runtime deletion removes every SecureStore credential', [...secureStorage.keys()].every((key) => !key.endsWith(runtimePc.id)));
 

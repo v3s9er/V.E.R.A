@@ -46,8 +46,8 @@ export function ProfileMenu({
       {(Object.keys(LABELS) as ViewKey[]).map((key) => key === view ? null :
         <button key={key} className="profile-action" onClick={() => { onChange(key); setOpen(false); }}>{LABELS[key]}</button>)}
       {pcs.length > 1 && <div className="profile-section">
-        <div className="profile-section-label">연결된 PC</div>
-        {pcs.map((pc) => <button key={pc.id} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}</button>)}
+        <div className="profile-section-label">실행 PC 선택</div>
+        {pcs.map((pc) => <button key={pc.id} className={`profile-action ${pc.id === activePcId ? 'active' : ''}`} onClick={() => { onSwitchPc(pc.id); setOpen(false); }}>🖥️ {pc.name}{pc.id === activePcId ? ' · 현재 실행' : ''}</button>)}
       </div>}
       {desktopLocal
         ? <button className="profile-action" onClick={() => { onManagePcs(); setOpen(false); }}>원격 PC 추가·관리</button>

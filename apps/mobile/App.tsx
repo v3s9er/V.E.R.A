@@ -18,9 +18,11 @@ export default function App() {
   const client = clientRef.current;
 
   const [activePc, setActivePc] = useState<SavedPc | null>(null);
+  const [pcList, setPcList] = useState<SavedPc[]>([]);
   const [connectionState, setConnectionState] = useState<AppConnectionState>('offline');
   const activePcRef = useRef<SavedPc | null>(null);
   const reconnectNowRef = useRef<() => void>(() => undefined);
+  const selectExecutionPcRef = useRef<(pc: SavedPc) => void>(() => undefined);
 
   useEffect(() => { activePcRef.current = activePc; }, [activePc]);
 
@@ -119,6 +121,21 @@ export default function App() {
     };
 
     reconnectNowRef.current = () => scheduleReconnect(true);
+    selectExecutionPcRef.current = (pc: SavedPc) => {
+      if (activePcRef.current?.id === pc.id) return;
+      // Invalidate the old host before closing its socket so an onClose event
+      // cannot accidentally schedule the previous PC again.
+      operationGeneration += 1;
+      clearReconnect();
+      reconnectRequested = false;
+      activePcRef.current = null;
+      client.close();
+      activePcRef.current = pc;
+      setActivePc(pc);
+      setConnectionState('reconnecting');
+      void setLastPcId(pc.id);
+      scheduleReconnect(true);
+    };
     client.onClose = () => {
       if (!mounted || currentAppState !== 'active' || !activePcRef.current) return;
       setConnectionState('reconnecting');
@@ -148,6 +165,7 @@ export default function App() {
     });
 
     void Promise.all([loadPcs(), getLastPcId()]).then(([pcs, lastId]) => {
+      if (mounted) setPcList(pcs);
       if (!mounted || activePcRef.current) return;
       const last = pcs.find((pc) => pc.id === lastId && pc.secret);
       if (!last) return;
@@ -162,6 +180,7 @@ export default function App() {
       clearReconnect();
       appStateSubscription.remove();
       reconnectNowRef.current = () => undefined;
+      selectExecutionPcRef.current = () => undefined;
       client.dispose();
     };
   }, [client]);
@@ -170,9 +189,10 @@ export default function App() {
     activePcRef.current = pc;
     setActivePc(pc);
     setConnectionState('connected');
+    void loadPcs().then(setPcList);
   };
 
-  const switchPc = (): void => {
+  const openPcManager = (): void => {
     client.close();
     activePcRef.current = null;
     setActivePc(null);
@@ -189,9 +209,11 @@ export default function App() {
           <HomeScreen
             client={client}
             pc={activePc}
+            pcs={pcList}
             connectionState={connectionState}
             onRetryConnection={() => reconnectNowRef.current()}
-            onSwitchPc={switchPc}
+            onSelectPc={(pc) => selectExecutionPcRef.current(pc)}
+            onManagePcs={openPcManager}
           />
         )}
       </View>

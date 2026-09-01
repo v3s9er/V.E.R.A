@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { loadPcsForEnvironment, type DesktopPcLoadResult, type SavedPc } from '../src/pcs';
+import { connectionOrigins, loadPcsForEnvironment, upsertPc, type DesktopPcLoadResult, type SavedPc } from '../src/pcs';
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -69,6 +69,38 @@ async function loadWith(result: DesktopPcLoadResult, saves: SavedPc[][]): Promis
   await assert.rejects(() => loadWith({ ok: false, error: 'vault unavailable' }, []), /vault unavailable/);
   assert.notEqual(local.getItem(KEY), null, 'failed secure read must preserve recoverable legacy state');
   assert.notEqual(session.getItem(KEY), null, 'failed secure read must preserve recoverable session state');
+}
+
+{
+  const secondOrigin = 'https://laptop.example.com:443';
+  const mesh = upsertPc([pc], {
+    name: 'Laptop',
+    host: 'laptop.example.com',
+    port: 443,
+    protocol: 'https',
+    origins: [secondOrigin],
+    activeOrigin: secondOrigin,
+    credentialOrigin: secondOrigin,
+    secret: 'second-device-bearer',
+  });
+  assert.equal(mesh.length, 2, 'a controller must retain two independent execution PCs');
+  assert.deepEqual(mesh.map((item) => connectionOrigins(item)[0]), [
+    'https://robot.example.com:443',
+    secondOrigin,
+  ]);
+
+  const updated = upsertPc(mesh, {
+    name: 'Laptop renamed',
+    host: 'laptop.example.com',
+    port: 443,
+    protocol: 'https',
+    origins: [secondOrigin],
+    activeOrigin: secondOrigin,
+    credentialOrigin: secondOrigin,
+    secret: 'rotated-second-device-bearer',
+  });
+  assert.equal(updated.length, 2, 'updating one execution PC must not replace another host');
+  assert.equal(updated[1]?.id, mesh[1]?.id, 'host selection identity must remain stable after re-pairing');
 }
 
 console.log('web PC credential-storage tests passed');
