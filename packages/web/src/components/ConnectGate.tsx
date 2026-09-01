@@ -35,6 +35,8 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
   const [name, setName] = useState('');
   const [hostPort, setHostPort] = useState('');
   const [pin, setPin] = useState('');
+  const [accessClientId, setAccessClientId] = useState('');
+  const [accessClientSecret, setAccessClientSecret] = useState('');
   const [addBusy, setAddBusy] = useState(false);
   const connectAttempt = useRef(0);
   const clientOwner = useRef<number | null>(null);
@@ -178,7 +180,16 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
     setAddBusy(true);
     setError('');
     try {
-      const secret = await exchangePin(hostPort, pin, name.trim() || '웹 브라우저');
+      const accessId = accessClientId.trim();
+      const accessSecret = accessClientSecret.trim();
+      if (Boolean(accessId) !== Boolean(accessSecret)) throw new Error('Cloudflare Access Client ID와 Secret을 함께 입력하세요.');
+      const secret = await exchangePin(
+        hostPort,
+        pin,
+        name.trim() || '웹 브라우저',
+        'ask',
+        accessId && accessSecret ? { clientId: accessId, clientSecret: accessSecret } : undefined,
+      );
       const endpoint = parsePcEndpoint(hostPort);
       const pc: Omit<SavedPc, 'id' | 'addedAt'> = {
         name: name.trim() || hostPort.trim(),
@@ -187,6 +198,8 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
         protocol: endpoint.protocol,
         origins: [endpoint.origin],
         activeOrigin: endpoint.origin,
+        credentialOrigin: endpoint.origin,
+        ...(accessId && accessSecret ? { cloudflareAccessOrigin: endpoint.origin } : {}),
         secret,
       };
       const next = upsertPc(await loadPcsForEnvironment(), pc);
@@ -199,6 +212,8 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       setName('');
       setHostPort('');
       setPin('');
+      setAccessClientId('');
+      setAccessClientSecret('');
       setShowAdd(false);
       const saved = securedNext.find((item) => connectionOrigins(item).includes(endpoint.origin)) ?? securedNext[securedNext.length - 1];
       if (!saved) throw new Error('저장된 PC 연결 정보를 다시 불러오지 못했습니다.');
@@ -328,6 +343,14 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
                 inputMode="numeric"
               />
             </Field>
+            {window.mrRobotDesktop && <>
+              <Field label="Cloudflare Access Client ID (선택)" hint="원격 PC가 Cloudflare Access로 보호된 경우 Service Token 값을 입력합니다.">
+                <Input type="password" value={accessClientId} onChange={(e) => setAccessClientId(e.target.value)} autoComplete="off" placeholder="…access" />
+              </Field>
+              <Field label="Cloudflare Access Client Secret (선택)" hint="두 값은 등록 직후 Windows 보안 저장소로 이동하고 화면에서 지워집니다.">
+                <Input type="password" value={accessClientSecret} onChange={(e) => setAccessClientSecret(e.target.value)} autoComplete="new-password" placeholder="Service Token Secret" />
+              </Field>
+            </>}
             <div className="chat-actions">
               <Button variant="ghost" onClick={() => setShowAdd(false)} disabled={addBusy}>
                 취소

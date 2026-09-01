@@ -30,7 +30,15 @@ interface OrcaStatus {
 interface VoiceConfig { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number }
 interface RemoteHandoffInfo { pin: string; expiresAt: number }
 interface RemotePairingInfo { remoteHandoff?: RemoteHandoffInfo }
+interface RemotePairingQr {
+  pin: string;
+  expiresAt?: number;
+  qrUrl: string;
+  requiresManualAccess: boolean;
+  revealExpiresAt?: number;
+}
 const KIND_LABEL: Record<string, string> = { integration: '연동', transport: '연결', tool: '도구', workflow: '워크플로', input: '입력' };
+const ACCESS_QR_REVEAL_MS = 60_000;
 const DEFAULT_REMOTE_CONFIG: RemoteLinkConfig = {
   provider: 'cloudflare-quick',
   localUrl: 'http://127.0.0.1:8787',
@@ -57,15 +65,30 @@ export function PluginsView() {
   const [remoteStatus, setRemoteStatus] = useState<RemoteLinkStatus | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<RemoteLinkConfig>(DEFAULT_REMOTE_CONFIG);
   const [remoteTunnelToken, setRemoteTunnelToken] = useState('');
+  const [remoteAccessClientId, setRemoteAccessClientId] = useState('');
+  const [remoteAccessClientSecret, setRemoteAccessClientSecret] = useState('');
   const [cloudflared, setCloudflared] = useState<DependencyInfo | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteStage, setRemoteStage] = useState('');
-  const [remotePairing, setRemotePairing] = useState<{ pin: string; expiresAt?: number; qrUrl: string } | null>(null);
+  const [remotePairing, setRemotePairing] = useState<RemotePairingQr | null>(null);
   const [remoteHandoff, setRemoteHandoff] = useState<RemoteHandoffInfo | null>(null);
   const [quickLinkConfirm, setQuickLinkConfirm] = useState<PluginInfo | null>(null);
+  const [namedQrConfirm, setNamedQrConfirm] = useState(false);
+  const [namedQrBusy, setNamedQrBusy] = useState(false);
   const remoteActionRef = useRef(false);
   const remoteStatusRef = useRef<RemoteLinkStatus | null>(null);
+  const remotePairingEpochRef = useRef(0);
+  const remotePairingTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+
+  const clearRemotePairingQr = useCallback((): void => {
+    remotePairingEpochRef.current += 1;
+    if (remotePairingTimerRef.current !== null) {
+      window.clearTimeout(remotePairingTimerRef.current);
+      remotePairingTimerRef.current = null;
+    }
+    if (mountedRef.current) setRemotePairing(null);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -73,6 +96,9 @@ export function PluginsView() {
     return () => {
       mountedRef.current = false;
       remoteActionRef.current = true;
+      remotePairingEpochRef.current += 1;
+      if (remotePairingTimerRef.current !== null) window.clearTimeout(remotePairingTimerRef.current);
+      remotePairingTimerRef.current = null;
     };
   }, []);
 
@@ -82,17 +108,22 @@ export function PluginsView() {
   }, []);
 
   const refreshRemotePairing = useCallback(async (status: RemoteLinkStatus | null): Promise<void> => {
+    clearRemotePairingQr();
+    const pairingEpoch = remotePairingEpochRef.current;
     if (!status?.running || !status.publicUrl) {
-      if (mountedRef.current) setRemotePairing(null);
+      if (mountedRef.current) setRemoteHandoff(null);
       return;
     }
     const pairing = await client.call('pairing.info', {}) as RemotePairingInfo;
     const handoff = pairing.remoteHandoff;
     if (!handoff) {
       if (mountedRef.current) setRemoteHandoff(null);
-      if (mountedRef.current) setRemotePairing(null);
       return;
     }
+    if (mountedRef.current) setRemoteHandoff(handoff);
+    // Named-tunnel handoff stays behind an explicit reveal even though the
+    // long-lived Cloudflare credential is deliberately omitted from the QR.
+    if (status.provider === 'cloudflare-named') return;
     const payload = JSON.stringify({
       app: 'mr-robot',
       version: 3,
@@ -103,11 +134,59 @@ export function PluginsView() {
       pin: handoff.pin,
     });
     const qrUrl = await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' });
-    if (mountedRef.current) {
-      setRemoteHandoff(handoff);
-      setRemotePairing({ pin: handoff.pin, expiresAt: handoff.expiresAt, qrUrl });
+    if (mountedRef.current && pairingEpoch === remotePairingEpochRef.current) {
+      setRemotePairing({ pin: handoff.pin, expiresAt: handoff.expiresAt, qrUrl, requiresManualAccess: false });
     }
-  }, [client]);
+  }, [clearRemotePairingQr, client]);
+
+  const revealNamedPairingQr = async (): Promise<void> => {
+    const status = remoteStatusRef.current;
+    if (namedQrBusy || !status?.running || status.provider !== 'cloudflare-named' || !status.publicUrl) return;
+    setNamedQrBusy(true);
+    setError('');
+    clearRemotePairingQr();
+    try {
+      const pairing = await client.call('pairing.info', {}) as RemotePairingInfo;
+      const handoff = pairing.remoteHandoff;
+      if (!handoff) throw new Error('먼저 12자리 일회용 외출 코드를 만드세요.');
+      const payload = await client.call('plugins.call', {
+        name: 'remote-link.pairing.payload',
+        params: { host: status.publicUrl, pin: handoff.pin, expiresAt: handoff.expiresAt },
+      }) as string;
+      const qrUrl = await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' });
+      const latestPairing = await client.call('pairing.info', {}) as RemotePairingInfo;
+      const currentStatus = remoteStatusRef.current;
+      if (!mountedRef.current
+        || !currentStatus?.running
+        || currentStatus.provider !== 'cloudflare-named'
+        || currentStatus.accessProtected !== true
+        || currentStatus.publicUrl !== status.publicUrl
+        || latestPairing.remoteHandoff?.pin !== handoff.pin
+        || latestPairing.remoteHandoff?.expiresAt !== handoff.expiresAt) return;
+      const revealEpoch = remotePairingEpochRef.current;
+      const revealExpiresAt = Date.now() + ACCESS_QR_REVEAL_MS;
+      setRemoteHandoff(handoff);
+      setRemotePairing({
+        pin: handoff.pin,
+        expiresAt: handoff.expiresAt,
+        qrUrl,
+        requiresManualAccess: true,
+        revealExpiresAt,
+      });
+      remotePairingTimerRef.current = window.setTimeout(() => {
+        if (remotePairingEpochRef.current !== revealEpoch) return;
+        remotePairingEpochRef.current += 1;
+        remotePairingTimerRef.current = null;
+        if (mountedRef.current) setRemotePairing(null);
+      }, ACCESS_QR_REVEAL_MS);
+      setCallResult('장기 자격증명을 제외한 1회용 QR을 60초간 표시합니다. Access 값은 휴대폰에서 직접 입력하세요.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      clearRemotePairingQr();
+    } finally {
+      if (mountedRef.current) setNamedQrBusy(false);
+    }
+  };
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -160,11 +239,13 @@ export function PluginsView() {
     void refresh();
     const off = client.on('plugins.changed', (data) => setPlugins(data as PluginInfo[]));
     const offPairing = client.on('pairing.changed', () => {
+      clearRemotePairingQr();
       setRemoteHandoff(null);
       if (canManage) void refreshRemotePairing(remoteStatusRef.current).catch(() => setRemotePairing(null));
     });
     const offRemoteLink = client.on('remote-link.changed', (data) => {
       if (!canManage) return;
+      clearRemotePairingQr();
       const status = data as RemoteLinkStatus;
       commitRemoteStatus(status);
       if (status.running) setRemoteConfig(status.config);
@@ -172,7 +253,7 @@ export function PluginsView() {
       void refreshRemotePairing(status).catch(() => setRemotePairing(null));
     });
     return () => { off(); offPairing(); offRemoteLink(); };
-  }, [canManage, client, commitRemoteStatus, refresh, refreshRemotePairing]);
+  }, [canManage, clearRemotePairingQr, client, commitRemoteStatus, refresh, refreshRemotePairing]);
 
   useEffect(() => {
     if (!canManage) return;
@@ -272,14 +353,41 @@ export function PluginsView() {
     try {
       const saved = await client.call('plugins.call', {
         name: 'remote-link.config.set',
-        params: { ...remoteConfig, tunnelToken: remoteTunnelToken.trim() || undefined },
+        params: {
+          ...remoteConfig,
+          tunnelToken: remoteTunnelToken.trim() || undefined,
+          accessClientId: remoteAccessClientId.trim() || undefined,
+          accessClientSecret: remoteAccessClientSecret.trim() || undefined,
+        },
       }) as RemoteLinkConfig;
       setRemoteConfig(saved);
       setRemoteTunnelToken('');
+      setRemoteAccessClientId('');
+      setRemoteAccessClientSecret('');
       setCallResult(saved.provider === 'cloudflare-named'
-        ? 'Cloudflare 고정 Tunnel 설정과 암호화된 자격증명을 저장했습니다.'
+        ? `Cloudflare 고정 Tunnel 설정을 저장했습니다.${saved.hasAccessCredentials ? ' Access 서비스 자격증명은 Windows DPAPI로 보호됩니다.' : ''}`
         : 'Cloudflare Quick Link 설정을 저장했습니다.');
       await refreshRemoteLink();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const clearRemoteAccessCredentials = async (): Promise<void> => {
+    if (remoteBusy || remoteStatus?.running) return;
+    clearRemotePairingQr();
+    setRemoteBusy(true); setError('');
+    try {
+      const saved = await client.call('plugins.call', {
+        name: 'remote-link.config.set',
+        params: { ...remoteConfig, clearAccessCredentials: true, accessClientId: undefined, accessClientSecret: undefined },
+      }) as RemoteLinkConfig;
+      setRemoteConfig(saved);
+      setRemoteAccessClientId('');
+      setRemoteAccessClientSecret('');
+      setCallResult('이 PC의 Cloudflare Access 서비스 자격증명을 삭제했습니다. Cloudflare에서도 해당 Service Token을 폐기하세요.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -402,9 +510,18 @@ export function PluginsView() {
       configChanged = true;
       await client.call('plugins.call', {
         name: 'remote-link.config.set',
-        params: { ...remoteConfig, tunnelToken: remoteTunnelToken.trim() || undefined },
+        params: {
+          ...remoteConfig,
+          tunnelToken: remoteTunnelToken.trim() || undefined,
+          accessClientId: remoteAccessClientId.trim() || undefined,
+          accessClientSecret: remoteAccessClientSecret.trim() || undefined,
+        },
       });
-      if (mountedRef.current) setRemoteTunnelToken('');
+      if (mountedRef.current) {
+        setRemoteTunnelToken('');
+        setRemoteAccessClientId('');
+        setRemoteAccessClientSecret('');
+      }
 
       advance(4, '암호화 터널 시작');
       const status = await client.call('plugins.call', { name: 'remote-link.start', params: {} }) as RemoteLinkStatus;
@@ -480,11 +597,11 @@ export function PluginsView() {
   };
 
   const stopRemoteLink = async (): Promise<void> => {
+    clearRemotePairingQr();
     setRemoteBusy(true); setError('');
     try {
       const status = await client.call('plugins.call', { name: 'remote-link.stop', params: {} }) as RemoteLinkStatus;
       commitRemoteStatus(status);
-      setRemotePairing(null);
       setRemoteHandoff(null);
       setCallResult('원격 링크를 닫았습니다. 저장된 고정 주소와 암호화 토큰은 유지됩니다.');
     } catch (err) {
@@ -496,13 +613,19 @@ export function PluginsView() {
 
   const createRemoteHandoff = async (): Promise<void> => {
     if (remoteBusy || !remoteStatus?.running || !remoteStatus.publicUrl) return;
+    clearRemotePairingQr();
     setRemoteBusy(true);
     setError('');
     try {
+      if (remoteStatus.provider === 'cloudflare-named') {
+        await client.call('plugins.call', { name: 'remote-link.verify', params: {} }, 30_000);
+      }
       const handoff = await client.call('pairing.createRemoteHandoff', { ttlMinutes: 24 * 60 }) as RemoteHandoffInfo;
       setRemoteHandoff(handoff);
       await refreshRemotePairing(remoteStatus);
-      setCallResult('24시간·1회용 외출 코드를 만들었습니다. 한 기기가 연결되거나 앱이 재시작되면 즉시 폐기됩니다.');
+      setCallResult(remoteStatus.provider === 'cloudflare-named'
+        ? '24시간·1회용 외출 코드를 만들었습니다. 장기 Access 자격증명을 제외한 QR을 60초간 표시할 수 있습니다.'
+        : '24시간·1회용 외출 코드를 만들었습니다. 한 기기가 연결되거나 앱이 재시작되면 즉시 폐기됩니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -521,10 +644,10 @@ export function PluginsView() {
   };
 
   const revokeRemoteHandoff = async (): Promise<void> => {
+    clearRemotePairingQr();
     try {
       await client.call('pairing.revokeRemoteHandoff', {});
       setRemoteHandoff(null);
-      setRemotePairing(null);
       setCallResult('외출용 일회용 코드를 폐기했습니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -659,7 +782,8 @@ export function PluginsView() {
                 <Badge tone={remoteStatus?.running ? 'ok' : 'warn'}>{remoteStatus?.running ? `${remoteStatus.temporary ? '임시' : '고정'} 링크 실행 중` : '링크 닫힘'}</Badge>
                 <Badge tone={cloudflared?.installed ? 'ok' : 'warn'}>{cloudflared?.installed ? 'cloudflared 설치됨' : 'cloudflared 필요'}</Badge>
                 <Badge tone={remoteConfig.provider === 'cloudflare-named' ? 'ok' : 'warn'}>{remoteConfig.provider === 'cloudflare-named' ? '고정 주소' : '베타 · 임시 주소'}</Badge>
-                {remoteStatus?.running && <Badge tone={remoteStatus.reachable ? 'ok' : 'warn'}>{remoteStatus.reachable ? '외부 확인됨' : '외부 확인 필요'}</Badge>}
+                {remoteConfig.provider === 'cloudflare-named' && <Badge tone={remoteConfig.hasAccessCredentials ? 'ok' : 'warn'}>{remoteConfig.hasAccessCredentials ? 'Access 자격증명 저장됨' : 'Access 자격증명 없음'}</Badge>}
+                {remoteStatus?.running && <Badge tone={remoteStatus.reachable ? 'ok' : 'warn'}>{remoteStatus.provider === 'cloudflare-named' && remoteStatus.accessProtected ? 'Access 보호 검증됨' : remoteStatus.reachable ? '외부 확인됨' : '외부 확인 필요'}</Badge>}
               </div>
               <div className={remoteConfig.provider === 'cloudflare-named' ? 'remote-link-notice' : 'dependency-warning'}>
                 {remoteConfig.provider === 'cloudflare-named'
@@ -671,25 +795,31 @@ export function PluginsView() {
                 <label className="field"><span>현재 Agent 주소 (자동)</span><Input value={remoteConfig.localUrl} readOnly aria-readonly="true" /></label>
                 {remoteConfig.provider === 'cloudflare-named' && <>
                   <label className="field"><span>고정 공개 호스트명</span><Input value={remoteConfig.hostname ?? ''} onChange={(event) => setRemoteConfig({ ...remoteConfig, hostname: event.target.value })} placeholder="예: pc1.v3s9er.com" autoCapitalize="none" spellCheck={false} /></label>
+                  <label className="field"><span>PC 간 전송 허용 호스트</span><Input value={(remoteConfig.peerHostnames ?? []).join(', ')} onChange={(event) => setRemoteConfig({ ...remoteConfig, peerHostnames: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} placeholder="예: pc2.v3s9er.com, laptop.v3s9er.com" autoCapitalize="none" spellCheck={false} /></label>
+                  <p className="panel-hint">서로 다른 PC 주소 사이에서 파일·작업을 직접 가져올 때만 사용합니다. 같은 도메인의 정확한 호스트만 등록되며 목록 밖 주소에는 Access 자격증명을 보내지 않습니다.</p>
                   <label className="field"><span>Cloudflare Tunnel 토큰</span><Input type="password" value={remoteTunnelToken} onChange={(event) => setRemoteTunnelToken(event.target.value)} placeholder={remoteConfig.hasTunnelToken ? '저장됨 · 변경할 때만 새 토큰 입력' : 'eyJ… Connector 토큰 전체'} autoComplete="off" /></label>
+                  <label className="field"><span>Access Service Token Client ID</span><Input type="password" value={remoteAccessClientId} onChange={(event) => setRemoteAccessClientId(event.target.value)} placeholder={remoteConfig.hasAccessCredentials ? '저장됨 · 변경할 때만 새 ID 입력' : '…access'} autoComplete="off" autoCapitalize="none" spellCheck={false} /></label>
+                  <label className="field"><span>Access Service Token Client Secret</span><Input type="password" value={remoteAccessClientSecret} onChange={(event) => setRemoteAccessClientSecret(event.target.value)} placeholder={remoteConfig.hasAccessCredentials ? '저장됨 · 변경할 때만 새 Secret 입력' : 'Cloudflare에서 한 번만 표시되는 Secret'} autoComplete="new-password" autoCapitalize="none" spellCheck={false} /></label>
                 </>}
               </div>
               {remoteConfig.provider === 'cloudflare-named' && <div className="named-tunnel-setup">
                 <b>Cloudflare에서 한 번만 준비</b>
-                <ol><li>Networking → Tunnels에서 이 PC 전용 Tunnel을 만듭니다.</li><li>Public Hostname을 위 주소로 등록합니다.</li><li>Add a replica에 표시되는 <code>cloudflared … --token eyJ…</code>의 토큰 부분만 붙여넣습니다.</li></ol>
-                <p>토큰은 Windows DPAPI로 암호화됩니다. 실행 때만 메모리에서 로컬 자격증명으로 바꾸며, 앱이 만든 정확한 호스트·loopback 경로와 404 catch-all을 사용하므로 대시보드의 다른 origin 경로를 이 Connector가 실행하지 않습니다. 상태·QR·로그·명령줄에는 비밀을 반환하지 않습니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
+                <ol><li>Networking → Tunnels에서 이 PC 전용 Tunnel을 만들고 Public Hostname을 위 주소로 등록합니다.</li><li>Access → Applications에서 정확한 호스트의 Self-hosted 앱을 만듭니다.</li><li>본인 이메일만 허용하는 Allow 정책과, 정확한 Service Token만 허용하는 Service Auth 정책을 추가합니다. Bypass·Everyone은 사용하지 않습니다.</li><li>Service credentials에서 만든 Client ID와 Secret, 그리고 Tunnel의 Connector 토큰을 이 화면에 저장합니다.</li><li>외부 연결 검사를 눌러 익명 요청 차단과 Service Token 통과를 모두 확인합니다.</li></ol>
+                <p>Tunnel·Access 자격증명은 Windows DPAPI로 암호화됩니다. 앱은 실행 때만 필요한 자격증명을 사용하고 상태·로그·명령줄·QR에는 반환하지 않습니다. 휴대폰에는 Cloudflare 값을 직접 입력하며 Android 보안 저장소에만 보관합니다. <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare 대시보드 열기</a></p>
               </div>}
               <p className="panel-hint">이 방식은 시스템 VPN을 만들지 않고 cloudflared 프로세스 하나가 loopback Agent로 outbound 연결합니다. 일반적으로 금융 앱의 VPN 감지에는 영향을 주지 않지만, 기기·앱별 보안 정책은 다를 수 있습니다.</p>
               {!cloudflared?.installed && <div className="dependency-warning">cloudflared가 없습니다. 아래 설치 버튼 또는 첫 연결 승인 시 Windows winget 사용자 범위로 설치하며 다음 연결에서도 재사용합니다.</div>}
               {remoteConfig.provider === 'cloudflare-named' && <div className="type-row remote-link-options">
                 <label><input type="checkbox" checked={remoteConfig.autoStart} onChange={(event) => setRemoteConfig({ ...remoteConfig, autoStart: event.target.checked })} /> Mr.Robot 시작 시 고정 Tunnel 자동 연결</label>
                 {remoteConfig.hasTunnelToken && <Button variant="danger" onClick={() => void clearRemoteTunnelToken()} disabled={remoteBusy || remoteStatus?.running}>저장 토큰 삭제</Button>}
+                {remoteConfig.hasAccessCredentials && <Button variant="danger" onClick={() => void clearRemoteAccessCredentials()} disabled={remoteBusy || remoteStatus?.running}>Access 자격증명 삭제</Button>}
               </div>}
               <div className="type-row">
                 {!cloudflared?.installed && <Button variant="accent" onClick={() => void installCloudflared()} disabled={remoteBusy}>{remoteBusy ? `${remoteStage || '설치 준비 중'}…` : 'cloudflared 설치'}</Button>}
                 <Button variant="ghost" onClick={() => void saveRemoteLink()} disabled={remoteBusy || remoteStatus?.running}>설정 저장</Button>
                 <Button variant="accent" onClick={() => setQuickLinkConfirm(p)} disabled={remoteBusy || remoteStatus?.running || (remoteConfig.provider === 'cloudflare-named' && (!remoteConfig.hostname?.trim() || (!remoteConfig.hasTunnelToken && !remoteTunnelToken.trim())))}>{remoteBusy ? `${remoteStage || '연결 준비 중'}…` : remoteConfig.provider === 'cloudflare-named' ? '고정 Tunnel 연결' : 'Quick Link 빠른 연결'}</Button>
                 {remoteStatus?.running && remoteStatus.publicUrl && <Button variant="ghost" onClick={() => void createRemoteHandoff()} disabled={remoteBusy}>24시간·1회용 외출 코드 생성</Button>}
+                {remoteStatus?.running && remoteStatus.publicUrl && remoteStatus.provider === 'cloudflare-named' && remoteHandoff && <Button variant="danger" onClick={() => setNamedQrConfirm(true)} disabled={remoteBusy || namedQrBusy}>{namedQrBusy ? 'QR 준비 중…' : '보안 QR 60초 표시'}</Button>}
                 <Button variant="ghost" onClick={() => void verifyRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>외부 연결 검사</Button>
                 <Button variant="danger" onClick={() => void stopRemoteLink()} disabled={remoteBusy || !remoteStatus?.running}>링크 중지</Button>
               </div>
@@ -707,12 +837,15 @@ export function PluginsView() {
                 <div className="pairing-qr"><img src={remotePairing.qrUrl} alt="Cloudflare 모바일 연결 QR" width={300} height={300} /></div>
                 <div className="pairing-info">
                   <b>모바일 원탭 연결</b>
-                  <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. HTTPS 주소와 강한 12자리 외출 코드가 함께 들어 있습니다.</p>
+                  {remotePairing.requiresManualAccess
+                    ? <><p className="panel-hint warn-hint"><b>1회용 QR · 60초 후 자동 숨김</b><br />이 QR에는 주소와 12자리 외출 코드만 있으며 장기 Cloudflare 자격증명은 없습니다. 스캔 뒤 휴대폰에서 Access Client ID와 Secret을 직접 입력하세요.</p><Button variant="ghost" onClick={clearRemotePairingQr}>QR 지금 숨기기</Button></>
+                    : <p className="panel-hint">모바일의 QR 스캔을 열고 이 코드를 비추세요. Quick Link HTTPS 주소와 강한 12자리 외출 코드가 들어 있습니다. QR을 공유하지 마세요.</p>}
                   <div className="pairing-pin">외출 코드 <b>{remotePairing.pin}</b> <span>· 최대 24시간 / 1회용</span></div>
                   {remotePairing.expiresAt && <span className="panel-hint">만료 {new Date(remotePairing.expiresAt).toLocaleString()}</span>}
+                  {remotePairing.revealExpiresAt && <span className="panel-hint">QR 자동 숨김 {new Date(remotePairing.revealExpiresAt).toLocaleTimeString()}</span>}
                 </div>
               </div>}
-              {remoteStatus?.publicUrl && !remotePairing && <p className="panel-hint">기존 등록 기기는 바로 연결됩니다. 새 기기를 연결할 때만 위의 ‘24시간·1회용 외출 코드 생성’을 눌러 보안 QR을 만드세요. 일반 6자리 PIN은 공개 주소에서 거부됩니다.</p>}
+              {remoteStatus?.publicUrl && !remotePairing && <p className="panel-hint">{remoteStatus.provider === 'cloudflare-named' && remoteHandoff ? '장기 Access 자격증명은 QR로 내보내지 않습니다. ‘보안 QR 60초 표시’ 후 휴대폰에서 Access 값을 직접 입력하세요.' : '기존 등록 기기는 바로 연결됩니다. 새 기기를 연결할 때만 위의 ‘24시간·1회용 외출 코드 생성’을 눌러 보안 QR을 만드세요. 일반 6자리 PIN은 공개 주소에서 거부됩니다.'}</p>}
               {remoteStatus?.lastError && <div className="gate-error">{remoteStatus.lastError}</div>}
               <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 Mr.Robot이 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
             </div>}
@@ -758,6 +891,24 @@ export function PluginsView() {
             }}>위험을 이해했으며 연결</Button>
           </div>
         </div>}
+      </Modal>
+
+      <Modal open={namedQrConfirm} onClose={() => { if (!namedQrBusy) setNamedQrConfirm(false); }} title="Cloudflare 보안 QR 60초 표시">
+        <div className="delete-dialog">
+          <div className="delete-dialog-icon">!</div>
+          <div>
+            <b>장기 Cloudflare 자격증명은 QR에 넣지 않습니다.</b>
+            <p>이 QR은 주소와 12자리 일회용 외출 코드만 담고 60초 뒤 숨깁니다. 저장된 Service Token은 renderer로 반환되지 않습니다.</p>
+            <p><b>휴대폰 단계:</b> 스캔 뒤 Android 입력 화면에서 Access Client ID와 Secret을 직접 입력하세요. 값은 Android 보안 저장소에만 보관됩니다.</p>
+          </div>
+          <div className="modal-actions">
+            <Button variant="ghost" disabled={namedQrBusy} onClick={() => setNamedQrConfirm(false)}>취소</Button>
+            <Button variant="danger" disabled={namedQrBusy} onClick={() => {
+              setNamedQrConfirm(false);
+              void revealNamedPairingQr();
+            }}>{namedQrBusy ? 'QR 준비 중…' : '이 휴대폰으로 60초 표시'}</Button>
+          </div>
+        </div>
       </Modal>
 
       {callResult && (

@@ -24,9 +24,22 @@ check('renderer cannot invoke a second auth exchange', main.includes("!allowAuth
 check('credential rotation response is stripped before IPC', main.includes("normalizedMethod === 'pairing.regenerate'") && main.includes('secret: _discarded'));
 check('encrypted PC registry is redacted before IPC', main.includes('value: redactPcRegistry(loaded.value)') && main.includes('DESKTOP_REMOTE_AUTH_PREFIX'));
 check('stored remote origins cannot be rebound by renderer save', main.includes('...stored,') && main.includes('stored.origins.includes(pc.activeOrigin)') && main.includes('item.id === referencedId && item.id === pc.id'));
-check('remote WebSocket authentication stays in main process', main.includes('resolveDesktopCredential(credentialReference, origin)') && main.includes("headers: { 'x-mr-robot-token': credential") && rpc.includes('isDesktopManagedAuthToken(secret)'));
-check('remote HTTP bearer is injected only for the registered origin', main.includes('resolveDesktopCredential(reference, parsed.origin)') && main.includes('item.origins.includes(origin)'));
+check('remote WebSocket authentication stays in main process', main.includes('resolveDesktopCredential(credentialReference, origin)') && main.includes("'x-mr-robot-token': credential") && rpc.includes('isDesktopManagedAuthToken(secret)'));
+check('browser Access cookies stay same-origin and secret-bearing fetches reject redirects', rpc.includes("credentials: 'same-origin'") && rpc.includes("redirect: 'error'") && pcs.includes("redirect: 'error'"));
+check('remote HTTP bearer is injected only for the immutable main-owned credential origin', main.includes('resolveDesktopCredential(reference, parsed.origin)') && main.includes('item.credentialOrigin === origin'));
+check('Cloudflare Access credentials stay in safeStorage and are injected only for their exact bound origin', main.includes('resolveDesktopAccessCredentials')
+  && main.includes('pc.accessOrigin !== origin') && main.includes('CF-Access-Client-Secret') && main.includes('hasAccessCredentials')
+  && !rpc.includes('CF-Access-Client-Secret'));
+check('redirected renderer requests are stripped before exact-origin credentials can be re-injected', main.includes("'cf-access-client-secret'") && main.includes('sensitiveHeaders.has(key.toLowerCase())') && main.indexOf('sensitiveHeaders.has(key.toLowerCase())') < main.indexOf('resolveDesktopCredential(reference, parsed.origin)'));
 check('Electron pairing response is retained as a short-lived main-process reference', main.includes('pendingPcCredentials.set') && main.includes('DESKTOP_PENDING_AUTH_PREFIX') && preload.includes('pairRemotePc'));
+check('pending enrollment discards renderer-expanded origins and fixes both credential scopes', main.includes('origins: [pending.origin]')
+  && main.includes('credentialOrigin: pending.origin') && main.includes('accessOrigin: pending.accessOrigin'));
+check('legacy encrypted entries without a main-owned scope fail closed instead of inferring activeOrigin', /const credentialOrigin = requestedCredentialOrigin[\s\S]{0,160}: undefined;/.test(main)
+  && !/const credentialOrigin = requestedCredentialOrigin[\s\S]{0,160}: activeOrigin;/.test(main));
+check('desktop plaintext credential transport is loopback-only and excludes raw CGNAT', main.includes("octets[0] === 127")
+  && !main.includes('octets[0] === 100 && octets[1] >= 64'));
+check('privileged pairing uses a DNS-pinned HTTPS helper instead of fetch', main.includes('postPinnedRemotePairJson(')
+  && main.includes("from './remote-pair-security.mjs'") && !/async function pairRemotePc[\s\S]{0,1000}await fetch\(/.test(main));
 check('renderer reloads redacted registry before first remote connection', pcs.includes('window.mrRobotDesktop?.pairRemotePc') && read('packages/web/src/components/ConnectGate.tsx').includes('const securedNext = window.mrRobotDesktop ? await loadPcsForEnvironment() : next'));
 
 console.log(failures.length === 0 ? '\nDESKTOP AUTH BOUNDARY TESTS PASSED' : `\n${failures.length} DESKTOP AUTH BOUNDARY FAILURES`);

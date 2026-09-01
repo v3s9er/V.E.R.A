@@ -3,6 +3,11 @@
  * standalone Expo project, not part of the npm workspaces).
  */
 
+export interface CloudflareAccessCredentials {
+  clientId: string;
+  clientSecret: string;
+}
+
 export interface SavedPc {
   id: string;
   name: string;
@@ -12,7 +17,15 @@ export interface SavedPc {
   protocol?: 'http' | 'https';
   origins?: string[];
   activeOrigin?: string;
+  /** Exact HTTPS origin that issued and may receive this device bearer. */
+  credentialOrigin?: string;
   credentialStatus?: 'ok' | 'missing' | 'unavailable';
+  /** Runtime-only. Persisted separately in expo-secure-store, never AsyncStorage. */
+  cloudflareAccess?: CloudflareAccessCredentials;
+  /** Non-secret marker used to detect an unavailable SecureStore entry safely. */
+  cloudflareAccessConfigured?: boolean;
+  /** Exact HTTPS origin allowed to receive the SecureStore-held Access credential. */
+  cloudflareAccessOrigin?: string;
   port: number;
   secret: string;
   addedAt: number;
@@ -24,8 +37,16 @@ export interface PairingPayload {
   hosts?: string[];
   protocol?: 'http' | 'https';
   port: number;
-  version: 3;
+  version: 3 | 4;
   pin: string;
+  /** Present on unattended QR handoffs; rejected when expired or over 25 hours ahead. */
+  expiresAt?: number;
+  /** The QR deliberately omits the long-lived edge credential; enter it locally on Android. */
+  requiresCloudflareAccess?: boolean;
+  /** Version 4 only. Allows native clients through a Cloudflare Access service-token policy. */
+  cloudflareAccess?: CloudflareAccessCredentials;
+  /** Runtime-derived exact origin for the version 4 Access credential. */
+  cloudflareAccessOrigin?: string;
 }
 
 export interface SystemStatus {

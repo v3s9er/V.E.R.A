@@ -4,10 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { delimiter, join } from 'node:path';
 import type { RemoteLinkConfig, RemoteLinkStatus, RemoteTransportProviderInfo } from '@mr-robot/shared';
+import { getDomain } from 'tldts';
 import { SecretVault } from '../secrets.js';
 import type { PluginContext } from './context.js';
 import type { MrRobotPlugin } from './loader.js';
 import { mrRobotHome } from '../config.js';
+import { CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } from '../access-probe.js';
 
 const PLUGIN_ID = 'remote-link';
 const QUICK_TUNNEL_HOST = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
@@ -39,8 +41,24 @@ interface StoredRemoteLinkConfig {
   provider?: RemoteLinkConfig['provider'];
   localUrl?: string;
   hostname?: string;
+  peerHostnames?: string[];
   autoStart?: boolean;
   tunnelTokenProtected?: string;
+  accessCredentialsProtected?: string;
+}
+
+interface CloudflareAccessServiceCredentials {
+  clientId: string;
+  clientSecret: string;
+}
+
+export interface RemoteLinkPlugin extends MrRobotPlugin {
+  /**
+   * Host-only credential bridge for direct PC-to-PC requests. This is not a
+   * plugin command and therefore cannot be invoked through RPC or by an AI
+   * tool. Headers are returned only for the exact saved named-Tunnel host.
+   */
+  peerRequestHeaders(url: URL): Record<string, string>;
 }
 
 function boundedAppend(current: string, chunk: Buffer | string): string {
@@ -53,11 +71,61 @@ export function redactRemoteLinkDiagnostics(value: string): string {
   return value
     .replace(/\beyJ[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]{10,}){0,2}\b/g, '[REDACTED_TUNNEL_TOKEN]')
     .replace(/"TunnelSecret"\s*:\s*"[^"]+"/gi, '"TunnelSecret":"[REDACTED]"')
+    .replace(/\bcfast_[A-Za-z0-9]{48}\b/g, '[REDACTED_ACCESS_SECRET]')
     .replace(/\bTUNNEL_CRED_CONTENTS\s*[=:]\s*(?:\{[^\r\n]*\}|[^\s,;]+)/gi, 'TUNNEL_CRED_CONTENTS=[REDACTED]')
-    .replace(/\b(?:token|tunnel_token|TUNNEL_TOKEN)\s*[=:]\s*[^\s,;]+/gi, 'token=[REDACTED]');
+    .replace(/\b(?:token|tunnel_token|TUNNEL_TOKEN)\s*[=:]\s*[^\s,;]+/gi, 'token=[REDACTED]')
+    .replace(/\bCF-Access-Client-(?:Id|Secret)\s*[=:]\s*[^\s,;]+/gi, 'CF-Access-Client-Credential=[REDACTED]')
+    .replace(/"(?:accessClientId|accessClientSecret|clientId|clientSecret)"\s*:\s*"[^"]+"/gi, '"accessCredential":"[REDACTED]"');
 }
 
-async function readSmallJson(response: Response): Promise<{ ok?: unknown; app?: unknown }> {
+function normalizeAccessCredentialPart(value: unknown, label: string): string {
+  const normalized = String(value ?? '').trim();
+  if (normalized.length < 20 || normalized.length > 512 || !/^[A-Za-z0-9._~-]+$/.test(normalized)) {
+    throw new Error(`${label} 형식이 올바르지 않습니다.`);
+  }
+  return normalized;
+}
+
+function normalizeAccessCredentials(clientId: unknown, clientSecret: unknown): CloudflareAccessServiceCredentials {
+  return {
+    clientId: normalizeAccessCredentialPart(clientId, 'Cloudflare Access Client ID'),
+    clientSecret: normalizeAccessCredentialPart(clientSecret, 'Cloudflare Access Client Secret'),
+  };
+}
+
+function decodeAccessCredentials(protectedValue: string, unprotect: (value: string) => string): CloudflareAccessServiceCredentials {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unprotect(protectedValue));
+  } catch {
+    throw new Error('저장된 Cloudflare Access 자격증명을 읽을 수 없습니다. 다시 저장하세요.');
+  }
+  const value = parsed as Partial<CloudflareAccessServiceCredentials>;
+  return normalizeAccessCredentials(value?.clientId, value?.clientSecret);
+}
+
+function normalizePeerHostnames(value: unknown, primaryHostname: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 8) throw new Error('신뢰할 PC 호스트는 최대 8개까지 등록할 수 있습니다.');
+  const primary = normalizeNamedTunnelHostname(primaryHostname);
+  const normalized = [...new Set(value.map((item) => normalizeNamedTunnelHostname(item)))].filter((item) => item !== primary);
+  if (normalized.length === 0) return [];
+
+  // String suffix matching is not an ownership boundary: pc1.github.io and
+  // pc2.github.io have different owners even though both end in github.io.
+  // Resolve the registrable domain with both ICANN and private PSL sections,
+  // then require every peer to be a true subdomain of the same owned zone.
+  const ownedDomain = getDomain(primary, { allowPrivateDomains: true });
+  if (!ownedDomain || normalized.some((item) => {
+    const peerDomain = getDomain(item, { allowPrivateDomains: true });
+    return peerDomain !== ownedDomain || item === ownedDomain;
+  })) {
+    throw new Error('신뢰할 PC 호스트는 같은 소유 도메인의 정확한 서브도메인이어야 합니다. 공유 공개 접미사는 허용되지 않습니다.');
+  }
+  return normalized;
+}
+
+async function readSmallJson(response: Response): Promise<{ ok?: unknown; app?: unknown; error?: unknown }> {
   const advertised = Number(response.headers.get('content-length') ?? 0);
   if (Number.isFinite(advertised) && advertised > 16 * 1024) throw new Error('외부 확인 응답이 너무 큽니다.');
   if (!response.body) throw new Error('외부 확인 응답 본문이 없습니다.');
@@ -79,7 +147,7 @@ async function readSmallJson(response: Response): Promise<{ ok?: unknown; app?: 
   let offset = 0;
   for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
   try {
-    return JSON.parse(new TextDecoder().decode(body)) as { ok?: unknown; app?: unknown };
+    return JSON.parse(new TextDecoder().decode(body)) as { ok?: unknown; app?: unknown; error?: unknown };
   } catch {
     throw new Error('외부 주소가 올바른 Mr.Robot JSON 응답을 반환하지 않았습니다.');
   }
@@ -266,6 +334,35 @@ function normalizeTunnelToken(value: unknown): string {
   return token;
 }
 
+/**
+ * Cheap identity used only to decide whether a prior Authenticode result can
+ * be reused for status rendering. Starts never rely on this cache. Including
+ * the resolved path catches link retargeting; dev/ino plus size and timestamps
+ * catch replacement or in-place updates on ordinary Windows filesystems.
+ */
+function executableFileIdentity(candidate: string): string {
+  try {
+    const executable = realpathSync.native(candidate);
+    const stats = statSync(executable);
+    if (!stats.isFile()) return `not-file\0${executable}`;
+    const normalizedPath = process.platform === 'win32' ? executable.toLowerCase() : executable;
+    return [
+      normalizedPath,
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeMs,
+      stats.ctimeMs,
+      stats.birthtimeMs,
+    ].join('\0');
+  } catch {
+    // Runtime-injected test candidates and a file racing with discovery still
+    // get a stable fail-closed identity. Production discovery returns only an
+    // existing canonical file.
+    return `unresolved\0${candidate}`;
+  }
+}
+
 export interface LocalTunnelCredentials {
   tunnelId: string;
   contents: string;
@@ -386,16 +483,24 @@ function storedConfig(ctx: PluginContext): RemoteLinkConfig {
   } catch {
     // Invalid values from an older version are deliberately ignored.
   }
+  let peerHostnames: string[] = [];
+  try {
+    if (hostname) peerHostnames = normalizePeerHostnames(stored?.peerHostnames, hostname);
+  } catch {
+    // Invalid legacy peer entries are ignored rather than widening trust.
+  }
   return {
     provider,
     localUrl,
     ...(hostname ? { hostname } : {}),
+    ...(peerHostnames.length ? { peerHostnames } : {}),
     hasTunnelToken: Boolean(stored?.tunnelTokenProtected),
+    hasAccessCredentials: Boolean(stored?.accessCredentialsProtected),
     autoStart: provider === 'cloudflare-named' && stored?.autoStart === true,
   };
 }
 
-export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobotPlugin {
+export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteLinkPlugin {
   const detectExecutable = runtime.findExecutable ?? findCloudflaredCandidate;
   const inspectExecutable = runtime.verifyExecutable ?? verifyCloudflaredExecutable;
   const spawnProcess = runtime.spawnProcess ?? spawn;
@@ -414,6 +519,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
   let diagnostics = '';
   let executableTrustDiagnostic = '';
   let reachable: boolean | undefined;
+  let accessProtected: boolean | undefined;
   let verifiedAt: number | undefined;
   // The saved provider configuration and the process currently serving traffic
   // are deliberately separate. A temporary Quick Tunnel must never overwrite a
@@ -421,12 +527,39 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
   let activeConfig: RemoteLinkConfig | null = null;
   let activeCloudflaredConfigPath: string | null = null;
   let activeTransientQuick = false;
+  let activeContext: PluginContext | undefined;
+  let accessCredentialCache: { protectedValue: string; credentials: CloudflareAccessServiceCredentials } | undefined;
+  let executableTrustCache: { identity: string; trust: CloudflaredExecutableTrust } | undefined;
+
+  const accessCredentials = (ctx: PluginContext): CloudflareAccessServiceCredentials | undefined => {
+    const protectedValue = ctx.storage.get<StoredRemoteLinkConfig>('config')?.accessCredentialsProtected;
+    if (!protectedValue) {
+      accessCredentialCache = undefined;
+      return undefined;
+    }
+    if (accessCredentialCache?.protectedValue === protectedValue) return accessCredentialCache.credentials;
+    const credentials = decodeAccessCredentials(protectedValue, unprotectSecret);
+    accessCredentialCache = { protectedValue, credentials };
+    return credentials;
+  };
 
   return {
+    peerRequestHeaders(url): Record<string, string> {
+      const ctx = activeContext;
+      if (!ctx || url.protocol !== 'https:' || (url.port && url.port !== '443') || url.username || url.password) return {};
+      const config = storedConfig(ctx);
+      const allowedHostnames = config.hostname ? new Set([config.hostname, ...(config.peerHostnames ?? [])]) : new Set<string>();
+      if (config.provider !== 'cloudflare-named' || !allowedHostnames.has(url.hostname.toLowerCase())) return {};
+      const access = accessCredentials(ctx);
+      return access ? {
+        'CF-Access-Client-Id': access.clientId,
+        'CF-Access-Client-Secret': access.clientSecret,
+      } : {};
+    },
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.3.8',
+      version: '0.3.9',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',
@@ -435,15 +568,36 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
       dependencies: [{ id: 'cloudflared', name: 'Cloudflare cloudflared', required: true }],
     },
     activate(ctx) {
-      const trustedExecutable = (): string | undefined => {
+      const executableTrust = (forceVerification = false): CloudflaredExecutableTrust => {
         const candidate = detectExecutable();
         if (!candidate) {
+          executableTrustCache = undefined;
           executableTrustDiagnostic = 'cloudflared 실행 파일을 찾지 못했습니다.';
-          return undefined;
+          return { trusted: false, diagnostic: executableTrustDiagnostic };
         }
-        const trust = inspectExecutable(candidate);
+        const identityBefore = executableFileIdentity(candidate);
+        if (!forceVerification && executableTrustCache?.identity === identityBefore) {
+          executableTrustDiagnostic = executableTrustCache.trust.diagnostic;
+          return executableTrustCache.trust;
+        }
+        let trust = inspectExecutable(candidate);
+        if (trust.trusted && !trust.executable) trust = { ...trust, executable: candidate };
+        const identityAfter = executableFileIdentity(trust.executable ?? candidate);
+        if (identityBefore !== identityAfter) {
+          trust = {
+            trusted: false,
+            executable: trust.executable,
+            diagnostic: 'cloudflared 실행 파일이 신뢰 검증 도중 변경되었습니다. 다시 시도하세요.',
+          };
+        }
+        executableTrustCache = { identity: identityAfter, trust };
         executableTrustDiagnostic = trust.diagnostic;
-        return trust.trusted ? (trust.executable ?? candidate) : undefined;
+        return trust;
+      };
+
+      const trustedExecutable = (forceVerification = false): string | undefined => {
+        const trust = executableTrust(forceVerification);
+        return trust.trusted ? trust.executable : undefined;
       };
 
       const status = (): RemoteLinkStatus => {
@@ -465,6 +619,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
           temporary,
           beta: temporary,
           reachable: running ? reachable : undefined,
+          accessProtected: running && activeProvider === 'cloudflare-named' ? accessProtected : undefined,
           verifiedAt: running ? verifiedAt : undefined,
           warning: temporary
             ? 'Quick Tunnel은 테스트·개발용 임시 주소이며 재시작하면 주소가 바뀝니다. trycloudflare.com 경로에는 사용자 도메인의 Cloudflare WAF·레이트리밋 규칙이 적용되지 않습니다.'
@@ -491,6 +646,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         publicUrl = undefined;
         startedAt = undefined;
         reachable = undefined;
+        accessProtected = undefined;
         verifiedAt = undefined;
         pending?.cancel(new Error('Cloudflare 원격 링크 시작이 취소되었습니다.'));
         if (active) {
@@ -506,7 +662,10 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         const saved = storedConfig(ctx);
         if (restoreSavedNamedTunnel && wasTransientQuick && saved.provider === 'cloudflare-named' && saved.autoStart) {
           try {
-            return await start();
+            // Restoring a saved public endpoint has the same security boundary
+            // as an explicit/automatic named start: it must prove that an
+            // anonymous request is blocked and the service token is accepted.
+            return await startConfigured();
           } catch (error) {
             lastError = `Quick Link는 중지했지만 저장된 고정 Tunnel 복원에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`;
             emitStatus();
@@ -521,12 +680,16 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (config.provider === 'google-relay') {
           throw new Error('Google 계정 Relay는 Firebase/OAuth/relay 서버가 구성되기 전에는 활성화할 수 없습니다.');
         }
-        const candidate = detectExecutable();
-        if (!candidate) throw new Error('cloudflared가 없습니다. 플러그인 화면에서 의존성을 먼저 설치하세요.');
-        const trust = inspectExecutable(candidate);
-        executableTrustDiagnostic = trust.diagnostic;
-        if (!trust.trusted) throw new Error(`cloudflared 실행 파일 신뢰 검증 실패: ${trust.diagnostic}`);
-        const executable = trust.executable ?? candidate;
+        // Never authorize a process launch from the status cache. This also
+        // refreshes Authenticode for every named-tunnel restoration/start.
+        const trust = executableTrust(true);
+        if (!trust.trusted) {
+          if (trust.diagnostic === 'cloudflared 실행 파일을 찾지 못했습니다.') {
+            throw new Error('cloudflared가 없습니다. 플러그인 화면에서 의존성을 먼저 설치하세요.');
+          }
+          throw new Error(`cloudflared 실행 파일 신뢰 검증 실패: ${trust.diagnostic}`);
+        }
+        const executable = trust.executable!;
 
         const operation = ++operationGeneration;
         diagnostics = '';
@@ -534,6 +697,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         publicUrl = undefined;
         startedAt = undefined;
         reachable = undefined;
+        accessProtected = undefined;
         verifiedAt = undefined;
 
         const stored = ctx.storage.get<StoredRemoteLinkConfig>('config');
@@ -682,6 +846,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
             publicUrl = undefined;
             startedAt = undefined;
             reachable = undefined;
+            accessProtected = undefined;
             verifiedAt = undefined;
             if (code && code !== 0) lastError = `cloudflared가 종료되었습니다. (code=${code})`;
             emitStatus();
@@ -697,27 +862,184 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (!current.running || !current.publicUrl) throw new Error('먼저 원격 링크를 시작하세요.');
         const checkedAt = Date.now();
         try {
+          const access = current.provider === 'cloudflare-named' ? accessCredentials(ctx) : undefined;
+          if (current.provider === 'cloudflare-named') {
+            if (!access) throw new Error('Cloudflare Access Service Token을 먼저 저장하세요.');
+            // A successful authenticated probe proves reachability, but does
+            // not prove that Access is enforced. First require the exact
+            // Agent response to be unavailable without edge credentials.
+            const anonymousResponse = await fetchUrl(new URL('/api/ping', current.publicUrl), {
+              redirect: 'manual',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: { accept: 'application/json' },
+            });
+            let anonymousReachedAgent = false;
+            if (anonymousResponse.ok) {
+              try {
+                const anonymousBody = await readSmallJson(anonymousResponse);
+                anonymousReachedAgent = anonymousBody.ok === true && anonymousBody.app === 'mr-robot';
+              } catch {
+                // An Access login/challenge body is not the protected Agent.
+              }
+            } else {
+              try { await anonymousResponse.body?.cancel(); } catch { /* best-effort cleanup */ }
+            }
+            if (anonymousReachedAgent) {
+              accessProtected = false;
+              throw new Error('외부 주소가 Cloudflare Access 없이 공개되어 있습니다. Access 앱과 정책을 먼저 적용하세요.');
+            }
+
+            // Hostname-level Access should cover every path, but a mistaken
+            // path-scoped/nested application can protect /api/ping while
+            // leaving enrollment or WebSocket admission reachable. Probe one
+            // sensitive authenticated route without the inner Mr.Robot token:
+            // the exact Agent response is a small 401 JSON body. It must be
+            // invisible anonymously and visible with the Service Token.
+            const ticketUrl = new URL('/api/ws-ticket', current.publicUrl);
+            const anonymousTicket = await fetchUrl(ticketUrl, {
+              method: 'POST',
+              redirect: 'manual',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: { accept: 'application/json' },
+            });
+            let anonymousReachedTicket = false;
+            if (anonymousTicket.status === 401) {
+              try {
+                const anonymousTicketBody = await readSmallJson(anonymousTicket);
+                anonymousReachedTicket = anonymousTicketBody.error === 'unauthorized';
+              } catch {
+                // Access's own 401/challenge is not the exact Agent response.
+              }
+            } else {
+              try { await anonymousTicket.body?.cancel(); } catch { /* best-effort cleanup */ }
+            }
+            if (anonymousReachedTicket) {
+              accessProtected = false;
+              throw new Error('Cloudflare Access가 /api/ws-ticket 경로를 보호하지 않습니다. 호스트 전체를 보호하는 앱으로 수정하세요.');
+            }
+
+            const authenticatedTicket = await fetchUrl(ticketUrl, {
+              method: 'POST',
+              redirect: 'error',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: {
+                accept: 'application/json',
+                'CF-Access-Client-Id': access.clientId,
+                'CF-Access-Client-Secret': access.clientSecret,
+              },
+            });
+            const authenticatedTicketBody = await readSmallJson(authenticatedTicket);
+            if (authenticatedTicket.status !== 401 || authenticatedTicketBody.error !== 'unauthorized') {
+              throw new Error(`Access 인증 후 WebSocket 티켓 경로가 정확한 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${authenticatedTicket.status})`);
+            }
+
+            // Enrollment is intentionally public behind the edge, so verify
+            // it independently from ping and WebSocket admission. The fixed
+            // invalid body is rejected by the Agent before rate limiting or
+            // PIN exchange and therefore cannot register or mutate a device.
+            const pairUrl = new URL('/api/pair', current.publicUrl);
+            const pairProbeBody = JSON.stringify({ probe: CLOUDFLARE_ACCESS_PAIR_PROBE });
+            const anonymousPair = await fetchUrl(pairUrl, {
+              method: 'POST',
+              body: pairProbeBody,
+              redirect: 'manual',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: { accept: 'application/json', 'content-type': 'application/json' },
+            });
+            let anonymousReachedPair = false;
+            if (anonymousPair.status === 400) {
+              try {
+                const anonymousPairBody = await readSmallJson(anonymousPair);
+                anonymousReachedPair = anonymousPairBody.app === 'mr-robot'
+                  && anonymousPairBody.error === CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR;
+              } catch {
+                // Access's own error response is not the exact Agent marker.
+              }
+            } else {
+              try { await anonymousPair.body?.cancel(); } catch { /* best-effort cleanup */ }
+            }
+            if (anonymousReachedPair) {
+              accessProtected = false;
+              throw new Error('Cloudflare Access가 /api/pair 경로를 보호하지 않습니다. 호스트 전체를 보호하는 앱으로 수정하세요.');
+            }
+
+            const authenticatedPair = await fetchUrl(pairUrl, {
+              method: 'POST',
+              body: pairProbeBody,
+              redirect: 'error',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'CF-Access-Client-Id': access.clientId,
+                'CF-Access-Client-Secret': access.clientSecret,
+              },
+            });
+            const authenticatedPairBody = await readSmallJson(authenticatedPair);
+            if (authenticatedPair.status !== 400
+              || authenticatedPairBody.app !== 'mr-robot'
+              || authenticatedPairBody.error !== CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR) {
+              throw new Error(`Access 인증 후 페어링 경로가 정확한 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${authenticatedPair.status})`);
+            }
+          }
           const response = await fetchUrl(new URL('/api/ping', current.publicUrl), {
             redirect: 'error',
             signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
-            headers: { accept: 'application/json' },
+            headers: {
+              accept: 'application/json',
+              ...(access ? {
+                'CF-Access-Client-Id': access.clientId,
+                'CF-Access-Client-Secret': access.clientSecret,
+              } : {}),
+            },
           });
           const body = await readSmallJson(response);
           if (!response.ok || body.ok !== true || body.app !== 'mr-robot') {
             throw new Error(`공개 주소가 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${response.status})`);
           }
           reachable = true;
+          accessProtected = current.provider === 'cloudflare-named' ? true : undefined;
           verifiedAt = checkedAt;
           lastError = undefined;
           emitStatus();
-          return { ok: true, url: current.publicUrl, checkedAt, message: '외부 HTTPS 주소에서 Mr.Robot Agent 응답을 확인했습니다.' };
+          return {
+            ok: true,
+            url: current.publicUrl,
+            checkedAt,
+            message: current.provider === 'cloudflare-named'
+              ? 'Cloudflare Access의 익명 차단과 Service Token 인증을 모두 확인했습니다.'
+              : '외부 HTTPS 주소에서 Mr.Robot Agent 응답을 확인했습니다.',
+          };
         } catch (error) {
           reachable = false;
+          if (current.provider === 'cloudflare-named') accessProtected = false;
           verifiedAt = checkedAt;
           lastError = `외부 주소 확인 실패: ${error instanceof Error ? error.message : String(error)}`;
           emitStatus();
           throw new Error(lastError);
         }
+      };
+
+      const verifyFailClosed = async (): ReturnType<typeof verify> => {
+        try {
+          return await verify();
+        } catch (error) {
+          const current = status();
+          if (current.running && current.provider === 'cloudflare-named') {
+            await stop();
+            // stop() resets volatile verification state but deliberately keeps
+            // the reason visible for the administrator.
+            lastError = error instanceof Error ? error.message : String(error);
+            emitStatus();
+          }
+          throw error;
+        }
+      };
+
+      const startConfigured = async (): Promise<RemoteLinkStatus> => {
+        const started = await start();
+        if (started.provider === 'cloudflare-named') await verifyFailClosed();
+        return status();
       };
 
       ctx.registerCommand('remote-link.status', () => status(), { destructive: false, adminOnly: true });
@@ -738,18 +1060,72 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (typeof body.tunnelToken === 'string' && body.tunnelToken.trim()) {
           tunnelTokenProtected = protectSecret(normalizeTunnelToken(body.tunnelToken));
         }
+        let accessCredentialsProtected = body.clearAccessCredentials === true
+          ? undefined
+          : previous?.accessCredentialsProtected;
+        const accessIdSupplied = typeof body.accessClientId === 'string' && Boolean(body.accessClientId.trim());
+        const accessSecretSupplied = typeof body.accessClientSecret === 'string' && Boolean(body.accessClientSecret.trim());
+        if (accessIdSupplied !== accessSecretSupplied) {
+          throw new Error('Cloudflare Access Client ID와 Secret을 함께 입력하세요.');
+        }
+        if (accessIdSupplied && accessSecretSupplied) {
+          const access = normalizeAccessCredentials(body.accessClientId, body.accessClientSecret);
+          accessCredentialsProtected = protectSecret(JSON.stringify(access));
+        }
+        const hostname = provider === 'cloudflare-named' ? normalizeNamedTunnelHostname(body.hostname) : undefined;
+        const peerHostnames = hostname ? normalizePeerHostnames(body.peerHostnames, hostname) : [];
         const stored: StoredRemoteLinkConfig = {
           provider,
           localUrl: normalizeRemoteLinkLocalUrl(body.localUrl ?? DEFAULT_CONFIG.localUrl),
-          ...(provider === 'cloudflare-named' ? { hostname: normalizeNamedTunnelHostname(body.hostname) } : {}),
+          ...(hostname ? { hostname } : {}),
+          ...(peerHostnames.length ? { peerHostnames } : {}),
           ...(tunnelTokenProtected ? { tunnelTokenProtected } : {}),
+          ...(accessCredentialsProtected ? { accessCredentialsProtected } : {}),
           autoStart: provider === 'cloudflare-named' && body.autoStart === true,
         };
         ctx.storage.set('config', stored);
+        // Drop any plaintext credential reference immediately on replace or
+        // clear. The next exact-host request may repopulate it from DPAPI.
+        accessCredentialCache = undefined;
         emitStatus();
         return storedConfig(ctx);
       }, { destructive: true, adminOnly: true });
-      ctx.registerCommand('remote-link.start', () => start(), { destructive: true, adminOnly: true });
+      ctx.registerCommand('remote-link.pairing.payload', async (raw) => {
+        const body = (raw ?? {}) as { host?: unknown; pin?: unknown; expiresAt?: unknown };
+        const current = status();
+        const config = current.config;
+        if (!current.running || current.provider !== 'cloudflare-named' || !current.publicUrl || !config.hostname) {
+          throw new Error('실행 중인 Cloudflare 고정 Tunnel에서만 Access 보호 QR을 만들 수 있습니다.');
+        }
+        const requestedHost = normalizeNamedTunnelHostname(body.host);
+        if (requestedHost !== config.hostname || current.publicUrl !== `https://${requestedHost}`) {
+          throw new Error('실행 중인 Tunnel 호스트와 저장된 호스트가 일치하지 않습니다.');
+        }
+        const pin = String(body.pin ?? '').trim();
+        if (!/^\d{12}$/.test(pin)) throw new Error('외출용 12자리 일회용 코드가 필요합니다.');
+        const expiresAt = Number(body.expiresAt);
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 25 * 60 * 60_000) {
+          throw new Error('외출 코드 만료 시간이 올바르지 않습니다.');
+        }
+        await verifyFailClosed();
+        if (status().accessProtected !== true) throw new Error('Cloudflare Access 보호 검증이 끝나지 않았습니다.');
+        if (!accessCredentials(ctx)) throw new Error('Cloudflare Access Service Token을 먼저 저장하세요.');
+        return JSON.stringify({
+          app: 'mr-robot',
+          version: 3,
+          host: `https://${requestedHost}`,
+          hosts: [`https://${requestedHost}`],
+          protocol: 'https',
+          port: 443,
+          pin,
+          expiresAt,
+          // The long-lived Cloudflare machine credential never crosses into
+          // the renderer or QR. Native clients enter it directly and keep it
+          // in their OS credential vault, while this QR remains one-use.
+          requiresCloudflareAccess: true,
+        });
+      }, { destructive: false, adminOnly: true });
+      ctx.registerCommand('remote-link.start', () => startConfigured(), { destructive: true, adminOnly: true });
       ctx.registerCommand('remote-link.stop', () => stop(activeTransientQuick), { destructive: true, adminOnly: true });
       ctx.registerCommand('remote-link.quick.start', (raw) => {
         const current = status();
@@ -769,7 +1145,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (!activeTransientQuick) return status();
         return stop(true);
       }, { destructive: true, adminOnly: true });
-      ctx.registerCommand('remote-link.verify', () => verify(), { destructive: false, adminOnly: true });
+      ctx.registerCommand('remote-link.verify', () => verifyFailClosed(), { destructive: false, adminOnly: true });
 
       ctx.on('plugins.changed', (raw) => {
         const list = Array.isArray(raw) ? raw as Array<{ id?: string; enabled?: boolean }> : [];
@@ -777,14 +1153,18 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): MrRobot
         if (self?.enabled === false) {
           void stop();
         } else if (self?.enabled === true && storedConfig(ctx).autoStart && !processHandle && !pendingStart) {
-          void start().then(() => verify().catch(() => undefined)).catch((error) => {
+          void startConfigured().catch((error) => {
             lastError = `자동 연결 실패: ${error instanceof Error ? error.message : String(error)}`;
             emitStatus();
           });
         }
       });
+      activeContext = ctx;
     },
     async deactivate(ctx) {
+      if (activeContext === ctx) activeContext = undefined;
+      accessCredentialCache = undefined;
+      executableTrustCache = undefined;
       ++operationGeneration;
       const active = processHandle;
       const pending = pendingStart;

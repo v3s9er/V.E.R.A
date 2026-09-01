@@ -103,6 +103,7 @@ interface TelemetrySummary { turns: number; promptTokens: number; completionToke
 interface RepairOffer { target: ProviderInfo; error: string; helpers: ProviderInfo[] }
 interface DangerConfirm { title: string; message: string; confirmLabel: string; action: () => Promise<void> }
 const EXECUTION_LABEL = { single: '단일 선택', pipeline: '순차 검증', vote: '그룹 투표', hybrid: '혼합형', swarm: '경쟁 스웜' } as const;
+const ACCESS_QR_REVEAL_MS = 60_000;
 
 export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const { client } = useMrRobot();
@@ -122,6 +123,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [telemetry, setTelemetry] = useState<TelemetrySummary | null>(null);
   const [memoryText, setMemoryText] = useState('');
   const [qrUrl, setQrUrl] = useState('');
+  const [qrRequiresManualAccess, setQrRequiresManualAccess] = useState(false);
+  const [qrRevealExpiresAt, setQrRevealExpiresAt] = useState<number | null>(null);
+  const [namedQrBusy, setNamedQrBusy] = useState(false);
   const [remoteStatus, setRemoteStatus] = useState<RemoteLinkStatus | null>(null);
   const [remoteHandoff, setRemoteHandoff] = useState<RemoteHandoffInfo | null>(null);
   const [remoteHandoffBusy, setRemoteHandoffBusy] = useState(false);
@@ -129,7 +133,38 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [pairingLinkBusy, setPairingLinkBusy] = useState(false);
   const [pairingLinkMessage, setPairingLinkMessage] = useState('');
   const capabilityUpdateLocks = useRef(new Set<string>());
+  const qrEpochRef = useRef(0);
+  const qrTimerRef = useRef<number | null>(null);
+  const settingsMountedRef = useRef(true);
+  const remoteStatusRef = useRef<RemoteLinkStatus | null>(null);
   const [capabilityBusyIds, setCapabilityBusyIds] = useState<Set<string>>(() => new Set());
+
+  const clearPairingQr = useCallback((): void => {
+    qrEpochRef.current += 1;
+    if (qrTimerRef.current !== null) {
+      window.clearTimeout(qrTimerRef.current);
+      qrTimerRef.current = null;
+    }
+    if (settingsMountedRef.current) {
+      setQrUrl('');
+      setQrRequiresManualAccess(false);
+      setQrRevealExpiresAt(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    settingsMountedRef.current = true;
+    return () => {
+      settingsMountedRef.current = false;
+      qrEpochRef.current += 1;
+      if (qrTimerRef.current !== null) window.clearTimeout(qrTimerRef.current);
+      qrTimerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    remoteStatusRef.current = remoteStatus;
+  }, [remoteStatus]);
 
   // provider add form
   const [preset, setPreset] = useState('deepseek');
@@ -173,6 +208,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   }, [canManage, client]);
 
   const refresh = useCallback(async (): Promise<void> => {
+    clearPairingQr();
     try {
       const [provs, sets, route, presets, memory, stats] = await Promise.all([
         client.call('providers.list', {}) as Promise<ProviderInfo[]>,
@@ -196,7 +232,11 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           setPairing(next);
           setRemoteHandoff(next.remoteHandoff ?? null);
         }).catch(() => { setPairing(null); setRemoteHandoff(null); });
-        void client.call('plugins.call', { name: 'remote-link.status', params: {} }).then((value) => setRemoteStatus(value as RemoteLinkStatus)).catch(() => setRemoteStatus(null));
+        void client.call('plugins.call', { name: 'remote-link.status', params: {} }).then((value) => {
+          const status = value as RemoteLinkStatus;
+          remoteStatusRef.current = status;
+          setRemoteStatus(status);
+        }).catch(() => { remoteStatusRef.current = null; setRemoteStatus(null); });
         void refreshVoice();
         void client.call('pairing.links', {}).then((links) => setDeviceLinks(links as DeviceLink[])).catch(() => setDeviceLinks([]));
       } else {
@@ -210,7 +250,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     } catch {
       /* ignore */
     }
-  }, [canManage, client, refreshVoice]);
+  }, [canManage, clearPairingQr, client, refreshVoice]);
 
   useEffect(() => {
     void refresh();
@@ -232,6 +272,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       ...(d as Partial<VoiceStatus>),
     } as VoiceStatus)));
     const offPairing = client.on('pairing.changed', () => {
+      clearPairingQr();
       if (canManage) void client.call('pairing.info', {}).then((value) => {
         const next = value as PairingInfo;
         setPairing(next);
@@ -240,7 +281,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     });
     const offRemoteLink = client.on('remote-link.changed', (data) => {
       if (!canManage) return;
+      clearPairingQr();
       const status = data as RemoteLinkStatus;
+      remoteStatusRef.current = status;
       setRemoteStatus(status);
       if (!status.running) setRemoteHandoff(null);
     });
@@ -254,7 +297,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       offPairing();
       offRemoteLink();
     };
-  }, [client, refresh]);
+  }, [canManage, clearPairingQr, client, refresh]);
 
   useEffect(() => {
     if (!canManage || section !== 'routing' || providers.length === 0) return;
@@ -279,23 +322,31 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   useEffect(() => {
     let alive = true;
     const remoteOrigin = remoteStatus?.running ? remoteStatus.publicUrl : undefined;
-    const payload = remoteOrigin && remoteHandoff?.pin
-      ? JSON.stringify({ app: 'mr-robot', version: 3, host: remoteOrigin, hosts: [...new Set([remoteOrigin])], protocol: 'https', port: 443, pin: remoteHandoff.pin })
-      : pairing?.host !== '127.0.0.1'
-        ? pairing?.qrPayload
-        : undefined;
-    setQrUrl('');
-    if (payload) {
-      void QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' })
+    // Named-tunnel handoff stays behind the explicit reveal below even though
+    // the stored Access service token is deliberately omitted from the QR.
+    if (remoteOrigin && remoteHandoff?.pin && remoteStatus?.provider === 'cloudflare-named') return undefined;
+    clearPairingQr();
+    const qrEpoch = qrEpochRef.current;
+    const build = async (): Promise<void> => {
+      const payload = remoteOrigin && remoteHandoff?.pin
+        ? JSON.stringify({ app: 'mr-robot', version: 3, host: remoteOrigin, hosts: [...new Set([remoteOrigin])], protocol: 'https', port: 443, pin: remoteHandoff.pin })
+        : pairing?.host !== '127.0.0.1'
+          ? pairing?.qrPayload
+          : undefined;
+      if (!payload) return;
+      await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' })
         .then((url) => {
-          if (alive) setQrUrl(url);
+          if (alive && qrEpoch === qrEpochRef.current) setQrUrl(url);
         })
         .catch(() => undefined);
-    }
+    };
+    void build().catch(() => {
+      if (alive) setQrUrl('');
+    });
     return () => {
       alive = false;
     };
-  }, [pairing, remoteHandoff, remoteStatus]);
+  }, [clearPairingQr, pairing, remoteHandoff, remoteStatus]);
 
   const applyPreset = (id: string): void => {
     setPreset(id);
@@ -398,16 +449,70 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
 
   const createRemoteHandoff = async (): Promise<void> => {
     if (remoteHandoffBusy || !remoteStatus?.running || !remoteStatus.publicUrl) return;
+    clearPairingQr();
     setRemoteHandoffBusy(true);
     setRemoteHandoffMessage('');
     try {
+      if (remoteStatus.provider === 'cloudflare-named') {
+        await client.call('plugins.call', { name: 'remote-link.verify', params: {} }, 30_000);
+      }
       const handoff = await client.call('pairing.createRemoteHandoff', { ttlMinutes: 24 * 60 }) as RemoteHandoffInfo;
       setRemoteHandoff(handoff);
-      setRemoteHandoffMessage('12자리·24시간·1회용 외출 코드와 QR을 만들었습니다.');
+      setRemoteHandoffMessage(remoteStatus.provider === 'cloudflare-named'
+        ? '12자리·24시간·1회용 외출 코드를 만들었습니다. 장기 Access 자격증명을 제외한 QR을 60초간 표시할 수 있습니다.'
+        : '12자리·24시간·1회용 외출 코드와 QR을 만들었습니다.');
     } catch (error) {
       setRemoteHandoffMessage(`외출 코드 생성 실패: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setRemoteHandoffBusy(false);
+    }
+  };
+
+  const revealNamedPairingQr = async (): Promise<void> => {
+    const status = remoteStatusRef.current;
+    if (namedQrBusy || !status?.running || status.provider !== 'cloudflare-named' || !status.publicUrl) return;
+    setNamedQrBusy(true);
+    setRemoteHandoffMessage('장기 자격증명을 제외한 보안 QR을 검증 후 준비하는 중입니다…');
+    clearPairingQr();
+    try {
+      const currentPairing = await client.call('pairing.info', {}) as PairingInfo;
+      const handoff = currentPairing.remoteHandoff;
+      if (!handoff) throw new Error('먼저 12자리 일회용 외출 코드를 만드세요.');
+      const payload = await client.call('plugins.call', {
+        name: 'remote-link.pairing.payload',
+        params: { host: status.publicUrl, pin: handoff.pin, expiresAt: handoff.expiresAt },
+      }) as string;
+      const url = await QRCode.toDataURL(payload, { width: 300, margin: 4, errorCorrectionLevel: 'M' });
+      const latestPairing = await client.call('pairing.info', {}) as PairingInfo;
+      const currentStatus = remoteStatusRef.current;
+      if (!settingsMountedRef.current
+        || !currentStatus?.running
+        || currentStatus.provider !== 'cloudflare-named'
+        || currentStatus.accessProtected !== true
+        || currentStatus.publicUrl !== status.publicUrl
+        || latestPairing.remoteHandoff?.pin !== handoff.pin
+        || latestPairing.remoteHandoff?.expiresAt !== handoff.expiresAt) return;
+      const revealEpoch = qrEpochRef.current;
+      const revealExpiresAt = Date.now() + ACCESS_QR_REVEAL_MS;
+      setQrUrl(url);
+      setQrRequiresManualAccess(true);
+      setQrRevealExpiresAt(revealExpiresAt);
+      qrTimerRef.current = window.setTimeout(() => {
+        if (qrEpochRef.current !== revealEpoch) return;
+        qrEpochRef.current += 1;
+        qrTimerRef.current = null;
+        if (settingsMountedRef.current) {
+          setQrUrl('');
+          setQrRequiresManualAccess(false);
+          setQrRevealExpiresAt(null);
+        }
+      }, ACCESS_QR_REVEAL_MS);
+      setRemoteHandoffMessage('장기 자격증명을 제외한 1회용 QR을 60초간 표시합니다. Access 값은 휴대폰에서 직접 입력하세요.');
+    } catch (error) {
+      clearPairingQr();
+      setRemoteHandoffMessage(`보안 QR 생성 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (settingsMountedRef.current) setNamedQrBusy(false);
     }
   };
 
@@ -422,10 +527,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const revokeRemoteHandoff = async (): Promise<void> => {
+    clearPairingQr();
     try {
       await client.call('pairing.revokeRemoteHandoff', {});
       setRemoteHandoff(null);
-      setQrUrl('');
       setRemoteHandoffMessage('외출용 일회용 코드를 폐기했습니다.');
     } catch (error) {
       setRemoteHandoffMessage(`외출 코드 폐기 실패: ${error instanceof Error ? error.message : String(error)}`);
@@ -1056,7 +1161,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 action: startPairingQuickLink,
               })}>{pairingLinkBusy ? 'QR 준비 중…' : 'Quick Link 시작·QR 만들기'}</Button>
             </div> : <div className="pairing-qr">
-              {qrUrl ? <img src={qrUrl} alt={remotePairingUrl ? '원격 보안 페어링 QR' : '페어링 QR'} width={300} height={300} /> : <div className="qr-empty">{remotePairingUrl ? '외출 코드를 만들면 보안 QR이 표시됩니다.' : 'QR 생성 중…'}</div>}
+              {qrUrl ? <img src={qrUrl} alt={remotePairingUrl ? '원격 보안 페어링 QR' : '페어링 QR'} width={300} height={300} /> : <div className="qr-empty">{remotePairingUrl ? remoteStatus?.provider === 'cloudflare-named' && remoteHandoff ? '장기 자격증명 없는 QR은 아래에서 60초 표시할 수 있습니다.' : '외출 코드를 만들면 보안 QR이 표시됩니다.' : 'QR 생성 중…'}</div>}
             </div>}
             <div className="pairing-info">
               <div className="pairing-host">
@@ -1082,7 +1187,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
               <p className="panel-hint">
                 {remotePairingUrl
                   ? remoteHandoff
-                    ? <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. 공개 주소에서는 일반 6자리 PIN을 받지 않으며 이 12자리 코드만 한 기기에 한 번 허용합니다.</>
+                    ? remoteStatus?.provider === 'cloudflare-named'
+                      ? <>{qrRequiresManualAccess ? '지금 표시된 QR에는 주소와 1회용 코드만 있습니다. 스캔 뒤 휴대폰에서 Access 값을 직접 입력하세요.' : '장기 Access 자격증명은 QR로 내보내지 않습니다.'}</>
+                      : <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. 공개 주소에서는 일반 6자리 PIN을 받지 않으며 이 12자리 코드만 한 기기에 한 번 허용합니다.</>
                     : <>기존 등록 기기는 지금 주소로 바로 연결됩니다. 새 기기는 아래에서 외출 코드를 명시적으로 만든 뒤 QR을 스캔하세요.</>
                   : pairing.host !== '127.0.0.1'
                   ? <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다.</>
@@ -1094,6 +1201,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                   PIN 재생성
                 </Button>}
                 {remotePairingUrl && <Button variant="ghost" disabled={remoteHandoffBusy} onClick={() => void createRemoteHandoff()}>{remoteHandoffBusy ? '생성 중…' : remoteHandoff ? '12자리 외출 코드 재발급' : '12자리·24시간·1회용 외출 코드 생성'}</Button>}
+                {remotePairingUrl && remoteStatus?.provider === 'cloudflare-named' && remoteHandoff && <Button variant="danger" disabled={namedQrBusy} onClick={() => setDangerConfirm({
+                  title: 'Cloudflare 보안 QR을 60초간 표시할까요?',
+                  message: '이 QR에는 주소와 12자리 일회용 코드만 들어갑니다. 저장된 Cloudflare Service Token은 renderer나 QR로 내보내지 않으며, 스캔 뒤 휴대폰에서 직접 입력합니다.',
+                  confirmLabel: '이 휴대폰으로 60초 표시',
+                  action: revealNamedPairingQr,
+                })}>{namedQrBusy ? 'QR 준비 중…' : '보안 QR 60초 표시'}</Button>}
+                {qrRequiresManualAccess && <Button variant="ghost" onClick={clearPairingQr}>QR 지금 숨기기</Button>}
                 <Button
                   variant="danger"
                   onClick={() => setDangerConfirm({ title: '모든 기기 연결을 초기화할까요?', message: '관리자 시크릿을 새로 만들면 현재 연결된 모바일과 다른 PC가 즉시 해제됩니다. 새 QR로 다시 연결해야 합니다.', confirmLabel: '시크릿 회전', action: async () => { await client.call('pairing.regenerate', {}); await refresh(); } })}
@@ -1107,6 +1221,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 <Button variant="ghost" onClick={() => void copyRemoteHandoff()}>코드 복사</Button>
                 <Button variant="danger" onClick={() => void revokeRemoteHandoff()}>즉시 폐기</Button>
               </div>}
+              {qrRequiresManualAccess && <div className="dependency-warning"><b>1회용 QR · {qrRevealExpiresAt ? `${new Date(qrRevealExpiresAt).toLocaleTimeString()}에 자동 숨김` : '60초 후 자동 숨김'}</b><br />장기 Cloudflare 자격증명은 포함되지 않습니다. 스캔 뒤 휴대폰에서 직접 입력하세요.</div>}
               {remoteHandoffMessage && <p className="panel-hint">{remoteHandoffMessage}</p>}
               <div className="linked-devices">
                 <h4>연결된 기기</h4>

@@ -94,7 +94,12 @@ export function FilesView({ activePc, pcs }: { activePc: SavedPc; pcs: SavedPc[]
     }
   }, [activePc.id, cancelPeerTransfer]);
 
-  const request = async (pc: SavedPc, url: string, init: RequestInit = {}): Promise<Response> => fetch(`${baseOf(pc)}${url}`, { ...init, headers: { ...(init.headers ?? {}), 'x-mr-robot-token': pc.secret } });
+  const request = async (pc: SavedPc, url: string, init: RequestInit = {}): Promise<Response> => fetch(`${baseOf(pc)}${url}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'x-mr-robot-token': pc.secret },
+    credentials: 'same-origin',
+    redirect: 'error',
+  });
   const requestJsonWithTimeout = async <T,>(
     pc: SavedPc,
     url: string,

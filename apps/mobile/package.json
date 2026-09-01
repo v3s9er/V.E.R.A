@@ -1,9 +1,19 @@
 {
   "name": "mr-robot-mobile",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "main": "expo/AppEntry.js",
+  "expo": {
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-file-system"
+        ]
+      }
+    }
+  },
   "scripts": {
+    "postinstall": "node ../../scripts/patch-expo-file-system-security.mjs",
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",

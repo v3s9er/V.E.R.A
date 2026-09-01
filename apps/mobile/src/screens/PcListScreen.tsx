@@ -16,14 +16,22 @@ import { CameraView, useCameraPermissions, type CameraViewProps } from 'expo-cam
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { MrRobotClient } from '../rpc';
 import { pairingOrigins, wsUrl } from '../rpc';
-import type { PairingPayload, SavedPc } from '../types';
+import type { CloudflareAccessCredentials, PairingPayload, SavedPc } from '../types';
 import { parsePairingPayload } from '../rpc';
-import { connectionOrigins, exchangePin, exchangePinAcrossOrigins, getLastPcId, loadPcs, parsePcAddress, removePc, savePcs, setLastPcId, upsertPc } from '../pcs';
+import { connectionOrigins, exchangePin, exchangePinAcrossOrigins, getLastPcId, loadPcs, normalizeCloudflareAccess, parsePcAddress, removePc, savePcs, setLastPcId, upsertPc } from '../pcs';
 import { colors, radius, shadow } from '../theme';
 
 const PAIRING_PIN_PATTERN = /^(?:\d{6}|\d{12})$/;
 const QR_SCANNER_SETTINGS: NonNullable<CameraViewProps['barcodeScannerSettings']> = { barcodeTypes: ['qr'] };
 const INVALID_QR_HINT_MS = 1_800;
+
+function optionalCloudflareAccess(clientId: string, clientSecret: string): CloudflareAccessCredentials | undefined {
+  const hasClientId = Boolean(clientId.trim());
+  const hasClientSecret = Boolean(clientSecret.trim());
+  if (!hasClientId && !hasClientSecret) return undefined;
+  if (!hasClientId || !hasClientSecret) throw new Error('Cloudflare Access Client ID와 Secret을 모두 입력하세요.');
+  return normalizeCloudflareAccess({ clientId, clientSecret });
+}
 
 export function PcListScreen({
   client,
@@ -41,6 +49,9 @@ export function PcListScreen({
   const [name, setName] = useState('');
   const [hostPort, setHostPort] = useState('');
   const [pin, setPin] = useState('');
+  const [accessClientId, setAccessClientId] = useState('');
+  const [accessClientSecret, setAccessClientSecret] = useState('');
+  const [accessRequired, setAccessRequired] = useState(false);
   const [busy, setBusy] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const [scanHandled, setScanHandled] = useState(false);
@@ -80,7 +91,13 @@ export function PcListScreen({
       if (!isCurrent()) return false;
       const candidateOrigin = candidates[index];
       try {
-        await client.connect(wsUrl(candidateOrigin), pc.secret, index < candidates.length - 1 ? 2500 : 8000);
+        await client.connect(
+          wsUrl(candidateOrigin),
+          pc.secret,
+          index < candidates.length - 1 ? 2500 : 8000,
+          pc.cloudflareAccess,
+          pc.cloudflareAccessOrigin,
+        );
         if (!isCurrent()) { client.close(); return false; }
         const candidate = parsePcAddress(candidateOrigin, pc.port, pc.protocol ?? 'http');
         let refreshedHosts = pc.hosts ?? [];
@@ -120,7 +137,9 @@ export function PcListScreen({
     setError('');
     try {
       const parsed = parsePcAddress(hostPort);
-      const secret = await exchangePin(parsed.origin, pin, name.trim() || '모바일');
+      const cloudflareAccess = optionalCloudflareAccess(accessClientId, accessClientSecret);
+      if (accessRequired && !cloudflareAccess) throw new Error('이 고정 Tunnel은 Cloudflare Access Client ID와 Secret이 필요합니다.');
+      const secret = await exchangePin(parsed.origin, pin, name.trim() || '모바일', 'ask', 8000, cloudflareAccess);
       const pc: Omit<SavedPc, 'id' | 'addedAt'> = {
         name: name.trim() || hostPort.trim(),
         host: parsed.host,
@@ -129,6 +148,8 @@ export function PcListScreen({
         origins: [parsed.origin],
         activeOrigin: parsed.origin,
         secret,
+        ...(cloudflareAccess ? { cloudflareAccess, cloudflareAccessConfigured: true } : {}),
+        ...(cloudflareAccess ? { cloudflareAccessOrigin: parsed.origin } : {}),
       };
       const next = await upsertPc(await loadPcs(), pc);
       await savePcs(next);
@@ -137,6 +158,9 @@ export function PcListScreen({
       setName('');
       setHostPort('');
       setPin('');
+      setAccessClientId('');
+      setAccessClientSecret('');
+      setAccessRequired(false);
       const savedPc = next.find((item) => connectionOrigins(item).includes(parsed.origin));
       if (!savedPc) throw new Error('저장된 PC를 찾지 못했습니다.');
       await connect(savedPc);
@@ -170,6 +194,23 @@ export function PcListScreen({
   const connectDetectedPc = async (): Promise<void> => {
     const payload = detectedPayload;
     if (!payload || scanConnectingRef.current) return;
+    if (payload.requiresCloudflareAccess && !payload.cloudflareAccess) {
+      const primary = parsePcAddress(pairingOrigins(payload)[0]!, payload.port, payload.protocol ?? 'https');
+      setName(`PC (${primary.host})`);
+      setHostPort(primary.origin);
+      setPin(payload.pin);
+      scannerSessionRef.current += 1;
+      scanLockRef.current = false;
+      setDetectedPayload(null);
+      setScanHandled(false);
+      setScanReady(false);
+      setScanError('');
+      setShowScan(false);
+      setAccessRequired(true);
+      setShowAdd(true);
+      setError('Cloudflare Access 값은 QR에 포함하지 않습니다. 이 휴대폰에서 직접 입력한 뒤 등록하세요.');
+      return;
+    }
     scanConnectingRef.current = true;
     setScanConnecting(true);
     setScanError('PC 연결 정보를 확인하는 중…');
@@ -178,7 +219,13 @@ export function PcListScreen({
       const primary = parsePcAddress(payload.host, payload.port, payload.protocol ?? 'http');
       const origins = pairingOrigins(payload);
       const hosts = [...new Set(origins.map((origin) => parsePcAddress(origin).host))];
-      const paired = await exchangePinAcrossOrigins(origins, payload.pin, `모바일 (${payload.host})`);
+      const paired = await exchangePinAcrossOrigins(
+        origins,
+        payload.pin,
+        `모바일 (${payload.host})`,
+        payload.cloudflareAccess,
+        payload.cloudflareAccessOrigin,
+      );
       const secret = paired.secret;
       const next = await upsertPc(await loadPcs(), {
         name: `PC (${payload.host})`,
@@ -188,8 +235,14 @@ export function PcListScreen({
         protocol: primary.protocol,
         origins,
         activeOrigin: paired.origin,
+        credentialOrigin: paired.origin,
         port: primary.port,
         secret,
+        ...(payload.cloudflareAccess ? {
+          cloudflareAccess: payload.cloudflareAccess,
+          cloudflareAccessConfigured: true,
+          cloudflareAccessOrigin: payload.cloudflareAccessOrigin,
+        } : {}),
       });
       await savePcs(next);
       setPcs(next);
@@ -197,7 +250,12 @@ export function PcListScreen({
       if (!savedPc) throw new Error('저장된 PC를 찾지 못했습니다.');
       const connected = await connect(savedPc);
       if (connected) {
-        if (session === scannerSessionRef.current) setShowScan(false);
+        if (session === scannerSessionRef.current) {
+          // Legacy v4 payloads may contain an edge credential. SecureStore owns
+          // it after enrollment, so drop the QR object from React state at once.
+          setDetectedPayload(null);
+          setShowScan(false);
+        }
       } else if (session === scannerSessionRef.current) {
         setScanError('주소는 저장했지만 지금 연결되지 않습니다. PC 주소와 네트워크 상태를 확인하세요.');
       }
@@ -317,7 +375,7 @@ export function PcListScreen({
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
         <View style={styles.mainButtons}>
-          <TouchableOpacity style={styles.bigBtn} onPress={() => setShowAdd(true)}>
+          <TouchableOpacity style={styles.bigBtn} onPress={() => { setAccessRequired(false); setShowAdd(true); }}>
             <Text style={styles.bigBtnText}>＋ PIN으로 PC 추가</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.bigBtn, styles.bigBtnAlt]} onPress={() => void openScanner()}>
@@ -326,7 +384,7 @@ export function PcListScreen({
         </View>
       </ScrollView>
 
-      <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
+      <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => { setAccessRequired(false); setShowAdd(false); }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
           <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled">
@@ -351,6 +409,29 @@ export function PcListScreen({
               autoCapitalize="none"
               autoCorrect={false}
             />
+            <Text style={styles.label}>Cloudflare Access 서비스 토큰 ({accessRequired ? '필수' : '선택'})</Text>
+            <Text style={styles.addressHelp}>{accessRequired ? 'QR에는 장기 자격증명이 들어 있지 않습니다. PC에 저장한 Client ID와 Secret을 이 휴대폰에서 직접 입력하세요. ' : 'PC 주소가 Access로 보호될 때만 입력합니다. '}두 값은 Android 보안 저장소에만 보관되며 앱 데이터에는 기록하지 않습니다.</Text>
+            <TextInput
+              style={styles.input}
+              value={accessClientId}
+              onChangeText={setAccessClientId}
+              placeholder="CF-Access-Client-Id"
+              placeholderTextColor={colors.faint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              accessibilityLabel="Cloudflare Access Client ID"
+            />
+            <TextInput
+              style={styles.input}
+              value={accessClientSecret}
+              onChangeText={setAccessClientSecret}
+              placeholder="CF-Access-Client-Secret"
+              placeholderTextColor={colors.faint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+              accessibilityLabel="Cloudflare Access Client Secret"
+            />
             <Text style={styles.label}>연결 코드</Text>
             <Text style={styles.addressHelp}>PC 화면의 6자리 PIN 또는 외출용으로 발급한 12자리 일회용 코드를 입력하세요.</Text>
             <TextInput
@@ -365,8 +446,9 @@ export function PcListScreen({
               accessibilityLabel="PC 연결 코드"
               accessibilityHint="6자리 PIN 또는 12자리 외출용 일회용 코드를 입력합니다."
             />
+            {error ? <Text style={styles.error}>{error}</Text> : null}
             <View style={styles.modalActions}>
-              <TouchableOpacity style={[styles.bigBtn, { flex: 1 }]} onPress={() => setShowAdd(false)}>
+              <TouchableOpacity style={[styles.bigBtn, { flex: 1 }]} onPress={() => { setAccessRequired(false); setShowAdd(false); }}>
                 <Text style={styles.bigBtnText}>취소</Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -423,7 +505,7 @@ export function PcListScreen({
               {detectedOrigins.map((origin, index) => <Text style={styles.detectedAddress} numberOfLines={2} key={origin}>
                 {detectedOrigins.length > 1 ? `후보 ${index + 1} · ${origin}` : origin}
               </Text>)}
-              <Text style={styles.detectedMeta}>{detectedPayload.pin.length === 12 ? '외출용 12자리 일회용 코드' : '6자리 일회용 PIN'} · 표시된 후보만 순서대로 확인하며 아직 연결하지 않았습니다.</Text>
+              <Text style={styles.detectedMeta}>{detectedPayload.pin.length === 12 ? '외출용 12자리 일회용 코드' : '6자리 일회용 PIN'}{detectedPayload.requiresCloudflareAccess ? ' · Access 값은 휴대폰에서 직접 입력' : detectedPayload.cloudflareAccess ? ' · 기존 Access QR' : ''} · 표시된 후보만 순서대로 확인하며 아직 연결하지 않았습니다.</Text>
             </View>}
             {detectedPayload ? <View style={styles.scanActions}>
               <TouchableOpacity
@@ -431,9 +513,9 @@ export function PcListScreen({
                 onPress={() => void connectDetectedPc()}
                 disabled={scanConnecting}
                 accessibilityRole="button"
-                accessibilityLabel={scanConnecting ? 'PC에 연결 중' : '인식한 PC에 연결'}
+                accessibilityLabel={scanConnecting ? 'PC에 연결 중' : detectedPayload.requiresCloudflareAccess ? 'Cloudflare Access 값 입력으로 이동' : '인식한 PC에 연결'}
               >
-                {scanConnecting ? <ActivityIndicator color="#fff" /> : <Text style={styles.bigBtnText}>이 PC에 연결</Text>}
+                {scanConnecting ? <ActivityIndicator color="#fff" /> : <Text style={styles.bigBtnText}>{detectedPayload.requiresCloudflareAccess ? 'Access 값 입력 후 연결' : '이 PC에 연결'}</Text>}
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.bigBtn, styles.scanAction, scanConnecting && styles.btnDisabled]}

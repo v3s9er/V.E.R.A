@@ -33,7 +33,7 @@ declare global {
       onLocalRpcClose(handler: (reason: string) => void): () => void;
       loadPcs(): Promise<DesktopPcLoadResult>;
       savePcs(pcs: SavedPc[]): Promise<{ ok: boolean }>;
-      pairRemotePc(input: { origin: string; pin: string; deviceName: string; permissionCap: string }): Promise<{ credentialRef: string }>;
+      pairRemotePc(input: { origin: string; pin: string; deviceName: string; permissionCap: string; accessClientId?: string; accessClientSecret?: string }): Promise<{ credentialRef: string }>;
       downloadFile(input: { id: string; url: string; token: string; suggestedName: string }): Promise<{ canceled: boolean; path?: string }>;
       cancelDownload(id: string): Promise<{ ok: boolean }>;
       onNavigate(handler: (view: string) => void): () => void;
@@ -610,7 +610,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         const relativePath = `.mr-robot-uploads/${Date.now()}-${index}-${file.name.replace(/[\\/:*?"<>|]/g, '_')}`;
         const base = activePc ? pcOrigin(activePc) : window.location.origin;
         const response = await fetch(`${base}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, {
-          method: 'PUT', headers: { 'x-mr-robot-token': client.token, 'content-type': file.type || 'application/octet-stream' }, body: file, signal: uploadController.signal,
+          method: 'PUT',
+          headers: { 'x-mr-robot-token': client.token, 'content-type': file.type || 'application/octet-stream' },
+          body: file,
+          credentials: 'same-origin',
+          redirect: 'error',
+          signal: uploadController.signal,
         });
         const body = await response.json().catch(() => ({})) as { path?: string; error?: string };
         if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);

@@ -54,7 +54,13 @@ export default function App() {
           if (!isCurrent()) return false;
           const origin = candidates[index];
           try {
-            await client.connect(wsUrl(origin), pc.secret, index < candidates.length - 1 ? 3500 : 8000);
+            await client.connect(
+              wsUrl(origin),
+              pc.secret,
+              index < candidates.length - 1 ? 3500 : 8000,
+              pc.cloudflareAccess,
+              pc.cloudflareAccessOrigin,
+            );
             if (!isCurrent()) { client.close(); return false; }
             const endpoint = parsePcAddress(origin, pc.port, pc.protocol ?? 'http');
             const connectedPc = { ...pc, activeHost: endpoint.host, activeOrigin: endpoint.origin };

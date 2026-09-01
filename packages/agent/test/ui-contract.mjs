@@ -115,6 +115,18 @@ if (!connectGate.includes("/^(?:\\d{6}|\\d{12})$/.test(pin)") || !connectGate.in
 if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
 if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
 if (!pluginsView.includes('refreshRemotePairing(status)') || !pluginsView.includes('host: status.publicUrl') || !pluginsView.includes("QRCode.toDataURL(payload") || !pluginsView.includes('모바일 원탭 연결')) throw new Error('remote link does not refresh a one-tap HTTPS handoff QR safely');
+const passivePluginQrRefresh = pluginsView.slice(pluginsView.indexOf('const refreshRemotePairing'), pluginsView.indexOf('const revealNamedPairingQr'));
+const passiveSettingsQrRefresh = settings.slice(settings.indexOf('const remoteOrigin = remoteStatus?.running'), settings.indexOf('const applyPreset'));
+if (passivePluginQrRefresh.includes("name: 'remote-link.pairing.payload'") || passiveSettingsQrRefresh.includes("name: 'remote-link.pairing.payload'")) throw new Error('passive refresh can create a named-tunnel handoff QR without explicit approval');
+if ((pluginsView.match(/name: 'remote-link\.pairing\.payload'/g) ?? []).length !== 1 || (settings.match(/name: 'remote-link\.pairing\.payload'/g) ?? []).length !== 1) throw new Error('named-tunnel handoff QR is not isolated to one explicit action per administrator view');
+if (![pluginsView, settings].every((source) => source.includes('ACCESS_QR_REVEAL_MS = 60_000')
+  && source.includes('보안 QR 60초 표시')
+  && source.includes('장기 Cloudflare 자격증명')
+  && source.includes('휴대폰에서')
+  && source.includes('window.clearTimeout'))
+  || !pluginsView.includes('clearRemotePairingQr();')
+  || !settings.includes('clearPairingQr();')) throw new Error('named-tunnel QR lacks explicit approval, 60-second expiry, no-secret guidance, or state cleanup');
+if (remoteLink.includes('cloudflareAccess: access') || !remoteLink.includes('requiresCloudflareAccess: true')) throw new Error('named-tunnel QR can regress to exporting the long-lived Cloudflare Access credential');
 if ((serverSource.match(/'remote-link\.changed'/g) ?? []).length < 2 || !pluginsView.includes("client.on('remote-link.changed'") || !settings.includes("client.on('remote-link.changed'")) throw new Error('Quick Link runtime status is not delivered live to both administrator views');
 if (!pluginsView.includes('plugin-live-route') || !css.includes('.plugin-live-route') || !pluginsView.includes('expanded !== p.id')) throw new Error('running Quick Link address disappears when the plugin card is collapsed');
 if (!settings.includes("name: 'remote-link.status'") || !settings.includes("'고정 Tunnel'") || !settings.includes('host: remoteOrigin') || !settings.includes('원격 보안 페어링 QR')) throw new Error('mobile connection settings do not merge the active HTTPS remote link into the visible route and QR');

@@ -18,8 +18,19 @@ export interface SavedPc {
   origins?: string[];
   /** Last origin that completed an authenticated WebSocket connection. */
   activeOrigin?: string;
+  /** Main-owned scope for the encrypted device bearer. */
+  credentialOrigin?: string;
   secret: string;
+  /** Electron-only signal; the actual edge credential remains in safeStorage. */
+  hasAccessCredentials?: boolean;
+  /** Exact HTTPS origin allowed to receive the safeStorage-held Access credential. */
+  cloudflareAccessOrigin?: string;
   addedAt: number;
+}
+
+export interface CloudflareAccessServiceCredentials {
+  clientId: string;
+  clientSecret: string;
 }
 
 export type DesktopPcLoadResult =
@@ -309,21 +320,45 @@ function normalizePc<T extends SavedPc>(pc: T): T {
   const origins = connectionOrigins({ ...pc, protocol });
   const requestedActive = pc.activeOrigin && tryOrigin(pc.activeOrigin, pc.port, protocol);
   const activeOrigin = requestedActive && origins.includes(requestedActive) ? requestedActive : origins[0];
-  return { ...pc, protocol, origins, activeOrigin };
+  const requestedCredentialOrigin = pc.credentialOrigin && tryOrigin(pc.credentialOrigin, pc.port, protocol);
+  const credentialOrigin = requestedCredentialOrigin && origins.includes(requestedCredentialOrigin)
+    ? requestedCredentialOrigin
+    : activeOrigin;
+  const requestedAccessOrigin = pc.cloudflareAccessOrigin && tryOrigin(pc.cloudflareAccessOrigin, pc.port, 'https');
+  const cloudflareAccessOrigin = pc.hasAccessCredentials && requestedAccessOrigin === credentialOrigin
+    && requestedAccessOrigin?.startsWith('https://')
+    ? requestedAccessOrigin
+    : undefined;
+  return { ...pc, protocol, origins, activeOrigin, credentialOrigin, cloudflareAccessOrigin };
 }
 
 /** Exchange a short PIN for the long-lived secret on a (possibly remote) PC. */
-export async function exchangePin(hostPort: string, pin: string, deviceName = '웹 브라우저', permissionCap = 'ask'): Promise<string> {
+export async function exchangePin(hostPort: string, pin: string, deviceName = '웹 브라우저', permissionCap = 'ask', access?: CloudflareAccessServiceCredentials): Promise<string> {
   const base = assertSecurePcOrigin(parsePcEndpoint(hostPort).origin);
   if (window.mrRobotDesktop?.pairRemotePc) {
-    const paired = await window.mrRobotDesktop.pairRemotePc({ origin: base, pin: pin.trim(), deviceName, permissionCap });
+    const paired = await window.mrRobotDesktop.pairRemotePc({
+      origin: base,
+      pin: pin.trim(),
+      deviceName,
+      permissionCap,
+      accessClientId: access?.clientId,
+      accessClientSecret: access?.clientSecret,
+    });
     if (!paired?.credentialRef) throw new Error('암호화된 PC 연결 정보를 만들지 못했습니다.');
     return paired.credentialRef;
   }
   const res = await fetch(`${base}/api/pair`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(access ? {
+        'CF-Access-Client-Id': access.clientId,
+        'CF-Access-Client-Secret': access.clientSecret,
+      } : {}),
+    },
     body: JSON.stringify({ pin: pin.trim(), deviceName, permissionCap }),
+    credentials: 'same-origin',
+    redirect: 'error',
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

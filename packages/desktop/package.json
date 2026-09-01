@@ -1,6 +1,6 @@
 {
   "name": "@mr-robot/desktop",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "type": "module",
   "main": "main.mjs",
@@ -10,7 +10,8 @@
     "dev": "electron ."
   },
   "dependencies": {
-    "@mr-robot/agent": "*"
+    "@mr-robot/agent": "*",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "electron": "43.4.1"

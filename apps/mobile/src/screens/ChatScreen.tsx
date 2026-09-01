@@ -19,7 +19,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import type { MrRobotClient } from '../rpc';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
 import { colors, radius } from '../theme';
-import { httpBaseForPc } from '../pcs';
+import { httpBaseForPc, pcAuthenticatedHeaders } from '../pcs';
 
 interface UiTool {
   key: string;
@@ -565,9 +565,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false }: { client: Mr
     const file = picked.assets[0]; const relativePath = `.mr-robot-uploads/${Date.now()}-${file.name.replace(/[\\/:*?"<>|]/g, '_')}`;
     setUploading(true);
     uploadStopReason.current = null;
-    const task = FileSystem.createUploadTask(`${httpBaseForPc(pc)}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`, file.uri, {
+    const uploadUrl = `${httpBaseForPc(pc)}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`;
+    const task = FileSystem.createUploadTask(uploadUrl, file.uri, {
       httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      headers: { 'content-type': file.mimeType ?? 'application/octet-stream', 'x-mr-robot-token': pc.secret },
+      headers: pcAuthenticatedHeaders(pc, uploadUrl, { 'content-type': file.mimeType ?? 'application/octet-stream' }),
     });
     uploadTaskRef.current = task;
     const timeout = setTimeout(() => {

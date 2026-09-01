@@ -24,7 +24,8 @@ async function publicWebSocketProtocols(url: string, secret: string, signal: Abo
     headers: { 'x-mr-robot-token': secret, accept: 'application/json' },
     signal,
     cache: 'no-store',
-    credentials: 'omit',
+    credentials: 'same-origin',
+    redirect: 'error',
   });
   if (!response.ok) throw new Error(`WebSocket 보안 티켓 발급 실패 (HTTP ${response.status})`);
   const ticket = await response.json() as WsUpgradeTicketInfo;

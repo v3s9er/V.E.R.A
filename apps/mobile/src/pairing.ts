@@ -1,4 +1,19 @@
-import type { PairingPayload } from './types';
+import type { CloudflareAccessCredentials, PairingPayload } from './types';
+
+const isSafeHeaderCredential = (value: unknown): value is string => typeof value === 'string'
+  && value.length > 0
+  && value.length <= 4_096
+  && /^[\x21-\x7E]+$/.test(value);
+
+function parseCloudflareAccess(value: unknown): CloudflareAccessCredentials | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Cloudflare Access 정보가 올바르지 않습니다.');
+  const candidate = value as Partial<CloudflareAccessCredentials>;
+  if (!isSafeHeaderCredential(candidate.clientId) || !isSafeHeaderCredential(candidate.clientSecret)) {
+    throw new Error('Cloudflare Access 정보가 올바르지 않습니다.');
+  }
+  return { clientId: candidate.clientId, clientSecret: candidate.clientSecret };
+}
 
 function securePairingOrigin(value: string, port: number, protocol: 'http' | 'https'): string {
   const input = value.trim();
@@ -28,7 +43,7 @@ export function pairingOrigins(payload: PairingPayload): string[] {
 export function parsePairingPayload(raw: string): PairingPayload | null {
   try {
     const obj = JSON.parse(raw) as Partial<PairingPayload>;
-    if (obj?.app !== 'mr-robot' || obj.version !== 3) return null;
+    if (obj?.app !== 'mr-robot' || (obj.version !== 3 && obj.version !== 4)) return null;
     if (typeof obj.host !== 'string' || !obj.host.trim() || obj.host.length > 2_048) return null;
     if (!Number.isInteger(obj.port) || Number(obj.port) < 1 || Number(obj.port) > 65_535) return null;
     if (typeof obj.pin !== 'string' || !/^(?:\d{6}|\d{12})$/.test(obj.pin)) return null;
@@ -36,16 +51,30 @@ export function parsePairingPayload(raw: string): PairingPayload | null {
     if (obj.hosts !== undefined && (!Array.isArray(obj.hosts)
       || obj.hosts.length > 8
       || obj.hosts.some((host) => typeof host !== 'string' || !host.trim() || host.length > 2_048))) return null;
+    if (obj.version === 3 && obj.cloudflareAccess !== undefined) return null;
+    if (obj.version === 4 && obj.cloudflareAccess === undefined) return null;
+    if (obj.requiresCloudflareAccess !== undefined && obj.requiresCloudflareAccess !== true) return null;
+    const expiresAt = Number(obj.expiresAt);
+    const hasExpiry = obj.expiresAt !== undefined;
+    if ((obj.version === 4 || obj.requiresCloudflareAccess === true) && !hasExpiry) return null;
+    if (hasExpiry && (!Number.isSafeInteger(expiresAt)
+      || expiresAt <= Date.now()
+      || expiresAt > Date.now() + 25 * 60 * 60_000)) return null;
+    const cloudflareAccess = parseCloudflareAccess(obj.cloudflareAccess);
     const payload: PairingPayload = {
       app: 'mr-robot',
-      version: 3,
+      version: obj.version,
       host: obj.host.trim(),
       hosts: obj.hosts?.map((host) => host.trim()),
       protocol: obj.protocol,
       port: Number(obj.port),
       pin: obj.pin,
+      ...(hasExpiry ? { expiresAt } : {}),
+      ...(obj.requiresCloudflareAccess === true ? { requiresCloudflareAccess: true } : {}),
+      ...(cloudflareAccess ? { cloudflareAccess } : {}),
     };
-    pairingOrigins(payload);
+    const origins = pairingOrigins(payload);
+    if (cloudflareAccess) payload.cloudflareAccessOrigin = origins[0];
     return payload;
   } catch {
     return null;

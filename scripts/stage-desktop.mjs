@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,11 +43,17 @@ execFileSync(process.execPath, [
 
 copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
 copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
+copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
+// main.mjs uses ws for native Cloudflare Access headers on WSS upgrades.
+// Copy the audited runtime dependency because the staged Electron app is
+// intentionally self-contained and does not run npm install at startup.
+copyTree(join(root, 'node_modules', 'ws'), join(stage, 'node_modules', 'ws'));
+const wsVersion = JSON.parse(readFileSync(join(root, 'node_modules', 'ws', 'package.json'), 'utf8')).version;
 const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.3.8', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs',
+  name: 'mr-robot-desktop', version: '0.3.9', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

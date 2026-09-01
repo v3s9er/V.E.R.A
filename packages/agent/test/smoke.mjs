@@ -5,7 +5,7 @@
  * Covers: event bus, plugin attach/detach leak-freedom, plugin commands,
  * computer shell/screen, HTTP API + pairing, WebSocket RPC.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,7 @@ const here = dirnameOf(import.meta);
 const dist = resolve(here, '..', 'dist');
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
+const { CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } = await import(pathToFileURL(join(dist, 'access-probe.js')).href);
 const { browserOriginAllowed, createByteLimitStream, isSecurePlainPeerTransport, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
 const { createRemoteLinkPlugin, localTunnelCredentialsFromToken, localTunnelIngressConfig, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
 const { SecretVault } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
@@ -107,6 +108,9 @@ try { normalizeNamedTunnelHostname('https://metadata.service.internal'); } catch
 check('named tunnel verification rejects internal DNS suffixes', internalNamedHostBlocked);
 const diagnosticSecret = `eyJ${'A'.repeat(120)}`;
 check('remote diagnostics redact tunnel credentials', !redactRemoteLinkDiagnostics(`token=${diagnosticSecret}`).includes(diagnosticSecret));
+const diagnosticAccessSecret = `cfast_${'B'.repeat(48)}`;
+check('remote diagnostics redact current-format Access service secrets even without a header label',
+  !redactRemoteLinkDiagnostics(`failure ${diagnosticAccessSecret}`).includes(diagnosticAccessSecret));
 check('remote link only accepts loopback', normalizeRemoteLinkLocalUrl('http://127.0.0.1:8787') === 'http://127.0.0.1:8787');
 let arbitraryLocalServiceBlocked = false;
 try { normalizeRemoteLinkLocalUrl('http://192.168.10.20:8787'); } catch { arbitraryLocalServiceBlocked = true; }
@@ -183,6 +187,8 @@ const namedToken = Buffer.from(JSON.stringify({
   t: namedTunnelId,
   s: Buffer.from('test-tunnel-secret-material-32bytes').toString('base64'),
 })).toString('base64url');
+const accessClientId = 'mr-robot-test-client-0123456789.access';
+const accessClientSecret = 'mr-robot-test-secret-0123456789abcdef';
 const decodedNamed = localTunnelCredentialsFromToken(namedToken);
 check('connector token becomes local credentials without changing tunnel identity',
   decodedNamed.tunnelId === namedTunnelId && JSON.parse(decodedNamed.contents).TunnelID === namedTunnelId);
@@ -191,6 +197,75 @@ check('local credential diagnostics redact the derived tunnel secret',
 check('local named config has one exact Agent ingress and a deny catch-all',
   localTunnelIngressConfig(namedTunnelId, 'pc1.example.com', 'http://127.0.0.1:8787').includes('hostname: "pc1.example.com"')
   && localTunnelIngressConfig(namedTunnelId, 'pc1.example.com', 'http://127.0.0.1:8787').includes('service: http_status:404'));
+
+const trustCacheBase = mkdtempSync(join(tmpdir(), 'mr-robot-cloudflared-trust-'));
+const trustCacheExecutable = join(trustCacheBase, 'cloudflared.exe');
+const trustCacheRuntime = join(trustCacheBase, 'runtime');
+writeFileSync(trustCacheExecutable, 'test-cloudflared-v1');
+const trustCacheChildOne = new FakeTunnelProcess(106);
+const trustCacheChildTwo = new FakeTunnelProcess(107);
+const trustCacheChildren = [trustCacheChildOne, trustCacheChildTwo];
+const trustCacheCommands = new Map();
+const trustCacheStorage = new Map();
+let trustVerifierCalls = 0;
+const trustCachePlugin = createRemoteLinkPlugin({
+  findExecutable: () => trustCacheExecutable,
+  verifyExecutable: (candidate) => {
+    trustVerifierCalls += 1;
+    return { trusted: true, executable: candidate, diagnostic: `test Authenticode trusted ${trustVerifierCalls}` };
+  },
+  protectSecret: (value) => `protected:${value}`,
+  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  runtimeDirectory: trustCacheRuntime,
+  spawnProcess: () => trustCacheChildren.shift(),
+  fetchUrl: async (url, options) => {
+    const headers = options?.headers ?? {};
+    if (!headers['CF-Access-Client-Id'] || !headers['CF-Access-Client-Secret']) {
+      return new Response('Access denied', { status: 403 });
+    }
+    if (url.pathname === '/api/pair') {
+      return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/api/ws-ticket') {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } });
+  },
+});
+const trustCacheContext = {
+  ...fakePluginContext,
+  storage: { get: (key) => trustCacheStorage.get(key), set: (key, value) => trustCacheStorage.set(key, value) },
+  registerCommand: (name, handler) => trustCacheCommands.set(name, handler),
+};
+trustCachePlugin.activate(trustCacheContext);
+trustCacheCommands.get('remote-link.status')({});
+trustCacheCommands.get('remote-link.status')({});
+trustCacheCommands.get('remote-link.status')({});
+check('repeated remote-link status reuses one Authenticode result for an unchanged executable', trustVerifierCalls === 1, `verifier calls=${trustVerifierCalls}`);
+writeFileSync(trustCacheExecutable, 'test-cloudflared-version-two-is-different');
+trustCacheCommands.get('remote-link.status')({});
+check('cloudflared file identity change invalidates the status trust cache', trustVerifierCalls === 2, `verifier calls=${trustVerifierCalls}`);
+await trustCacheCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'cache.example.com', tunnelToken: namedToken,
+  accessClientId, accessClientSecret, autoStart: false,
+});
+const trustStartOne = trustCacheCommands.get('remote-link.start')({});
+trustCacheChildOne.stderr.write('INF Registered tunnel connection connIndex=0');
+await trustStartOne;
+check('first named start forces a fresh Authenticode verification despite a warm status cache', trustVerifierCalls === 3, `verifier calls=${trustVerifierCalls}`);
+const trustStopOne = trustCacheCommands.get('remote-link.stop')({});
+trustCacheChildOne.close();
+await trustStopOne;
+const trustStartTwo = trustCacheCommands.get('remote-link.start')({});
+trustCacheChildTwo.stderr.write('INF Registered tunnel connection connIndex=0');
+await trustStartTwo;
+check('every later named start forces another fresh Authenticode verification', trustVerifierCalls === 4, `verifier calls=${trustVerifierCalls}`);
+const trustStopTwo = trustCacheCommands.get('remote-link.stop')({});
+trustCacheChildTwo.close();
+await trustStopTwo;
+await trustCachePlugin.deactivate(trustCacheContext);
+rmSync(trustCacheBase, { recursive: true, force: true });
+
 const namedChild = new FakeTunnelProcess(103);
 const namedCommands = new Map();
 const namedStorage = new Map();
@@ -198,6 +273,10 @@ let spawnedArgs = [];
 let spawnedCredentials = '';
 let spawnedConfig = '';
 let spawnedConfigPath = '';
+let verifyRequestHeaders = {};
+let anonymousProbeCount = 0;
+let exposeAgentWithoutAccess = false;
+let exposeTicketWithoutAccess = false;
 const remoteRuntime = mkdtempSync(join(tmpdir(), 'mr-robot-remote-runtime-'));
 const namedPlugin = createRemoteLinkPlugin({
   findExecutable: () => 'fake-cloudflared',
@@ -212,7 +291,34 @@ const namedPlugin = createRemoteLinkPlugin({
     spawnedConfig = readFileSync(spawnedConfigPath, 'utf8');
     return namedChild;
   },
-  fetchUrl: async () => new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } }),
+  fetchUrl: async (url, options) => {
+    const headers = options?.headers ?? {};
+    const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
+    if (url.pathname === '/api/pair') {
+      if (!hasAccess) {
+        anonymousProbeCount += 1;
+        return new Response('Access denied', { status: 403 });
+      }
+      verifyRequestHeaders = headers;
+      return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/api/ws-ticket') {
+      if (!hasAccess) {
+        anonymousProbeCount += 1;
+        if (!exposeTicketWithoutAccess) return new Response('Access denied', { status: 403 });
+      } else {
+        verifyRequestHeaders = headers;
+      }
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (!hasAccess) {
+      anonymousProbeCount += 1;
+      if (!exposeAgentWithoutAccess) return new Response('Access denied', { status: 403 });
+    } else {
+      verifyRequestHeaders = headers;
+    }
+    return new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } });
+  },
 });
 const namedContext = {
   ...fakePluginContext,
@@ -221,10 +327,63 @@ const namedContext = {
 };
 namedPlugin.activate(namedContext);
 const savedNamed = await namedCommands.get('remote-link.config.set')({
-  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.example.com', tunnelToken: namedToken, autoStart: true,
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.example.com', tunnelToken: namedToken,
+  peerHostnames: ['pc2.example.com'], accessClientId, accessClientSecret, autoStart: true,
 });
 const persistedNamed = namedStorage.get('config');
 check('named tunnel token is protected at rest and omitted from config responses', persistedNamed.tunnelTokenProtected === `protected:${namedToken}` && !JSON.stringify(savedNamed).includes(namedToken) && savedNamed.hasTunnelToken === true);
+check('Access service credential is protected at rest and omitted from config responses',
+  persistedNamed.accessCredentialsProtected === `protected:${JSON.stringify({ clientId: accessClientId, clientSecret: accessClientSecret })}`
+  && !JSON.stringify(savedNamed).includes(accessClientSecret)
+  && savedNamed.hasAccessCredentials === true);
+const exactPeerHeaders = namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/files/download'));
+check('agent-side peer requests use the local Access credential only for the exact named-Tunnel host',
+  exactPeerHeaders['CF-Access-Client-Id'] === accessClientId
+  && exactPeerHeaders['CF-Access-Client-Secret'] === accessClientSecret
+  && namedPlugin.peerRequestHeaders(new URL('https://pc2.example.com/api/ping'))['CF-Access-Client-Id'] === accessClientId
+  && Object.keys(namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com.evil/api/ping'))).length === 0
+  && Object.keys(namedPlugin.peerRequestHeaders(new URL('https://other.example.com/api/ping'))).length === 0
+  && Object.keys(namedPlugin.peerRequestHeaders(new URL('http://pc1.example.com/api/ping'))).length === 0);
+const apexNamed = await namedCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'example.com',
+  peerHostnames: ['pc2.example.com'], autoStart: false,
+});
+check('an owned apex hostname may authorize an exact subdomain peer',
+  apexNamed.hostname === 'example.com'
+  && namedPlugin.peerRequestHeaders(new URL('https://pc2.example.com/api/ping'))['CF-Access-Client-Id'] === accessClientId);
+await namedCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.example.com',
+  peerHostnames: ['pc2.example.com'], autoStart: true,
+});
+let privateSuffixPeerRejected = false;
+try {
+  await namedCommands.get('remote-link.config.set')({
+    provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.github.io',
+    peerHostnames: ['pc2.github.io'], autoStart: false,
+  });
+} catch {
+  privateSuffixPeerRejected = true;
+}
+let publicSuffixPeerRejected = false;
+try {
+  await namedCommands.get('remote-link.config.set')({
+    provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc1.co.uk',
+    peerHostnames: ['pc2.co.uk'], autoStart: false,
+  });
+} catch {
+  publicSuffixPeerRejected = true;
+}
+check('peer Access allowlists reject siblings across private and ICANN public suffix ownership boundaries',
+  privateSuffixPeerRejected && publicSuffixPeerRejected);
+let preStartPairingRejected = false;
+try {
+  await namedCommands.get('remote-link.pairing.payload')({
+    host: 'https://pc1.example.com', pin: '123456789012', expiresAt: Date.now() + 60_000,
+  });
+} catch {
+  preStartPairingRejected = true;
+}
+check('named tunnel refuses Access QR before a running protected link is verified', preStartPairingRejected);
 const namedStart = namedCommands.get('remote-link.start')({});
 namedChild.stderr.write(`INF Registered tunnel connection connIndex=0 token=${namedToken}`);
 const namedStatus = await namedStart;
@@ -239,21 +398,112 @@ check('named tunnel process is locked to one loopback Agent route plus catch-all
   && spawnedConfig.includes('service: http_status:404'));
 check('named tunnel exposes only the validated stable origin', namedStatus.publicUrl === 'https://pc1.example.com' && namedStatus.temporary === false);
 check('named tunnel status diagnostics never return the connector token', !String(namedStatus.diagnostics).includes(namedToken));
+const protectedPairing = JSON.parse(await namedCommands.get('remote-link.pairing.payload')({
+  host: 'https://pc1.example.com', pin: '123456789012', expiresAt: Date.now() + 60_000,
+}));
+check('protected pairing payload is one-use and never exports the long-lived Access credential',
+  protectedPairing.version === 3
+  && protectedPairing.requiresCloudflareAccess === true
+  && protectedPairing.expiresAt > Date.now()
+  && !Object.hasOwn(protectedPairing, 'cloudflareAccess')
+  && !JSON.stringify(protectedPairing).includes(accessClientSecret));
 const verifiedNamed = await namedCommands.get('remote-link.verify')({});
 check('named tunnel verifies the public endpoint before pairing', verifiedNamed.ok === true && verifiedNamed.url === 'https://pc1.example.com');
+check('named tunnel verification crosses Access with the protected service credential',
+  anonymousProbeCount >= 3
+  &&
+  verifyRequestHeaders['CF-Access-Client-Id'] === accessClientId
+  && verifyRequestHeaders['CF-Access-Client-Secret'] === accessClientSecret);
+check('named tunnel status records verified Access enforcement',
+  namedCommands.get('remote-link.status')({}).accessProtected === true);
+exposeTicketWithoutAccess = true;
+let publicTicketRejected = false;
+try {
+  await namedCommands.get('remote-link.verify')({});
+} catch (error) {
+  publicTicketRejected = /ws-ticket 경로를 보호하지 않습니다/.test(error instanceof Error ? error.message : String(error));
+}
+check('named tunnel rejects path-scoped Access that protects ping but leaves WebSocket admission public',
+  publicTicketRejected && namedCommands.get('remote-link.status')({}).running === false
+  && /ws-ticket 경로를 보호하지 않습니다/.test(String(namedCommands.get('remote-link.status')({}).lastError)));
+exposeTicketWithoutAccess = false;
 const namedStop = Promise.resolve(namedCommands.get('remote-link.stop')({}));
 namedChild.close();
 await namedStop;
 check('ephemeral local tunnel config is removed when connector stops', !existsSync(spawnedConfigPath));
 const clearedNamed = await namedCommands.get('remote-link.config.set')({ ...savedNamed, clearTunnelToken: true });
 check('saved tunnel credential can be explicitly cleared', clearedNamed.hasTunnelToken === false && !namedStorage.get('config').tunnelTokenProtected);
+const clearedAccess = await namedCommands.get('remote-link.config.set')({ ...clearedNamed, clearAccessCredentials: true });
+check('saved Access credential can be explicitly cleared', clearedAccess.hasAccessCredentials === false
+  && !namedStorage.get('config').accessCredentialsProtected
+  && Object.keys(namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/ping'))).length === 0);
 await namedPlugin.deactivate(namedContext);
+check('deactivated remote-link plugin cannot provide peer Access headers',
+  Object.keys(namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/ping'))).length === 0);
+
+const pairLeakChild = new FakeTunnelProcess(110);
+pairLeakChild.kill = function killAndClose() {
+  this.killed = true;
+  setImmediate(() => this.close());
+  return true;
+};
+const pairLeakCommands = new Map();
+const pairLeakStorage = new Map();
+const pairLeakPlugin = createRemoteLinkPlugin({
+  findExecutable: () => 'fake-cloudflared',
+  verifyExecutable: trustFakeCloudflared,
+  protectSecret: (value) => `protected:${value}`,
+  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  runtimeDirectory: remoteRuntime,
+  spawnProcess: () => pairLeakChild,
+  fetchUrl: async (url, options) => {
+    const headers = options?.headers ?? {};
+    const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
+    if (url.pathname === '/api/ws-ticket') {
+      if (!hasAccess) return new Response('Access denied', { status: 403 });
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/api/pair') {
+      // This intentionally simulates a path-scoped Access app that forgot to
+      // protect enrollment: both anonymous and authenticated requests reach
+      // the exact Agent probe response.
+      return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (!hasAccess) return new Response('Access denied', { status: 403 });
+    return new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  },
+});
+pairLeakPlugin.activate({
+  ...fakePluginContext,
+  storage: { get: (key) => pairLeakStorage.get(key), set: (key, value) => pairLeakStorage.set(key, value) },
+  registerCommand: (name, handler) => pairLeakCommands.set(name, handler),
+});
+await pairLeakCommands.get('remote-link.config.set')({
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pair-leak.example.com', tunnelToken: namedToken,
+  accessClientId, accessClientSecret, autoStart: false,
+});
+const pairLeakStart = pairLeakCommands.get('remote-link.start')({});
+pairLeakChild.stderr.write('INF Registered tunnel connection connIndex=0');
+let publicPairRejected = false;
+try { await pairLeakStart; } catch (error) { publicPairRejected = /\/api\/pair 경로를 보호하지 않습니다/.test(String(error)); }
+check('named tunnel rejects path-scoped Access that leaves pairing enrollment public',
+  publicPairRejected && pairLeakCommands.get('remote-link.status')({}).running === false
+  && /\/api\/pair 경로를 보호하지 않습니다/.test(String(pairLeakCommands.get('remote-link.status')({}).lastError)));
+await pairLeakPlugin.deactivate(fakePluginContext);
 
 const transientQuickChild = new FakeTunnelProcess(104);
 const restoredNamedChild = new FakeTunnelProcess(105);
+const transientQuickUnsafeChild = new FakeTunnelProcess(108);
+const restoredNamedUnsafeChild = new FakeTunnelProcess(109);
+restoredNamedUnsafeChild.kill = function killAndClose() {
+  this.killed = true;
+  setImmediate(() => this.close());
+  return true;
+};
 const transientCommands = new Map();
 const transientStorage = new Map();
-const transientQueue = [transientQuickChild, restoredNamedChild];
+const transientQueue = [transientQuickChild, restoredNamedChild, transientQuickUnsafeChild, restoredNamedUnsafeChild];
+let exposeRestoredNamedWithoutAccess = false;
 const transientPlugin = createRemoteLinkPlugin({
   findExecutable: () => 'fake-cloudflared',
   verifyExecutable: trustFakeCloudflared,
@@ -261,6 +511,18 @@ const transientPlugin = createRemoteLinkPlugin({
   unprotectSecret: (value) => value.replace(/^protected:/, ''),
   runtimeDirectory: remoteRuntime,
   spawnProcess: () => transientQueue.shift(),
+  fetchUrl: async (url, options) => {
+    const headers = options?.headers ?? {};
+    const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
+    if (!hasAccess && !exposeRestoredNamedWithoutAccess) return new Response('Access denied', { status: 403 });
+    if (url.pathname === '/api/pair') {
+      return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/api/ws-ticket') {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ ok: true, app: 'mr-robot' }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '28' } });
+  },
 });
 const transientContext = {
   ...fakePluginContext,
@@ -269,7 +531,8 @@ const transientContext = {
 };
 transientPlugin.activate(transientContext);
 await transientCommands.get('remote-link.config.set')({
-  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc2.example.com', tunnelToken: namedToken, autoStart: true,
+  provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'pc2.example.com', tunnelToken: namedToken,
+  accessClientId, accessClientSecret, autoStart: true,
 });
 const savedBeforeTransientQuick = JSON.stringify(transientStorage.get('config'));
 const transientQuickStart = transientCommands.get('remote-link.quick.start')({ localUrl: 'http://127.0.0.1:8787' });
@@ -290,6 +553,7 @@ check('stopping a transient Quick Link restores the saved auto-start named tunne
   restoredNamedStatus.running === true
   && restoredNamedStatus.provider === 'cloudflare-named'
   && restoredNamedStatus.publicUrl === 'https://pc2.example.com'
+  && restoredNamedStatus.accessProtected === true
   && JSON.stringify(transientStorage.get('config')) === savedBeforeTransientQuick);
 const namedNotDowngraded = await transientCommands.get('remote-link.quick.start')({});
 check('Quick Link request never interrupts or downgrades an already-running named tunnel',
@@ -299,6 +563,20 @@ check('Quick Link request never interrupts or downgrades an already-running name
 const stopRestoredNamed = transientCommands.get('remote-link.stop')({});
 restoredNamedChild.close();
 await stopRestoredNamed;
+
+const transientUnsafeStart = transientCommands.get('remote-link.quick.start')({ localUrl: 'http://127.0.0.1:8787' });
+transientQuickUnsafeChild.stderr.write('INF route https://temporary-unsafe.trycloudflare.com ready');
+await transientUnsafeStart;
+exposeRestoredNamedWithoutAccess = true;
+const unsafeRestore = transientCommands.get('remote-link.quick.stop')({});
+transientQuickUnsafeChild.close();
+await new Promise((resolve) => setImmediate(resolve));
+restoredNamedUnsafeChild.stderr.write('INF Registered tunnel connection connIndex=0');
+const unsafeRestoreStatus = await unsafeRestore;
+check('Quick Link stop fails closed when restored named Tunnel is reachable without Access',
+  unsafeRestoreStatus.running === false
+  && unsafeRestoreStatus.accessProtected === undefined
+  && /Access 없이 공개/.test(String(unsafeRestoreStatus.lastError)));
 await transientPlugin.deactivate(transientContext);
 
 const failedQuickCommands = new Map();
@@ -440,6 +718,24 @@ const proxiedPairingResponse = await fetch(`${base}/api/pairing`, {
 });
 const proxiedPairing = await proxiedPairingResponse.json();
 check('proxied loopback pairing response also omits localSecret', proxiedPairingResponse.status === 200 && !Object.hasOwn(proxiedPairing, 'localSecret'));
+
+const pairProbeResponses = [];
+for (let index = 0; index < 8; index += 1) {
+  const response = await fetch(`${base}/api/pair`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'cf-ray': `abcd1234ef5678${index}-icn`,
+      'cf-connecting-ip': '203.0.113.11',
+    },
+    body: JSON.stringify({ probe: CLOUDFLARE_ACCESS_PAIR_PROBE }),
+  });
+  pairProbeResponses.push({ status: response.status, body: await response.json() });
+}
+check('Access pairing probes are exact, side-effect-free invalid requests outside pairing rate limits',
+  pairProbeResponses.every(({ status, body }) => status === 400
+    && body.app === 'mr-robot'
+    && body.error === CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR));
 
 const proxiedShortPin = await fetch(`${base}/api/pair`, {
   method: 'POST',

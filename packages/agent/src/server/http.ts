@@ -22,6 +22,7 @@ import { mrRobotHome } from '../config.js';
 import { authPrincipal, webSocketTicketBinding, WsUpgradeTicketAdmissionError, type AuthContext, type WsUpgradeTickets } from './ws.js';
 import { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress, tailscaleInterfaceAddresses } from './transport.js';
 import { FileTransferAdmission, FileTransferAdmissionError, type FileTransferLease } from './transfer-admission.js';
+import { CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, isCloudflareAccessPairProbe } from '../access-probe.js';
 
 export { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress } from './transport.js';
 
@@ -562,6 +563,8 @@ export interface HttpApiHost {
   pluginsLoad(source: string): Promise<PluginInfo>;
   pluginsUnload(id: string): Promise<boolean>;
   pluginsCall(name: string, params: unknown, auth: AuthContext): Promise<unknown>;
+  /** Host-only Cloudflare Access headers for an exact configured peer origin. */
+  peerRequestHeaders(url: URL): Record<string, string>;
   chatOnce(text: string, auth: AuthContext): Promise<{ text: string }>;
   syncSnapshot(): { version: number; deviceName: string; exportedAt: number; conversations: unknown[]; routingPresets: unknown[] };
   mergeSyncSnapshot(snapshot: unknown): SyncMergeResult;
@@ -843,6 +846,17 @@ export function createHttpApi(
   // the direct client (or Cloudflare's asserted edge client IP) so one remote
   // attacker cannot cheaply lock every legitimate device out at this layer.
   app.post('/api/pair', (req, res) => {
+    // Cloudflare Access verification uses one fixed, intentionally invalid
+    // schema. Reject it before deriving a client key, touching rate-limit
+    // state, reading a PIN, or calling exchangePin. This makes repeated
+    // fail-closed checks safe and incapable of registering a device.
+    if (isCloudflareAccessPairProbe(req.body)) {
+      res.status(400).json({
+        error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR,
+        app: 'mr-robot',
+      });
+      return;
+    }
     const key = pairClientKey(req);
     const retryAfterMs = pairRetryAfter(key);
     if (retryAfterMs > 0) {
@@ -915,9 +929,21 @@ export function createHttpApi(
   const fileLimitMessage = (limit: number): string => limit === MAX_PUBLIC_FILE_BYTES
     ? '공개 원격 업로드는 파일 하나당 최대 96MB입니다. 더 큰 파일은 로컬 또는 검증된 PC 간 전송을 사용하세요.'
     : '파일은 최대 2GB까지 전송할 수 있습니다.';
+  const outboundPeerHeaders = (url: URL, headers: Record<string, string>): Record<string, string> => {
+    const access = host.peerRequestHeaders(url);
+    const clientId = access['CF-Access-Client-Id'];
+    const clientSecret = access['CF-Access-Client-Secret'];
+    return {
+      ...(clientId && clientSecret ? {
+        'CF-Access-Client-Id': clientId,
+        'CF-Access-Client-Secret': clientSecret,
+      } : {}),
+      ...headers,
+    };
+  };
   const assertPeer = async (base: URL): Promise<void> => {
     const pingUrl = new URL('/api/ping', base);
-    const response = await fetchPeer(pingUrl, { accept: 'application/json' }, AbortSignal.timeout(8_000));
+    const response = await fetchPeer(pingUrl, outboundPeerHeaders(pingUrl, { accept: 'application/json' }), AbortSignal.timeout(8_000));
     if (!response.ok) {
       await cancelResponseBody(response);
       throw new Error(`원본 주소에서 Mr.Robot Agent를 확인할 수 없습니다. (HTTP ${response.status})`);
@@ -1114,7 +1140,7 @@ export function createHttpApi(
       sourceUrl.searchParams.set('path', sourcePath);
       const upstream = await fetchPeer(
         sourceUrl,
-        { 'x-mr-robot-transfer': grant },
+        outboundPeerHeaders(sourceUrl, { 'x-mr-robot-transfer': grant }),
         AbortSignal.any([transfer.signal, AbortSignal.timeout(30 * 60_000)]),
       );
       if (!upstream.ok || !upstream.body) {
@@ -1186,7 +1212,7 @@ export function createHttpApi(
       const sourceUrl = new URL('/api/sync/snapshot', sourceBase);
       const upstream = await fetchPeer(
         sourceUrl,
-        { 'x-mr-robot-transfer': grant },
+        outboundPeerHeaders(sourceUrl, { 'x-mr-robot-transfer': grant }),
         AbortSignal.any([transfer.signal, AbortSignal.timeout(2 * 60_000)]),
       );
       if (!upstream.ok) {

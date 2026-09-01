@@ -57,7 +57,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.8';
+export const VERSION = '0.3.9';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -451,6 +451,7 @@ export class AgentServer {
   readonly dependencies = new DependencyManager();
   readonly contextBroker: ContextBroker;
   readonly chatRunAdmission = new ChatRunAdmissionPolicy();
+  private readonly remoteLinkPlugin = createRemoteLinkPlugin();
 
   private httpServer: HttpServer | null = null;
   private readonly activeHttpTransfers = new Set<AbortController>();
@@ -835,6 +836,15 @@ export class AgentServer {
     });
   }
 
+  /**
+   * Internal-only bridge used by the HTTP peer client. The remote-link plugin
+   * enforces exact HTTPS hostname matching before decrypting or returning its
+   * locally stored service credential.
+   */
+  peerRequestHeaders(url: URL): Record<string, string> {
+    return this.remoteLinkPlugin.peerRequestHeaders(url);
+  }
+
   // -- chat (non-streaming, REST) ----------------------------------------
 
   async chatOnce(text: string, auth: AuthContext): Promise<{ text: string }> {
@@ -895,7 +905,7 @@ export class AgentServer {
     if (this.httpServer) return { host: this.boundHost, port: this.boundPort };
     await this.plugins.loadBuiltin(createOrcaPlugin());
     await this.plugins.loadBuiltin(createCalendarPlugin());
-    await this.plugins.loadBuiltin(createRemoteLinkPlugin());
+    await this.plugins.loadBuiltin(this.remoteLinkPlugin);
     await this.plugins.loadBuiltin(createTailscalePlugin());
     await this.plugins.loadBuiltin(createDockerPlugin());
     await this.plugins.loadBuiltin(createCtfPlugin());

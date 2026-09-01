@@ -4,8 +4,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import type { SavedPc, SharedFileEntry, SyncMergeResult, WorkspaceInfo } from '../types';
-import { httpBaseForPc } from '../pcs';
-import { loadPcs } from '../pcs';
+import { httpBaseForPc, loadPcs, pcAuthenticatedHeaders } from '../pcs';
 import { colors, radius } from '../theme';
 
 const baseOf = httpBaseForPc;
@@ -60,7 +59,7 @@ const fetchJsonWithTimeout = async <T,>(
     controller.abort();
   }, timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, redirect: 'error', signal: controller.signal });
     const body = await response.json() as T;
     return { response, body };
   } catch (error) {
@@ -164,7 +163,8 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
       const endpoint = mode === 'shared'
         ? `/api/files?path=${encodeURIComponent(path)}`
         : `/api/workspaces/files?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}`;
-      const response = await fetch(`${baseOf(pc)}${endpoint}`, { headers: { 'x-mr-robot-token': pc.secret }, signal: controller.signal });
+      const requestUrl = `${baseOf(pc)}${endpoint}`;
+      const response = await fetch(requestUrl, { headers: pcAuthenticatedHeaders(pc, requestUrl), redirect: 'error', signal: controller.signal });
       const body = await response.json() as { items?: SharedFileEntry[]; error?: string };
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
       const storedPcs = await loadPcs();
@@ -189,7 +189,8 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
     workspaceAbortRef.current?.abort();
     const controller = new AbortController();
     workspaceAbortRef.current = controller;
-    void fetch(`${baseOf(pc)}/api/workspaces`, { headers: { 'x-mr-robot-token': pc.secret }, signal: controller.signal }).then(async (response) => {
+    const requestUrl = `${baseOf(pc)}/api/workspaces`;
+    void fetch(requestUrl, { headers: pcAuthenticatedHeaders(pc, requestUrl), redirect: 'error', signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const list = await response.json() as WorkspaceInfo[];
       if (controller.signal.aborted || workspaceAbortRef.current !== controller || !mountedRef.current) return;
@@ -203,9 +204,10 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
   }, [pc]);
 
   const transferGrant = async (source: SavedPc, kind: 'file' | 'sync', signal: AbortSignal, sourcePath?: string): Promise<string> => {
-    const { response, body } = await fetchJsonWithTimeout<{ grant?: string; error?: string }>(`${baseOf(source)}/api/transfers/grant`, {
+    const requestUrl = `${baseOf(source)}/api/transfers/grant`;
+    const { response, body } = await fetchJsonWithTimeout<{ grant?: string; error?: string }>(requestUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-mr-robot-token': source.secret },
+      headers: pcAuthenticatedHeaders(source, requestUrl, { 'content-type': 'application/json' }),
       body: JSON.stringify({ kind, ...(sourcePath ? { path: sourcePath } : {}) }),
     }, TRANSFER_GRANT_TIMEOUT_MS, '1회성 전송권 발급', signal);
     if (!response.ok || !body.grant) throw new Error(body.error ?? `1회성 전송권 발급 실패 (HTTP ${response.status})`);
@@ -234,9 +236,10 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
       const endpoint = mode === 'shared'
         ? `/api/files/upload?path=${encodeURIComponent(targetPath)}`
         : `/api/workspaces/upload?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(targetPath)}`;
-      const task = FileSystem.createUploadTask(`${baseOf(pc)}${endpoint}`, file.uri, {
+      const uploadUrl = `${baseOf(pc)}${endpoint}`;
+      const task = FileSystem.createUploadTask(uploadUrl, file.uri, {
         httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: { 'content-type': file.mimeType ?? 'application/octet-stream', 'x-mr-robot-token': pc.secret },
+        headers: pcAuthenticatedHeaders(pc, uploadUrl, { 'content-type': file.mimeType ?? 'application/octet-stream' }),
       });
       transfer = { id: operationId, cancel: () => task.cancelAsync(), tempUris: pickedCacheUri ? [pickedCacheUri] : [] };
       activateTransfer(transfer, PHONE_TRANSFER_TIMEOUT_MS);
@@ -276,7 +279,8 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
       const endpoint = mode === 'shared'
         ? `/api/files/download?path=${encodeURIComponent(item.path)}`
         : `/api/workspaces/download?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(item.path)}`;
-      const task = FileSystem.createDownloadResumable(`${baseOf(pc)}${endpoint}`, local, { headers: { 'x-mr-robot-token': pc.secret } });
+      const downloadUrl = `${baseOf(pc)}${endpoint}`;
+      const task = FileSystem.createDownloadResumable(downloadUrl, local, { headers: pcAuthenticatedHeaders(pc, downloadUrl) });
       transfer = { id: operationId, cancel: () => task.cancelAsync(), tempUris: [local] };
       activateTransfer(transfer, PHONE_TRANSFER_TIMEOUT_MS);
       const result = await task.downloadAsync();
@@ -306,9 +310,10 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
         return;
       }
       const sourceGrant = await transferGrant(pc, 'file', controller.signal, item.path);
-      const { response, body } = await fetchJsonWithTimeout<{ error?: string }>(`${baseOf(target)}/api/files/pull`, {
+      const requestUrl = `${baseOf(target)}/api/files/pull`;
+      const { response, body } = await fetchJsonWithTimeout<{ error?: string }>(requestUrl, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-mr-robot-token': target.secret },
+        headers: pcAuthenticatedHeaders(target, requestUrl, { 'content-type': 'application/json' }),
         body: JSON.stringify({ sourceBase: baseOf(pc), sourceGrant, sourcePath: item.path, targetPath: item.path }),
       }, DIRECT_COPY_TIMEOUT_MS, `${pc.name} → ${target.name} 직접 전송`, controller.signal);
       if (!response.ok) throw new Error(body.error ?? `직접 전송 실패 (HTTP ${response.status})`);
@@ -325,9 +330,10 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
 
   const pullSync = async (target: SavedPc, source: SavedPc, signal: AbortSignal): Promise<SyncMergeResult> => {
     const sourceGrant = await transferGrant(source, 'sync', signal);
-    const { response, body } = await fetchJsonWithTimeout<SyncMergeResult & { error?: string }>(`${baseOf(target)}/api/sync/pull`, {
+    const requestUrl = `${baseOf(target)}/api/sync/pull`;
+    const { response, body } = await fetchJsonWithTimeout<SyncMergeResult & { error?: string }>(requestUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-mr-robot-token': target.secret },
+      headers: pcAuthenticatedHeaders(target, requestUrl, { 'content-type': 'application/json' }),
       body: JSON.stringify({ sourceBase: baseOf(source), sourceGrant }),
     }, SYNC_PULL_TIMEOUT_MS, `${source.name} → ${target.name} 작업 동기화`, signal);
     if (!response.ok) throw new Error(body.error ?? `작업 동기화 실패 (HTTP ${response.status})`);

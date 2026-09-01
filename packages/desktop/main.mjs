@@ -12,7 +12,9 @@ import { appendFileSync, closeSync, copyFileSync, createWriteStream, existsSync,
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
+import { WebSocket as NativeWebSocket } from 'ws';
 import { openTrustedNmapRouteWithHttpsFallback } from './nmap-route.mjs';
+import { normalizeRemotePairOrigin, postPinnedRemotePairJson } from './remote-pair-security.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bundledAgent = resolve(here, 'agent.mjs');
@@ -132,13 +134,13 @@ function rebuildTrayMenu() {
   ]));
 }
 
-function isLoopbackOrTailnetHost(hostname) {
+function isLoopbackHost(hostname) {
   const host = String(hostname).replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host === 'localhost' || host === '::1') return true;
   const octets = host.split('.').map(Number);
   return octets.length === 4
     && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
-    && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
+    && octets[0] === 127;
 }
 
 function normalizeTrustedPcOrigin(value) {
@@ -147,8 +149,8 @@ function normalizeTrustedPcOrigin(value) {
     || !['', '/'].includes(parsed.pathname) || parsed.search || parsed.hash) {
     throw new Error('PC 접속 주소가 안전한 origin이 아닙니다.');
   }
-  if (parsed.protocol === 'http:' && !isLoopbackOrTailnetHost(parsed.hostname)) {
-    throw new Error('평문 PC 접속 주소는 loopback 또는 Tailscale만 허용됩니다.');
+  if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname)) {
+    throw new Error('평문 PC 접속 주소는 이 PC의 loopback만 허용됩니다. 원격 PC는 HTTPS로 다시 등록하세요.');
   }
   return parsed.origin;
 }
@@ -170,6 +172,7 @@ function sanitizePcRegistry(value) {
       const protocol = entry?.protocol === 'https' ? 'https' : 'http';
       const port = Math.max(1, Math.min(65535, Number(entry?.port) || 8787));
       const secret = String(entry?.secret ?? '').slice(0, 4096);
+      const access = normalizeCloudflareAccessCredentials(entry?.accessClientId, entry?.accessClientSecret);
       const primary = originFromRegistryParts(protocol, entry?.host, port);
       if (!id || seen.has(id) || (secret.length < 32 && !desktopRemotePcId(secret) && !desktopPendingCredentialId(secret))) return [];
       seen.add(id);
@@ -190,6 +193,19 @@ function sanitizePcRegistry(value) {
         try { return normalizeTrustedPcOrigin(entry.activeOrigin); } catch { return undefined; }
       })() : undefined;
       const activeOrigin = requestedActive && origins.includes(requestedActive) ? requestedActive : primary;
+      const requestedCredentialOrigin = entry?.credentialOrigin ? (() => {
+        try { return normalizeTrustedPcOrigin(entry.credentialOrigin); } catch { return undefined; }
+      })() : undefined;
+      const credentialOrigin = requestedCredentialOrigin && origins.includes(requestedCredentialOrigin)
+        ? requestedCredentialOrigin
+        : undefined;
+      const requestedAccessOrigin = entry?.accessOrigin ?? entry?.cloudflareAccessOrigin;
+      const accessOrigin = access && requestedAccessOrigin ? (() => {
+        try {
+          const normalized = normalizeTrustedPcOrigin(requestedAccessOrigin);
+          return credentialOrigin && normalized === credentialOrigin && new URL(normalized).protocol === 'https:' ? normalized : undefined;
+        } catch { return undefined; }
+      })() : undefined;
       const primaryUrl = new URL(primary);
       const activeUrl = new URL(activeOrigin);
       return [{
@@ -203,6 +219,12 @@ function sanitizePcRegistry(value) {
         protocol: primaryUrl.protocol === 'https:' ? 'https' : 'http',
         port: Number(primaryUrl.port || (primaryUrl.protocol === 'https:' ? 443 : 80)),
         secret,
+        credentialOrigin,
+        ...(access && accessOrigin ? {
+          accessClientId: access.clientId,
+          accessClientSecret: access.clientSecret,
+          accessOrigin,
+        } : {}),
         addedAt: Number(entry?.addedAt) || Date.now(),
       }];
     } catch {
@@ -218,6 +240,24 @@ function assertTrustedRenderer(event) {
   if (!win || event.sender !== win.webContents || event.senderFrame?.parent || actual !== expected) {
     throw new Error('신뢰할 수 없는 화면의 데스크톱 요청을 차단했습니다.');
   }
+}
+
+function normalizeCloudflareAccessCredentials(clientId, clientSecret, optional = true) {
+  const id = String(clientId ?? '').trim();
+  const secret = String(clientSecret ?? '').trim();
+  if (!id && !secret && optional) return null;
+  if (!id || !secret || id.length < 20 || id.length > 512 || secret.length < 20 || secret.length > 512
+    || !/^[A-Za-z0-9._~-]+$/.test(id) || !/^[A-Za-z0-9._~-]+$/.test(secret)) {
+    throw new Error('Cloudflare Access Client ID와 Secret 형식이 올바르지 않습니다.');
+  }
+  return { clientId: id, clientSecret: secret };
+}
+
+function cloudflareAccessHeaders(credentials) {
+  return credentials ? {
+    'CF-Access-Client-Id': credentials.clientId,
+    'CF-Access-Client-Secret': credentials.clientSecret,
+  } : {};
 }
 
 function settleLocalRpc(error) {
@@ -288,7 +328,15 @@ function prunePendingPcCredentials() {
 }
 
 function redactPcRegistry(value) {
-  return value.map((pc) => ({ ...pc, secret: desktopRemoteAuthToken(pc.id) }));
+  return value.map((pc) => {
+    const { accessClientId: _accessClientId, accessClientSecret: _accessClientSecret, accessOrigin: _accessOrigin, ...safe } = pc;
+    return {
+      ...safe,
+      secret: desktopRemoteAuthToken(pc.id),
+      hasAccessCredentials: Boolean(pc.accessClientId && pc.accessClientSecret),
+      cloudflareAccessOrigin: pc.accessOrigin,
+    };
+  });
 }
 
 async function connectLocalRpc(input) {
@@ -304,11 +352,13 @@ async function connectLocalRpc(input) {
   const credentialReference = String(input?.credentialRef ?? DESKTOP_LOCAL_AUTH_TOKEN);
   const credential = resolveDesktopCredential(credentialReference, origin);
   if (!credential) throw new Error('암호화된 PC 자격증명 참조가 올바르지 않습니다.');
+  const edgeCredentials = resolveDesktopAccessCredentials(credentialReference, origin);
+  const edgeHeaders = cloudflareAccessHeaders(edgeCredentials);
   let protocols;
   if (parsedUrl.protocol === 'wss:') {
     const ticketResponse = await fetch(new URL('/api/ws-ticket', origin), {
       method: 'POST',
-      headers: { 'x-mr-robot-token': credential, accept: 'application/json' },
+      headers: { ...edgeHeaders, 'x-mr-robot-token': credential, accept: 'application/json' },
       redirect: 'error',
       cache: 'no-store',
     });
@@ -322,7 +372,9 @@ async function connectLocalRpc(input) {
   }
   closeLocalRpc(false, 'PC 에이전트에 다시 연결합니다.');
   const generation = ++localRpcGeneration;
-  const socket = protocols ? new WebSocket(parsedUrl.href, protocols) : new WebSocket(parsedUrl.href);
+  const socket = new NativeWebSocket(parsedUrl.href, protocols ?? [], {
+    headers: parsedUrl.protocol === 'wss:' ? edgeHeaders : undefined,
+  });
   localRpcSocket = socket;
   socket.onmessage = (event) => {
     if (generation !== localRpcGeneration || socket !== localRpcSocket) return;
@@ -448,7 +500,23 @@ function savePcRegistry(value) {
       const pending = pendingPcCredentials.get(pendingId);
       if (!pending || !pc.origins.includes(pending.origin)) throw new Error('PC 연결 자격증명이 만료되었거나 주소가 일치하지 않습니다.');
       consumedPending.push(pendingId);
-      return { ...pc, secret: pending.secret };
+      return {
+        ...pc,
+        host: new URL(pending.origin).hostname.replace(/^\[|\]$/g, ''),
+        hosts: [new URL(pending.origin).hostname.replace(/^\[|\]$/g, '')],
+        origins: [pending.origin],
+        activeHost: new URL(pending.origin).hostname.replace(/^\[|\]$/g, ''),
+        activeOrigin: pending.origin,
+        protocol: 'https',
+        port: 443,
+        secret: pending.secret,
+        credentialOrigin: pending.origin,
+        ...(pending.edgeCredentials ? {
+          accessClientId: pending.edgeCredentials.clientId,
+          accessClientSecret: pending.edgeCredentials.clientSecret,
+          accessOrigin: pending.accessOrigin,
+        } : {}),
+      };
     }
     const referencedId = desktopRemotePcId(pc.secret);
     if (!referencedId) return pc;
@@ -496,9 +564,21 @@ function resolveDesktopCredential(reference, origin) {
   if (!id) return null;
   const registry = loadPcRegistry();
   if (!registry.ok) throw new Error(registry.error);
-  const pc = registry.value.find((item) => item.id === id && item.origins.includes(origin));
+  const pc = registry.value.find((item) => item.id === id && item.credentialOrigin === origin);
   if (!pc) throw new Error('암호화된 PC 자격증명과 요청 주소가 일치하지 않습니다.');
   return pc.secret;
+}
+
+function resolveDesktopAccessCredentials(reference, origin) {
+  if (reference === DESKTOP_LOCAL_AUTH_TOKEN) return null;
+  const id = desktopRemotePcId(reference);
+  if (!id) return null;
+  const registry = loadPcRegistry();
+  if (!registry.ok) throw new Error(registry.error);
+  const pc = registry.value.find((item) => item.id === id && item.credentialOrigin === origin);
+  if (!pc) throw new Error('암호화된 PC 자격증명과 요청 주소가 일치하지 않습니다.');
+  if (!pc.accessOrigin || pc.accessOrigin !== origin) return null;
+  return normalizeCloudflareAccessCredentials(pc.accessClientId, pc.accessClientSecret);
 }
 
 async function boundedResponseText(response, maxBytes) {
@@ -521,35 +601,37 @@ async function boundedResponseText(response, maxBytes) {
 }
 
 async function pairRemotePc(input) {
-  const origin = normalizeTrustedPcOrigin(String(input?.origin ?? ''));
+  const origin = normalizeRemotePairOrigin(String(input?.origin ?? ''));
   const pin = String(input?.pin ?? '').trim();
   if (!/^(?:\d{6}|\d{12})$/.test(pin)) throw new Error('연결 PIN 형식이 올바르지 않습니다.');
   const deviceName = String(input?.deviceName ?? 'Mr.Robot 데스크톱').trim().slice(0, 160) || 'Mr.Robot 데스크톱';
   const permissionCap = input?.permissionCap === 'read-only' ? 'read-only' : 'ask';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const response = await fetch(new URL('/api/pair', origin), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ pin, deviceName, permissionCap }),
-      redirect: 'error',
-      signal: controller.signal,
-    });
-    const advertised = Number(response.headers.get('content-length') ?? 0);
-    if (Number.isFinite(advertised) && advertised > 64 * 1024) throw new Error('PC 연결 응답이 너무 큽니다.');
-    const bodyText = await boundedResponseText(response, 64 * 1024);
+  const edgeCredentials = normalizeCloudflareAccessCredentials(input?.accessClientId, input?.accessClientSecret);
+  const response = await postPinnedRemotePairJson(
+    origin,
+    { pin, deviceName, permissionCap },
+    cloudflareAccessHeaders(edgeCredentials),
+    { timeoutMs: 10_000, maxResponseBytes: 64 * 1024 },
+  );
+  {
+    const bodyText = response.bodyText;
     let body;
     try { body = JSON.parse(bodyText); } catch { body = {}; }
-    if (!response.ok) throw new Error(String(body?.error ?? `PIN 교환 실패 (HTTP ${response.status})`));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(String(body?.error ?? `PIN 교환 실패 (HTTP ${response.statusCode})`));
+    }
     const secret = String(body?.secret ?? '');
     if (secret.length < 32 || secret.length > 4096) throw new Error('PC 연결 자격증명 응답이 올바르지 않습니다.');
     prunePendingPcCredentials();
     const id = randomUUID();
-    pendingPcCredentials.set(id, { secret, origin, expiresAt: Date.now() + 2 * 60_000 });
+    pendingPcCredentials.set(id, {
+      secret,
+      origin,
+      edgeCredentials,
+      accessOrigin: edgeCredentials ? origin : undefined,
+      expiresAt: Date.now() + 2 * 60_000,
+    });
     return { credentialRef: `${DESKTOP_PENDING_AUTH_PREFIX}${id}` };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -611,11 +693,28 @@ function createWindow(url) {
       const parsed = new URL(details.url);
       const tokenHeader = Object.keys(headers).find((key) => key.toLowerCase() === 'x-mr-robot-token');
       const reference = tokenHeader ? headers[tokenHeader] : '';
+      // Chromium may carry custom headers into a redirected request. Remove
+      // every renderer-supplied or previously injected credential first, then
+      // re-add secrets only when the new request still matches the exact
+      // registered Mr.Robot API origin. This makes cross-origin redirects
+      // fail closed instead of forwarding either credential layer.
+      const sensitiveHeaders = new Set([
+        'x-mr-robot-token',
+        'cf-access-client-id',
+        'cf-access-client-secret',
+      ]);
+      for (const key of Object.keys(headers)) {
+        if (sensitiveHeaders.has(key.toLowerCase())) delete headers[key];
+      }
       if (parsed.pathname.startsWith('/api/') && (reference === DESKTOP_LOCAL_AUTH_TOKEN || desktopRemotePcId(reference))) {
-        if (tokenHeader) delete headers[tokenHeader];
         try {
           const credential = resolveDesktopCredential(reference, parsed.origin);
           if (credential) headers['x-mr-robot-token'] = credential;
+          const edgeCredentials = resolveDesktopAccessCredentials(reference, parsed.origin);
+          if (edgeCredentials) {
+            headers['CF-Access-Client-Id'] = edgeCredentials.clientId;
+            headers['CF-Access-Client-Secret'] = edgeCredentials.clientSecret;
+          }
         } catch {
           // Fail closed without forwarding even the opaque registry reference.
         }
@@ -714,6 +813,7 @@ ipcMain.handle('mr-robot:download', async (event, input) => {
   }
   const effectiveToken = resolveDesktopCredential(token, parsed.origin);
   if (!effectiveToken) throw new Error('등록된 PC 주소와 자격증명이 일치하지 않아 다운로드를 차단했습니다.');
+  const edgeCredentials = resolveDesktopAccessCredentials(token, parsed.origin);
   const picked = await dialog.showSaveDialog(win ?? undefined, { title: 'Mr.Robot 파일 저장', defaultPath: suggestedName });
   if (picked.canceled || !picked.filePath) return { canceled: true };
   const destinationKey = resolve(picked.filePath).toLocaleLowerCase('en-US');
@@ -726,7 +826,7 @@ ipcMain.handle('mr-robot:download', async (event, input) => {
   activeDownloadPaths.set(destinationKey, id);
   try {
     const response = await fetch(parsed.href, {
-      headers: effectiveToken ? { 'x-mr-robot-token': effectiveToken } : undefined,
+      headers: { ...cloudflareAccessHeaders(edgeCredentials), 'x-mr-robot-token': effectiveToken },
       signal: controller.signal,
       redirect: 'error',
     });

@@ -1,4 +1,6 @@
 export { pairingOrigins, parsePairingPayload } from './pairing';
+import { cloudflareAccessHeaders } from './pcs';
+import type { CloudflareAccessCredentials } from './types';
 
 export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | 'online';
 
@@ -8,14 +10,31 @@ export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | '
 const WS_RPC_PROTOCOL = 'mr-robot-rpc-v1';
 const WS_UPGRADE_TICKET_PROTOCOL_PREFIX = 'mr-robot-ticket.';
 interface WsUpgradeTicketInfo { protocol: string; expiresAt: number }
+type ReactNativeWebSocketConstructor = new (
+  url: string,
+  protocols?: string | string[],
+  options?: { headers?: Record<string, string> },
+) => WebSocket;
 
-async function publicWebSocketProtocols(url: string, secret: string, signal: AbortSignal): Promise<string[] | undefined> {
+async function publicWebSocketProtocols(
+  url: string,
+  secret: string,
+  signal: AbortSignal,
+  cloudflareAccess?: CloudflareAccessCredentials,
+  cloudflareAccessOrigin?: string,
+): Promise<string[] | undefined> {
   const parsed = new URL(url);
+  const requestOrigin = `https://${parsed.host}`;
+  const accessHeaders = cloudflareAccessHeaders(cloudflareAccess, cloudflareAccessOrigin, requestOrigin);
+  if (Object.keys(accessHeaders).length && parsed.protocol !== 'wss:') {
+    throw new Error('Cloudflare Access 자격증명은 WSS 연결에서만 사용할 수 있습니다.');
+  }
   if (parsed.protocol !== 'wss:') return undefined;
   const endpoint = new URL('/api/ws-ticket', `https://${parsed.host}`);
   const response = await fetch(endpoint.toString(), {
     method: 'POST',
-    headers: { 'x-mr-robot-token': secret, accept: 'application/json' },
+    headers: { ...accessHeaders, 'x-mr-robot-token': secret, accept: 'application/json' },
+    redirect: 'error',
     signal,
   });
   if (!response.ok) throw new Error(`WebSocket 보안 티켓 발급 실패 (HTTP ${response.status})`);
@@ -46,7 +65,7 @@ export class MrRobotClient {
   onClose: (() => void) | null = null;
   onStateChange: ((state: RpcConnectionState) => void) | null = null;
 
-  connect(url: string, secret: string, timeoutMs = 8000): Promise<void> {
+  connect(url: string, secret: string, timeoutMs = 8000, cloudflareAccess?: CloudflareAccessCredentials, cloudflareAccessOrigin?: string): Promise<void> {
     this.close();
     const generation = ++this.connectionGeneration;
     this.closedByUser = false;
@@ -91,9 +110,16 @@ export class MrRobotClient {
 
       timer = setTimeout(() => cancelAttempt(new Error('연결 또는 인증 시간이 초과되었습니다.')), timeoutMs);
 
-      void publicWebSocketProtocols(url, secret, admissionController.signal).then((protocols) => {
+      void publicWebSocketProtocols(url, secret, admissionController.signal, cloudflareAccess, cloudflareAccessOrigin).then((protocols) => {
         if (settled || generation !== this.connectionGeneration) return;
-        ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+        const parsed = new URL(url);
+        const accessHeaders = cloudflareAccessHeaders(cloudflareAccess, cloudflareAccessOrigin, `https://${parsed.host}`);
+        if (Object.keys(accessHeaders).length) {
+          const ReactNativeWebSocket = WebSocket as unknown as ReactNativeWebSocketConstructor;
+          ws = new ReactNativeWebSocket(url, protocols, { headers: accessHeaders });
+        } else {
+          ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+        }
         this.ws = ws;
         ws.onopen = () => {
           if (generation !== this.connectionGeneration) { ws?.close(); return; }

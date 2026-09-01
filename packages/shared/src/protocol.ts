@@ -471,12 +471,22 @@ export interface RemoteLinkConfig {
   localUrl: string;
   /** Fixed public hostname configured on the user's remotely-managed Cloudflare Tunnel. */
   hostname?: string;
+  /** Exact sibling hostnames allowed to receive this Access credential for PC-to-PC pulls. */
+  peerHostnames?: string[];
   /** Write-only input. Status/config responses never return this credential. */
   tunnelToken?: string;
   /** True when a DPAPI-protected token already exists on this Windows account. */
   hasTunnelToken?: boolean;
   /** Write-only input for deliberately removing the saved credential. */
   clearTunnelToken?: boolean;
+  /** Write-only Cloudflare Access service-token client id used by native clients. */
+  accessClientId?: string;
+  /** Write-only Cloudflare Access service-token secret used by native clients. */
+  accessClientSecret?: string;
+  /** True when a matching DPAPI-protected Access service credential exists. */
+  hasAccessCredentials?: boolean;
+  /** Write-only input for deliberately removing the saved Access credential. */
+  clearAccessCredentials?: boolean;
   /** Named tunnels may reconnect automatically when the enabled plugin starts. */
   autoStart: boolean;
 }
@@ -503,6 +513,8 @@ export interface RemoteLinkStatus {
   temporary: boolean;
   beta: boolean;
   reachable?: boolean;
+  /** True only after an anonymous probe is denied and a service-token probe succeeds. */
+  accessProtected?: boolean;
   verifiedAt?: number;
   warning: string;
   lastError?: string;
