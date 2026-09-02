@@ -1,15 +1,20 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { delimiter, join } from 'node:path';
 import type { RemoteLinkConfig, RemoteLinkStatus, RemoteTransportProviderInfo } from '@mr-robot/shared';
 import { getDomain } from 'tldts';
-import { SecretVault } from '../secrets.js';
+import { SecretVault, unprotectRemoteLinkWithLegacyProviderFallback } from '../secrets.js';
 import type { PluginContext } from './context.js';
 import type { MrRobotPlugin } from './loader.js';
 import { mrRobotHome } from '../config.js';
-import { CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } from '../access-probe.js';
+import {
+  CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
+  CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE,
+  CLOUDFLARE_ACCESS_PAIR_PROBE,
+  CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR,
+} from '../access-probe.js';
 
 const PLUGIN_ID = 'remote-link';
 const QUICK_TUNNEL_HOST = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
@@ -17,8 +22,10 @@ const NAMED_TUNNEL_READY = /(?:registered tunnel connection|tunnel connection re
 const MAX_DIAGNOSTIC_CHARS = 12_000;
 const START_TIMEOUT_MS = 35_000;
 const VERIFY_TIMEOUT_MS = 12_000;
+const ACCESS_BOOTSTRAP_TTL_MS = 5 * 60_000;
 const AUTHENTICODE_TIMEOUT_MS = 10_000;
 const CLOUDFLARE_PUBLISHER = 'Cloudflare, Inc.';
+const REMOTE_LINK_SECRET_PURPOSE = 'remote-link-v1' as const;
 const AUTHENTICODE_SCRIPT = [
   '$ErrorActionPreference="Stop"',
   'Import-Module (Join-Path $PSHOME "Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1") -Force -ErrorAction Stop',
@@ -44,7 +51,9 @@ interface StoredRemoteLinkConfig {
   peerHostnames?: string[];
   autoStart?: boolean;
   tunnelTokenProtected?: string;
+  tunnelTokenPurpose?: typeof REMOTE_LINK_SECRET_PURPOSE;
   accessCredentialsProtected?: string;
+  accessCredentialsPurpose?: typeof REMOTE_LINK_SECRET_PURPOSE;
 }
 
 interface CloudflareAccessServiceCredentials {
@@ -93,10 +102,10 @@ function normalizeAccessCredentials(clientId: unknown, clientSecret: unknown): C
   };
 }
 
-function decodeAccessCredentials(protectedValue: string, unprotect: (value: string) => string): CloudflareAccessServiceCredentials {
+function decodeAccessCredentialsPlaintext(plaintext: string): CloudflareAccessServiceCredentials {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(unprotect(protectedValue));
+    parsed = JSON.parse(plaintext);
   } catch {
     throw new Error('저장된 Cloudflare Access 자격증명을 읽을 수 없습니다. 다시 저장하세요.');
   }
@@ -125,7 +134,16 @@ function normalizePeerHostnames(value: unknown, primaryHostname: string): string
   return normalized;
 }
 
-async function readSmallJson(response: Response): Promise<{ ok?: unknown; app?: unknown; error?: unknown }> {
+type SmallJson = {
+  ok?: unknown;
+  app?: unknown;
+  error?: unknown;
+  probe?: unknown;
+  challenge?: unknown;
+  assertion?: unknown;
+};
+
+async function readSmallJson(response: Response): Promise<SmallJson> {
   const advertised = Number(response.headers.get('content-length') ?? 0);
   if (Number.isFinite(advertised) && advertised > 16 * 1024) throw new Error('외부 확인 응답이 너무 큽니다.');
   if (!response.body) throw new Error('외부 확인 응답 본문이 없습니다.');
@@ -334,6 +352,59 @@ function normalizeTunnelToken(value: unknown): string {
   return token;
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function accessBootstrapFromSetCookie(headers: Headers): string {
+  const extended = headers as Headers & { getSetCookie?: () => string[] };
+  const values = extended.getSetCookie?.() ?? [headers.get('set-cookie') ?? ''];
+  for (const value of values) {
+    const match = value.match(new RegExp(`(?:^|,\\s*)${CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE}=([^;,\\s]+)`, 'i'));
+    if (match?.[1]) return match[1];
+  }
+  throw new Error('Cloudflare Access 자동 등록 응답에서 HttpOnly bootstrap cookie를 찾지 못했습니다.');
+}
+
+function parseAccessApplicationAssertion(value: unknown, expectedClientId: string): { token: string; expiresAt: number } {
+  const token = String(value ?? '').trim();
+  if (token.length < 64 || token.length > 4_096 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+    throw new Error('Cloudflare Access가 올바른 application assertion을 반환하지 않았습니다.');
+  }
+  let payload: Record<string, unknown>;
+  try {
+    const raw = Buffer.from(token.split('.')[1]!, 'base64url');
+    if (raw.length === 0 || raw.length > 8 * 1024) throw new Error('invalid assertion payload size');
+    payload = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+  } catch {
+    throw new Error('Cloudflare Access application assertion을 해석할 수 없습니다.');
+  }
+  const expiresAt = Number(payload.exp) * 1_000;
+  const issuer = String(payload.iss ?? '');
+  const audience = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  let issuerUrl: URL;
+  try {
+    issuerUrl = new URL(issuer);
+  } catch {
+    throw new Error('Cloudflare Access application assertion 발급자가 올바르지 않습니다.');
+  }
+  if (payload.type !== 'app'
+    || payload.common_name !== expectedClientId
+    || payload.sub !== ''
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt <= Date.now() + 30_000
+    || issuerUrl.protocol !== 'https:'
+    || issuerUrl.username
+    || issuerUrl.password
+    || issuerUrl.port
+    || !issuerUrl.hostname.toLowerCase().endsWith('.cloudflareaccess.com')
+    || audience.length === 0
+    || audience.some((item) => typeof item !== 'string' || item.length < 16 || item.length > 512)) {
+    throw new Error('Cloudflare Access application assertion의 서비스 주체 또는 만료 정보가 올바르지 않습니다.');
+  }
+  return { token, expiresAt };
+}
+
 /**
  * Cheap identity used only to decide whether a prior Authenticode result can
  * be reused for status rendering. Starts never rely on this cache. Including
@@ -428,6 +499,8 @@ export interface RemoteLinkRuntime {
   spawnProcess?: typeof spawn;
   protectSecret?: (value: string) => string;
   unprotectSecret?: (value: string) => string;
+  /** v0.3.x compatibility hook; used only for an unmarked ciphertext after the current purpose fails. */
+  unprotectLegacySecret?: (value: string) => string;
   fetchUrl?: typeof fetch;
   runtimeDirectory?: string;
 }
@@ -504,15 +577,22 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
   const detectExecutable = runtime.findExecutable ?? findCloudflaredCandidate;
   const inspectExecutable = runtime.verifyExecutable ?? verifyCloudflaredExecutable;
   const spawnProcess = runtime.spawnProcess ?? spawn;
-  const vault = new SecretVault();
+  const vault = new SecretVault('remote-link');
+  const legacyProviderVault = new SecretVault('provider');
   const protectSecret = runtime.protectSecret ?? ((value: string) => vault.protect(value));
   const unprotectSecret = runtime.unprotectSecret ?? ((value: string) => vault.unprotect(value));
+  const unprotectLegacySecret = runtime.unprotectLegacySecret
+    ?? (runtime.unprotectSecret ? runtime.unprotectSecret : (value: string) => legacyProviderVault.unprotect(value));
   const fetchUrl = runtime.fetchUrl ?? fetch;
   const runtimeDirectory = runtime.runtimeDirectory ?? join(mrRobotHome(), 'runtime');
   let processHandle: ChildProcess | null = null;
   const liveChildren = new Set<ChildProcess>();
   let operationGeneration = 0;
   let pendingStart: { generation: number; child: ChildProcess; cancel: (reason: Error) => void } | null = null;
+  let pendingStartPromise: Promise<RemoteLinkStatus> | null = null;
+  let pendingStartKey: string | null = null;
+  let pendingConfiguredStartPromise: Promise<RemoteLinkStatus> | null = null;
+  let scheduledAutoStart: NodeJS.Timeout | null = null;
   let publicUrl: string | undefined;
   let startedAt: number | undefined;
   let lastError: string | undefined;
@@ -530,16 +610,79 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
   let activeContext: PluginContext | undefined;
   let accessCredentialCache: { protectedValue: string; credentials: CloudflareAccessServiceCredentials } | undefined;
   let executableTrustCache: { identity: string; trust: CloudflaredExecutableTrust } | undefined;
+  let lastEmittedStatus = '';
+
+  type ProtectedSecretField = 'tunnelTokenProtected' | 'accessCredentialsProtected';
+  type SecretPurposeField = 'tunnelTokenPurpose' | 'accessCredentialsPurpose';
+  const readProtectedSecret = <T>(
+    ctx: PluginContext,
+    protectedField: ProtectedSecretField,
+    purposeField: SecretPurposeField,
+    decode: (plaintext: string) => T,
+    encode: (decoded: T) => string,
+  ): { value: T; protectedValue: string } => {
+    const stored = ctx.storage.get<StoredRemoteLinkConfig>('config');
+    const protectedValue = stored?.[protectedField];
+    if (!protectedValue) throw new Error('저장된 자격증명이 없습니다.');
+    const recordedPurpose = stored?.[purposeField];
+    if (recordedPurpose !== undefined && recordedPurpose !== REMOTE_LINK_SECRET_PURPOSE) {
+      throw new Error('저장된 자격증명의 보안 영역 표식이 올바르지 않습니다. 다시 저장하세요.');
+    }
+
+    let plaintext: string;
+    let migratedFromLegacyProvider = false;
+    if (recordedPurpose === REMOTE_LINK_SECRET_PURPOSE) {
+      // Once marked, never reopen the provider-purpose fallback. A damaged or
+      // substituted new ciphertext must fail closed.
+      plaintext = unprotectSecret(protectedValue);
+    } else {
+      const unprotected = unprotectRemoteLinkWithLegacyProviderFallback(
+        protectedValue,
+        unprotectSecret,
+        unprotectLegacySecret,
+      );
+      plaintext = unprotected.plaintext;
+      migratedFromLegacyProvider = unprotected.migratedFromLegacyProvider;
+    }
+
+    // Validate before changing storage. A provider ciphertext containing an
+    // unrelated API key is not accepted merely because DPAPI could decrypt it.
+    const value = decode(plaintext);
+    if (recordedPurpose === REMOTE_LINK_SECRET_PURPOSE) return { value, protectedValue };
+
+    const migratedProtectedValue = migratedFromLegacyProvider
+      ? protectSecret(encode(value))
+      : protectedValue;
+    const latest = ctx.storage.get<StoredRemoteLinkConfig>('config');
+    if (!latest || latest[protectedField] !== protectedValue) {
+      throw new Error('자격증명 마이그레이션 중 설정이 변경되었습니다. 다시 시도하세요.');
+    }
+    ctx.storage.set('config', {
+      ...latest,
+      [protectedField]: migratedProtectedValue,
+      [purposeField]: REMOTE_LINK_SECRET_PURPOSE,
+    } as StoredRemoteLinkConfig);
+    return { value, protectedValue: migratedProtectedValue };
+  };
 
   const accessCredentials = (ctx: PluginContext): CloudflareAccessServiceCredentials | undefined => {
-    const protectedValue = ctx.storage.get<StoredRemoteLinkConfig>('config')?.accessCredentialsProtected;
+    const stored = ctx.storage.get<StoredRemoteLinkConfig>('config');
+    const protectedValue = stored?.accessCredentialsProtected;
     if (!protectedValue) {
       accessCredentialCache = undefined;
       return undefined;
     }
-    if (accessCredentialCache?.protectedValue === protectedValue) return accessCredentialCache.credentials;
-    const credentials = decodeAccessCredentials(protectedValue, unprotectSecret);
-    accessCredentialCache = { protectedValue, credentials };
+    if (stored?.accessCredentialsPurpose === REMOTE_LINK_SECRET_PURPOSE
+      && accessCredentialCache?.protectedValue === protectedValue) return accessCredentialCache.credentials;
+    const decoded = readProtectedSecret(
+      ctx,
+      'accessCredentialsProtected',
+      'accessCredentialsPurpose',
+      decodeAccessCredentialsPlaintext,
+      (credentials) => JSON.stringify(credentials),
+    );
+    const credentials = decoded.value;
+    accessCredentialCache = { protectedValue: decoded.protectedValue, credentials };
     return credentials;
   };
 
@@ -559,7 +702,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.3.9',
+      version: '0.4.0',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',
@@ -630,7 +773,17 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         };
       };
 
-      const emitStatus = (): void => ctx.emit(`${PLUGIN_ID}.changed`, status());
+      const emitStatus = (): void => {
+        const next = status();
+        const signature = JSON.stringify(next);
+        // cloudflared can report the same readiness line more than once and a
+        // save/start/verify sequence intentionally observes status between
+        // steps. Do not make every administrator view rebuild its QR and
+        // controls when the public state did not actually change.
+        if (signature === lastEmittedStatus) return;
+        lastEmittedStatus = signature;
+        ctx.emit(`${PLUGIN_ID}.changed`, next);
+      };
 
       const stop = async (restoreSavedNamedTunnel = false): Promise<RemoteLinkStatus> => {
         const operation = ++operationGeneration;
@@ -639,6 +792,9 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         const wasTransientQuick = activeTransientQuick;
         const stoppedConfigPath = activeCloudflaredConfigPath;
         pendingStart = null;
+        pendingStartPromise = null;
+        pendingStartKey = null;
+        pendingConfiguredStartPromise = null;
         processHandle = null;
         activeConfig = null;
         activeCloudflaredConfigPath = null;
@@ -675,8 +831,26 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
       };
 
       const start = async (runtimeConfig?: RemoteLinkConfig, transientQuick = false): Promise<RemoteLinkStatus> => {
-        if (processHandle && processHandle.exitCode === null && !processHandle.killed) return status();
         const config = runtimeConfig ?? storedConfig(ctx);
+        const requestKey = JSON.stringify({
+          provider: config.provider,
+          localUrl: config.localUrl,
+          hostname: config.hostname ?? '',
+          transientQuick,
+        });
+        // Enabling an auto-start plugin and pressing connect can legitimately
+        // arrive in the same tick. Both callers must await the one in-flight
+        // launch instead of treating a child without a public URL as success.
+        // Different providers/configurations must never borrow that result:
+        // in particular, a secure named request cannot accept an unverified
+        // Quick Tunnel that happened to start a moment earlier.
+        if (pendingStartPromise) {
+          if (pendingStartKey !== requestKey) {
+            throw new Error('다른 원격 연결 시작 작업이 진행 중입니다. 완료하거나 중지한 뒤 다시 시도하세요.');
+          }
+          return pendingStartPromise;
+        }
+        if (processHandle && processHandle.exitCode === null && !processHandle.killed) return status();
         if (config.provider === 'google-relay') {
           throw new Error('Google 계정 Relay는 Firebase/OAuth/relay 서버가 구성되기 전에는 활성화할 수 없습니다.');
         }
@@ -708,7 +882,13 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           if (!config.hostname) throw new Error('Cloudflare 고정 호스트명을 먼저 저장하세요.');
           if (!stored?.tunnelTokenProtected) throw new Error('Cloudflare Tunnel 토큰을 먼저 저장하세요.');
           try {
-            tunnelToken = normalizeTunnelToken(unprotectSecret(stored.tunnelTokenProtected));
+            tunnelToken = readProtectedSecret(
+              ctx,
+              'tunnelTokenProtected',
+              'tunnelTokenPurpose',
+              normalizeTunnelToken,
+              (token) => token,
+            ).value;
             localCredentials = localTunnelCredentialsFromToken(tunnelToken);
             mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
             cloudflaredConfigPath = join(runtimeDirectory, `cloudflared-${randomUUID()}.yml`);
@@ -725,7 +905,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           }
         }
 
-        return new Promise<RemoteLinkStatus>((resolve, reject) => {
+        const launchPromise = new Promise<RemoteLinkStatus>((resolve, reject) => {
           let settled = false;
           let childDiagnostics = '';
           let timer: NodeJS.Timeout | undefined;
@@ -855,11 +1035,34 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             ? 'Cloudflare 고정 Tunnel 연결 시간이 초과되었습니다. 토큰과 Connector 상태를 확인하세요.'
             : 'Cloudflare 임시 링크 생성 시간이 초과되었습니다.'), START_TIMEOUT_MS);
         });
+        pendingStartPromise = launchPromise;
+        pendingStartKey = requestKey;
+        void launchPromise.then(
+          () => {
+            if (pendingStartPromise !== launchPromise) return;
+            pendingStartPromise = null;
+            pendingStartKey = null;
+          },
+          () => {
+            if (pendingStartPromise !== launchPromise) return;
+            pendingStartPromise = null;
+            pendingStartKey = null;
+          },
+        );
+        return launchPromise;
       };
 
       const verify = async (): Promise<{ ok: boolean; url: string; checkedAt: number; message: string }> => {
         const current = status();
         if (!current.running || !current.publicUrl) throw new Error('먼저 원격 링크를 시작하세요.');
+        const verificationGeneration = operationGeneration;
+        const targetStillCurrent = (): boolean => {
+          const latest = status();
+          return verificationGeneration === operationGeneration
+            && latest.running
+            && latest.provider === current.provider
+            && latest.publicUrl === current.publicUrl;
+        };
         const checkedAt = Date.now();
         try {
           const access = current.provider === 'cloudflare-named' ? accessCredentials(ctx) : undefined;
@@ -885,7 +1088,6 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
               try { await anonymousResponse.body?.cancel(); } catch { /* best-effort cleanup */ }
             }
             if (anonymousReachedAgent) {
-              accessProtected = false;
               throw new Error('외부 주소가 Cloudflare Access 없이 공개되어 있습니다. Access 앱과 정책을 먼저 적용하세요.');
             }
 
@@ -914,7 +1116,6 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
               try { await anonymousTicket.body?.cancel(); } catch { /* best-effort cleanup */ }
             }
             if (anonymousReachedTicket) {
-              accessProtected = false;
               throw new Error('Cloudflare Access가 /api/ws-ticket 경로를 보호하지 않습니다. 호스트 전체를 보호하는 앱으로 수정하세요.');
             }
 
@@ -959,7 +1160,6 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
               try { await anonymousPair.body?.cancel(); } catch { /* best-effort cleanup */ }
             }
             if (anonymousReachedPair) {
-              accessProtected = false;
               throw new Error('Cloudflare Access가 /api/pair 경로를 보호하지 않습니다. 호스트 전체를 보호하는 앱으로 수정하세요.');
             }
 
@@ -997,6 +1197,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           if (!response.ok || body.ok !== true || body.app !== 'mr-robot') {
             throw new Error(`공개 주소가 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${response.status})`);
           }
+          if (!targetStillCurrent()) throw new Error('검사 중 원격 링크가 변경되어 이전 검사 결과를 폐기했습니다.');
           reachable = true;
           accessProtected = current.provider === 'cloudflare-named' ? true : undefined;
           verifiedAt = checkedAt;
@@ -1011,6 +1212,9 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
               : '외부 HTTPS 주소에서 Mr.Robot Agent 응답을 확인했습니다.',
           };
         } catch (error) {
+          if (!targetStillCurrent()) {
+            throw new Error(`검사 중 원격 링크가 변경되어 이전 검사 결과를 폐기했습니다. (${error instanceof Error ? error.message : String(error)})`);
+          }
           reachable = false;
           if (current.provider === 'cloudflare-named') accessProtected = false;
           verifiedAt = checkedAt;
@@ -1021,11 +1225,12 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
       };
 
       const verifyFailClosed = async (): ReturnType<typeof verify> => {
+        const verificationGeneration = operationGeneration;
         try {
           return await verify();
         } catch (error) {
           const current = status();
-          if (current.running && current.provider === 'cloudflare-named') {
+          if (verificationGeneration === operationGeneration && current.running && current.provider === 'cloudflare-named') {
             await stop();
             // stop() resets volatile verification state but deliberately keeps
             // the reason visible for the administrator.
@@ -1036,10 +1241,98 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         }
       };
 
-      const startConfigured = async (): Promise<RemoteLinkStatus> => {
-        const started = await start();
-        if (started.provider === 'cloudflare-named') await verifyFailClosed();
-        return status();
+      const startConfigured = (): Promise<RemoteLinkStatus> => {
+        if (pendingConfiguredStartPromise) return pendingConfiguredStartPromise;
+        const configuredStart = (async (): Promise<RemoteLinkStatus> => {
+          const started = await start();
+          if (started.provider === 'cloudflare-named') await verifyFailClosed();
+          return status();
+        })();
+        pendingConfiguredStartPromise = configuredStart;
+        void configuredStart.then(
+          () => { if (pendingConfiguredStartPromise === configuredStart) pendingConfiguredStartPromise = null; },
+          () => { if (pendingConfiguredStartPromise === configuredStart) pendingConfiguredStartPromise = null; },
+        );
+        return configuredStart;
+      };
+
+      const issueAccessBootstrap = async (
+        current: RemoteLinkStatus,
+        access: CloudflareAccessServiceCredentials,
+        pin: string,
+        handoffExpiresAt: number,
+      ): Promise<{ type: 'cf-authorization'; token: string; expiresAt: number }> => {
+        if (current.provider !== 'cloudflare-named' || !current.publicUrl) {
+          throw new Error('Cloudflare 고정 Tunnel에서만 자동 보안 등록을 만들 수 있습니다.');
+        }
+        const origin = new URL(current.publicUrl).origin;
+        // Keep automatic enrollment on the established pairing endpoint so a
+        // strict Cloudflare/WAF allowlist does not need another public route.
+        const probeUrl = new URL('/api/pair', origin);
+        const requestProbe = async (challenge: string, headers: Record<string, string>): Promise<string> => {
+          // Register only hashes over the internal event bus. The origin
+          // refuses every unregistered challenge, preventing an authenticated
+          // browser from using the probe as a JWT reflection oracle.
+          ctx.emit('remote-link.bootstrap.challenge', {
+            pinHash: sha256(pin),
+            challengeHash: sha256(challenge),
+            clientIdHash: sha256(access.clientId),
+            origin,
+            expiresAt: Date.now() + 30_000,
+          });
+          const response = await fetchUrl(probeUrl, {
+            method: 'POST',
+            body: JSON.stringify({ probe: CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE, challenge }),
+            redirect: 'error',
+            cache: 'no-store',
+            signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+            headers: {
+              accept: 'application/json',
+              'content-type': 'application/json',
+              ...headers,
+            },
+          });
+          const body = await readSmallJson(response);
+          if (!response.ok
+            || body.app !== 'mr-robot'
+            || body.probe !== CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE
+            || body.challenge !== challenge) {
+            throw new Error(`Cloudflare Access 자동 등록 probe가 거부되었습니다. (HTTP ${response.status})`);
+          }
+          return accessBootstrapFromSetCookie(response.headers);
+        };
+
+        const firstChallenge = randomBytes(32).toString('base64url');
+        const serviceAssertion = parseAccessApplicationAssertion(await requestProbe(firstChallenge, {
+          'CF-Access-Client-Id': access.clientId,
+          'CF-Access-Client-Secret': access.clientSecret,
+        }), access.clientId);
+
+        // A service-token request reaching the origin does not by itself prove
+        // that a native phone can reuse the assertion. Test Cloudflare's
+        // documented CLI header on the exact path without the long-lived
+        // service headers. Unlike Cookie, this cannot enter Android's jar.
+        const cookieChallenge = randomBytes(32).toString('base64url');
+        let cookieAssertion: { token: string; expiresAt: number };
+        try {
+          cookieAssertion = parseAccessApplicationAssertion(await requestProbe(cookieChallenge, {
+            'cf-access-token': serviceAssertion.token,
+          }), access.clientId);
+        } catch (error) {
+          throw new Error(`자동 모바일 등록용 cf-access-token 검증에 실패했습니다. 호스트 전체의 Service Auth 정책과 Service Token을 확인하세요. (${error instanceof Error ? error.message : String(error)})`);
+        }
+        if (cookieAssertion.token !== serviceAssertion.token) {
+          throw new Error('Cloudflare Access가 재사용한 application assertion을 변경해 자동 등록을 중단했습니다.');
+        }
+        const expiresAt = Math.min(handoffExpiresAt, serviceAssertion.expiresAt, Date.now() + ACCESS_BOOTSTRAP_TTL_MS);
+        if (expiresAt <= Date.now() + 30_000) throw new Error('자동 등록 보안 세션의 남은 시간이 너무 짧습니다. 새 코드를 만드세요.');
+        ctx.emit('remote-link.bootstrap.created', {
+          pinHash: sha256(pin),
+          assertionHash: sha256(cookieAssertion.token),
+          origin,
+          expiresAt,
+        });
+        return { type: 'cf-authorization', token: serviceAssertion.token, expiresAt };
       };
 
       ctx.registerCommand('remote-link.status', () => status(), { destructive: false, adminOnly: true });
@@ -1057,12 +1350,17 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         if (processHandle && processHandle.exitCode === null) throw new Error('실행 중인 링크를 중지한 뒤 설정을 바꾸세요.');
         const previous = ctx.storage.get<StoredRemoteLinkConfig>('config');
         let tunnelTokenProtected = body.clearTunnelToken === true ? undefined : previous?.tunnelTokenProtected;
+        let tunnelTokenPurpose = body.clearTunnelToken === true ? undefined : previous?.tunnelTokenPurpose;
         if (typeof body.tunnelToken === 'string' && body.tunnelToken.trim()) {
           tunnelTokenProtected = protectSecret(normalizeTunnelToken(body.tunnelToken));
+          tunnelTokenPurpose = REMOTE_LINK_SECRET_PURPOSE;
         }
         let accessCredentialsProtected = body.clearAccessCredentials === true
           ? undefined
           : previous?.accessCredentialsProtected;
+        let accessCredentialsPurpose = body.clearAccessCredentials === true
+          ? undefined
+          : previous?.accessCredentialsPurpose;
         const accessIdSupplied = typeof body.accessClientId === 'string' && Boolean(body.accessClientId.trim());
         const accessSecretSupplied = typeof body.accessClientSecret === 'string' && Boolean(body.accessClientSecret.trim());
         if (accessIdSupplied !== accessSecretSupplied) {
@@ -1071,6 +1369,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         if (accessIdSupplied && accessSecretSupplied) {
           const access = normalizeAccessCredentials(body.accessClientId, body.accessClientSecret);
           accessCredentialsProtected = protectSecret(JSON.stringify(access));
+          accessCredentialsPurpose = REMOTE_LINK_SECRET_PURPOSE;
         }
         const hostname = provider === 'cloudflare-named' ? normalizeNamedTunnelHostname(body.hostname) : undefined;
         const peerHostnames = hostname ? normalizePeerHostnames(body.peerHostnames, hostname) : [];
@@ -1080,10 +1379,20 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           ...(hostname ? { hostname } : {}),
           ...(peerHostnames.length ? { peerHostnames } : {}),
           ...(tunnelTokenProtected ? { tunnelTokenProtected } : {}),
+          ...(tunnelTokenProtected && tunnelTokenPurpose ? { tunnelTokenPurpose } : {}),
           ...(accessCredentialsProtected ? { accessCredentialsProtected } : {}),
+          ...(accessCredentialsProtected && accessCredentialsPurpose ? { accessCredentialsPurpose } : {}),
           autoStart: provider === 'cloudflare-named' && body.autoStart === true,
         };
         ctx.storage.set('config', stored);
+        // A stopped endpoint's previous launch/verification failure describes
+        // the old settings. Keeping it after the user has corrected and saved
+        // the configuration makes the recovery UI look permanently broken.
+        lastError = undefined;
+        diagnostics = '';
+        reachable = undefined;
+        accessProtected = undefined;
+        verifiedAt = undefined;
         // Drop any plaintext credential reference immediately on replace or
         // clear. The next exact-host request may repopulate it from DPAPI.
         accessCredentialCache = undefined;
@@ -1109,20 +1418,22 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         }
         await verifyFailClosed();
         if (status().accessProtected !== true) throw new Error('Cloudflare Access 보호 검증이 끝나지 않았습니다.');
-        if (!accessCredentials(ctx)) throw new Error('Cloudflare Access Service Token을 먼저 저장하세요.');
+        const access = accessCredentials(ctx);
+        if (!access) throw new Error('Cloudflare Access Service Token을 먼저 저장하세요.');
+        const cloudflareBootstrap = await issueAccessBootstrap(status(), access, pin, expiresAt);
         return JSON.stringify({
           app: 'mr-robot',
-          version: 3,
+          version: 5,
           host: `https://${requestedHost}`,
           hosts: [`https://${requestedHost}`],
           protocol: 'https',
           port: 443,
           pin,
-          expiresAt,
-          // The long-lived Cloudflare machine credential never crosses into
-          // the renderer or QR. Native clients enter it directly and keep it
-          // in their OS credential vault, while this QR remains one-use.
-          requiresCloudflareAccess: true,
+          expiresAt: cloudflareBootstrap.expiresAt,
+          // Only a short-lived, server-bound Access application assertion is
+          // shown. The long-lived machine credential stays behind DPAPI until
+          // the one successful pair response writes it into Android Keystore.
+          cloudflareBootstrap,
         });
       }, { destructive: false, adminOnly: true });
       ctx.registerCommand('remote-link.start', () => startConfigured(), { destructive: true, adminOnly: true });
@@ -1151,24 +1462,38 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         const list = Array.isArray(raw) ? raw as Array<{ id?: string; enabled?: boolean }> : [];
         const self = list.find((item) => item.id === PLUGIN_ID);
         if (self?.enabled === false) {
+          if (scheduledAutoStart) ctx.clearTimeout(scheduledAutoStart);
+          scheduledAutoStart = null;
           void stop();
-        } else if (self?.enabled === true && storedConfig(ctx).autoStart && !processHandle && !pendingStart) {
-          void startConfigured().catch((error) => {
-            lastError = `자동 연결 실패: ${error instanceof Error ? error.message : String(error)}`;
-            emitStatus();
-          });
+        } else if (self?.enabled === true && storedConfig(ctx).autoStart && !processHandle && !pendingStart && !scheduledAutoStart) {
+          // Give the explicit enable -> config.set -> start wizard one event
+          // turn to store edited values. Without this small coalescing window,
+          // activation could launch the previous auto-start config first and
+          // make the immediately following save fail as "already running".
+          scheduledAutoStart = ctx.setTimeout(() => {
+            scheduledAutoStart = null;
+            if (!storedConfig(ctx).autoStart || processHandle || pendingStart) return;
+            void startConfigured().catch((error) => {
+              lastError = `자동 연결 실패: ${error instanceof Error ? error.message : String(error)}`;
+              emitStatus();
+            });
+          }, 750);
         }
       });
       activeContext = ctx;
     },
     async deactivate(ctx) {
       if (activeContext === ctx) activeContext = undefined;
+      if (scheduledAutoStart) ctx.clearTimeout(scheduledAutoStart);
+      scheduledAutoStart = null;
       accessCredentialCache = undefined;
       executableTrustCache = undefined;
       ++operationGeneration;
       const active = processHandle;
       const pending = pendingStart;
       pendingStart = null;
+      pendingStartPromise = null;
+      pendingConfiguredStartPromise = null;
       processHandle = null;
       activeConfig = null;
       activeTransientQuick = false;

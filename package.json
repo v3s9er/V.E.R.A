@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "private": true,
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",
@@ -24,7 +24,7 @@
     "build:installer": "npm run stage:desktop && electron-builder --projectDir packages/desktop --config electron-builder.json --win nsis --x64 --publish never",
     "audit:public": "node scripts/audit-public-release.mjs",
     "release:source": "node scripts/create-public-source-archive.mjs",
-    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && node packages/agent/test/pairing-secret-storage.mjs && node packages/agent/test/mcp-environment-storage.mjs && node packages/agent/test/desktop-auth-boundary.mjs && node packages/agent/test/desktop-remote-pair-security.mjs && tsx packages/agent/test/qr-security.ts && tsx packages/agent/test/calendar/calendar-sources.test.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && tsx packages/web/test/pcs-storage.test.ts && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs && npm run test:privacy --prefix apps/mobile && node apps/mobile/test/cloudflare-access-contract.mjs && npm run audit:public",
+    "test": "node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && node packages/agent/test/pairing-secret-storage.mjs && node packages/agent/test/mcp-environment-storage.mjs && node packages/agent/test/desktop-auth-boundary.mjs && node packages/agent/test/desktop-remote-pair-security.mjs && tsx packages/agent/test/qr-security.ts && tsx packages/agent/test/calendar/calendar-sources.test.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && node packages/web/test/responsive-ui-contract.mjs && tsx packages/web/test/pcs-storage.test.ts && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs && npm run test:privacy --prefix apps/mobile && node apps/mobile/test/cloudflare-access-contract.mjs && npm run test:ui --prefix apps/mobile && npm run audit:public",
     "test:leak": "node --expose-gc packages/agent/test/leak.mjs"
   },
   "devDependencies": {

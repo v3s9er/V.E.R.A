@@ -2402,6 +2402,618 @@ body::before {
   .composer-reasoning-label { display: none; }
 }
 
+/* ---------- responsive resilience ----------
+   Keep every control inside its own layout track. These rules intentionally
+   live after the feature-specific breakpoints so compact Electron windows and
+   browser fallbacks share one predictable overflow model. */
+.content,
+.conversation-layout,
+.conversation-list,
+.conversation-items,
+.chat-wrap,
+.chat-commandbar,
+.chat-quick-controls,
+.workspace-header-main,
+.workspace-header-main > *,
+.topbar-meta {
+  min-width: 0;
+}
+
+.content,
+.conversation-layout,
+.chat-wrap {
+  overflow: hidden;
+}
+
+.topbar-meta {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.topbar-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-header .pc-switch {
+  width: min(280px, 100%);
+  min-width: 0;
+  flex: 1 1 220px;
+  text-overflow: ellipsis;
+}
+
+.workspace-nav {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+.workspace-nav::-webkit-scrollbar { display: none; }
+
+.profile-popover {
+  max-height: min(70dvh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.conversation-items,
+.chat-scroll {
+  min-height: 0;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.chat-commandbar,
+.chat-inputbar {
+  flex: 0 0 auto;
+}
+
+.chat-quick-controls {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.chat-context-panel {
+  flex: 0 1 auto;
+  max-height: min(52dvh, 540px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.chat-scroll {
+  scroll-padding-block: 12px;
+}
+
+.chat-inputbar {
+  max-height: min(44dvh, 300px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.chat-input {
+  min-height: 48px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.chat-actions,
+.composer-options {
+  max-width: 100%;
+}
+
+.modal-backdrop,
+.modal-content {
+  overscroll-behavior: contain;
+}
+
+.modal-content,
+.modal-content > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.modal-content {
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+
+.modal-actions,
+.confirm-actions,
+.node-settings-actions,
+.type-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conversation-context-menu {
+  width: min(206px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.gate {
+  height: 100dvh;
+  min-height: 0;
+  padding: clamp(8px, 3vw, 28px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.gate-card,
+.gate-card.wide {
+  min-width: 0;
+  max-height: calc(100dvh - clamp(16px, 6vw, 56px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.pc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.pc-info,
+.pc-info > div,
+.pc-actions {
+  min-width: 0;
+}
+
+.pc-name,
+.pc-addr {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-actions .btn {
+  min-height: 40px;
+}
+
+/* Remote-link status surfaces use the same one-column fallback as the rest of
+   the control center. Long tunnel URLs may wrap, but never widen the card. */
+.remote-mode-guide,
+.remote-status-board,
+.remote-status-item,
+.remote-readiness,
+.remote-readiness-item,
+.remote-troubleshoot,
+.remote-address-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.remote-status-board,
+.remote-readiness {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.remote-status-board {
+  margin: 12px 0;
+}
+
+.remote-status-item {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  padding: 12px 13px;
+  border: 1px solid rgba(148, 163, 184, .15);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(18, 25, 43, .78), rgba(9, 14, 27, .58));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .025);
+}
+
+.remote-status-item > span {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
+
+.remote-status-item > b {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.remote-status-item > small {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.remote-mode-guide {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 12px 0;
+}
+
+.remote-mode-guide > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-dim);
+  background: rgba(5, 9, 19, .25);
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+
+.remote-mode-guide > div.active {
+  border-color: rgba(103, 232, 249, .34);
+  color: var(--text);
+  background: linear-gradient(145deg, rgba(8, 145, 178, .1), rgba(124, 92, 255, .075));
+  box-shadow: inset 3px 0 rgba(103, 232, 249, .56), 0 10px 24px rgba(0, 0, 0, .09);
+}
+
+.remote-mode-guide b {
+  color: inherit;
+  font-size: 11.5px;
+}
+
+.remote-mode-guide span {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.remote-mode-guide small {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.remote-readiness {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(4, 8, 18, .24);
+}
+
+.remote-readiness > b {
+  grid-column: 1 / -1;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.remote-readiness-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, .12);
+  border-radius: 10px;
+  background: rgba(12, 17, 30, .56);
+}
+
+.remote-readiness-item > span {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.remote-readiness-item > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.remote-readiness-item b {
+  color: var(--text);
+  font-size: 10.5px;
+}
+
+.remote-readiness-item small {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.remote-readiness-item.ok > span {
+  color: #99f6e4;
+  background: rgba(13, 148, 136, .16);
+}
+
+.remote-readiness-item.missing > span {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, .15);
+}
+
+.remote-troubleshoot {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 13px 14px;
+  border: 1px solid rgba(245, 158, 11, .28);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(120, 53, 15, .14), rgba(15, 20, 35, .56));
+}
+
+.remote-troubleshoot > b {
+  color: #fde68a;
+  font-size: 11.5px;
+}
+
+.remote-troubleshoot > p {
+  margin: 0;
+  color: #fecaca;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.remote-troubleshoot > span {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.remote-troubleshoot .type-row {
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+
+.remote-diagnostics {
+  min-width: 0;
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(4, 8, 18, .28);
+}
+
+.remote-diagnostics > summary {
+  padding: 10px 12px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 750;
+  cursor: pointer;
+  user-select: none;
+}
+
+.remote-diagnostics > summary:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -3px;
+}
+
+.remote-diagnostics > .shell-out {
+  max-height: 260px;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.remote-mode-guide,
+.remote-status-item,
+.remote-readiness-item,
+.remote-troubleshoot {
+  overflow-wrap: anywhere;
+}
+
+.remote-address-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.remote-address-row :is(a, code, input, span) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.remote-address-row .btn,
+.remote-troubleshoot .btn {
+  flex: 0 1 auto;
+}
+
+@media (max-width: 1180px) {
+  .workspace-header-main {
+    grid-template-columns: auto minmax(140px, 1fr);
+    gap: 12px 18px;
+  }
+  .workspace-header-main .topbar-meta {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+  .workspace-header .pc-switch {
+    max-width: min(360px, 100%);
+  }
+}
+
+@media (max-width: 900px) {
+  .conversation-layout {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom));
+  }
+  .profile-menu.embedded {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    align-items: center;
+    gap: 6px;
+  }
+  .profile-menu.embedded .profile-shortcuts {
+    width: auto;
+    min-width: 0;
+  }
+  .profile-menu.embedded .profile-trigger {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    grid-template-columns: 1fr;
+    place-items: center;
+    padding: 5px;
+    border-color: var(--border);
+  }
+  .profile-menu.embedded .profile-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 11px;
+  }
+  .profile-menu.embedded .profile-copy,
+  .profile-menu.embedded .profile-more {
+    display: none;
+  }
+  .profile-menu.embedded .profile-popover {
+    position: fixed;
+    display: block;
+    inset: auto 12px calc(62px + env(safe-area-inset-bottom));
+    width: auto;
+    max-height: min(64dvh, 480px);
+  }
+  .chat-quick-controls {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .gate {
+    align-items: safe center;
+  }
+  .gate-card,
+  .gate-card.wide {
+    width: 100%;
+    padding: 24px 20px;
+  }
+  .pc-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .pc-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    width: 100%;
+  }
+  .pc-actions .btn {
+    min-width: 0;
+    min-height: 44px;
+  }
+  .pc-remove-button {
+    width: 44px;
+    padding-inline: 0;
+  }
+  .chat-actions > .btn {
+    min-height: 42px;
+    flex: 1 1 88px;
+  }
+  .preset-preview-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .preset-preview-badges { justify-content: flex-start; }
+  .modern-graph-editor .graph-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .modern-graph-editor .graph-toolbar .graph-toolbar-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .modern-graph-editor .graph-toolbar .graph-toolbar-actions .btn {
+    flex: 1 1 130px;
+  }
+  .remote-status-board,
+  .remote-readiness {
+    grid-template-columns: 1fr;
+  }
+  .remote-readiness > b { grid-column: 1; }
+  .remote-mode-guide { grid-template-columns: 1fr; }
+  .remote-address-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .remote-address-row .btn,
+  .remote-troubleshoot .btn {
+    width: 100%;
+    min-height: 42px;
+  }
+}
+
+@media (max-width: 420px) {
+  .gate {
+    align-items: flex-start;
+    padding: 8px;
+  }
+  .gate-card,
+  .gate-card.wide {
+    max-height: calc(100dvh - 16px);
+    padding: 21px 16px;
+    gap: 13px;
+  }
+  .gate-brand h1 { font-size: 23px; }
+  .gate-sub { font-size: 12.5px; }
+  .pc-row { padding: 12px; }
+  .pc-info { align-items: flex-start; }
+  .pc-addr {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .gate-form > .chat-actions,
+  .gate-card > .chat-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+}
+
+@media (max-width: 900px) and (max-height: 760px) {
+  .conversation-layout { grid-template-rows: 100px minmax(0, 1fr); }
+  .conversation-list {
+    height: 100px;
+    grid-template-rows: 34px 52px;
+    padding-block: 5px;
+  }
+  .conversation-brand { height: 34px; }
+  .conversation-items { padding-bottom: 2px; }
+  .conversation-item { padding-block: 5px; }
+  .conversation-item-main { padding-block: 7px; }
+  .chat-commandbar { padding-block: 5px; row-gap: 5px; }
+  .chat-scroll { gap: 12px; padding-block: 4px 10px; }
+  .chat-empty { padding-block: 8px 12px; }
+  .chat-empty-orb { margin-bottom: 3px; font-size: 29px; }
+  .chat-empty h2 { margin-bottom: 4px; font-size: 18px; }
+  .chat-empty p { font-size: 11.5px; }
+  .prompt-suggestions { margin-top: 10px; gap: 6px; }
+  .prompt-suggestions button { padding: 8px 10px; }
+  .chat-inputbar { gap: 5px; padding: 7px; }
+  .chat-input { min-height: 40px; padding-block: 8px; }
+  .chat-actions .btn { min-height: 34px; padding-block: 6px; }
+  .composer-reasoning { min-height: 34px; }
+}
+
+@media (max-width: 900px) and (max-height: 680px) {
+  .chat-empty-orb,
+  .chat-empty-kicker { display: none; }
+  .prompt-suggestions span { display: none; }
+  .prompt-suggestions button { min-height: 34px; justify-content: center; }
+}
+
 .view-loading { min-height: 240px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); }
 .chat-history-more { align-self: center; margin: 8px auto 18px; padding: 8px 13px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim); background: rgba(12,17,30,.82); cursor: pointer; }
 .chat-history-more:hover { border-color: var(--border-strong); color: var(--text); background: var(--card-hover); }

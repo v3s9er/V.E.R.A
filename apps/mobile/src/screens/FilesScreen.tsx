@@ -390,11 +390,11 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.sourceTabs}><TouchableOpacity style={[styles.sourceBtn, mode === 'shared' && styles.sourceBtnOn, controlsLocked && styles.controlDisabled]} onPress={() => { setMode('shared'); setPath(''); }} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.sourceText}>기기 공유함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={[styles.sourceBtn, mode === 'workspace' && workspaceId === workspace.id && styles.sourceBtnOn, controlsLocked && styles.controlDisabled]} onPress={() => { setMode('workspace'); setWorkspaceId(workspace.id); setPath(''); }} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.sourceText}>{workspace.name}</Text></TouchableOpacity>)}</ScrollView>
     <View style={styles.toolbar}>
       {path ? <TouchableOpacity style={[styles.smallBtn, controlsLocked && styles.controlDisabled]} onPress={parent} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.smallText}>‹ 상위</Text></TouchableOpacity> : null}
-      <View style={{ flex: 1 }}><Text style={styles.path}>{pc.name} / {path || (mode === 'shared' ? '공유함' : workspaces.find((item) => item.id === workspaceId)?.name ?? '작업 폴더')}</Text></View>
+      <View style={styles.pathWrap}><Text style={styles.path}>{pc.name} / {path || (mode === 'shared' ? '공유함' : workspaces.find((item) => item.id === workspaceId)?.name ?? '작업 폴더')}</Text></View>
       <TouchableOpacity style={[styles.smallBtn, controlsLocked && styles.controlDisabled]} onPress={() => void uploadFromPhone()} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.smallText}>모바일 파일 올리기</Text></TouchableOpacity>
     </View>
-    {busy ? <View style={styles.transferStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.transferStatusText} numberOfLines={1}>{busy}</Text>{transferCancelable ? <TouchableOpacity style={styles.cancelBtn} onPress={() => void cancelActiveTransfer('user')}><Text style={styles.cancelText}>전송 취소</Text></TouchableOpacity> : null}</View> : null}
-    {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+    {busy ? <View style={styles.transferStatus} accessibilityLiveRegion="polite"><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.transferStatusText} numberOfLines={2}>{busy}</Text>{transferCancelable ? <TouchableOpacity style={styles.cancelBtn} onPress={() => void cancelActiveTransfer('user')} accessibilityRole="button" accessibilityLabel="파일 전송 취소"><Text style={styles.cancelText}>전송 취소</Text></TouchableOpacity> : null}</View> : null}
+    {notice ? <Text style={styles.notice} accessibilityLiveRegion="polite">{notice}</Text> : null}
     <ScrollView contentContainerStyle={styles.list}>
       {refreshing ? <ActivityIndicator color={colors.accent2} /> : null}
       {!refreshing && !busy && items.length === 0 ? <Text style={styles.empty}>{mode === 'shared' ? '공유함' : '작업 폴더'}이 비어 있습니다.{`\n`}위 버튼으로 모바일 파일을 올릴 수 있습니다.</Text> : null}
@@ -425,9 +425,10 @@ const styles = StyleSheet.create({
   sourceBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: 99, paddingHorizontal: 11, paddingVertical: 7, backgroundColor: colors.inputBg },
   sourceBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,.22)' },
   sourceText: { color: colors.text, fontSize: 11, fontWeight: '700' },
-  toolbar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingBottom: 10 },
+  toolbar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingBottom: 10 },
+  pathWrap: { flex: 1, minWidth: 140 },
   path: { color: colors.dim, fontSize: 12, fontWeight: '700' },
-  smallBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: colors.inputBg },
+  smallBtn: { minHeight: 42, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: colors.inputBg },
   smallText: { color: colors.text, fontSize: 11.5, fontWeight: '700' },
   transferStatus: { flexDirection: 'row', alignItems: 'center', gap: 9, marginHorizontal: 14, marginBottom: 8, paddingHorizontal: 11, paddingVertical: 8, backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm },
   transferStatusText: { flex: 1, color: colors.dim, fontSize: 11.5, fontWeight: '700' },

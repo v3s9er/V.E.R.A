@@ -10,6 +10,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
@@ -61,6 +62,8 @@ function describe(input: unknown): string {
 
 export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBusyChange }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean; onExecutionBusyChange?: (busy: boolean) => void }) {
   const insets = useSafeAreaInsets();
+  const { width, fontScale } = useWindowDimensions();
+  const compact = width < 390 || fontScale > 1.25;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<UiMsg[]>([]);
@@ -97,6 +100,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const cancelTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const stickToBottom = useRef(true);
   const [unseenMessages, setUnseenMessages] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     // Keep async upload state usable when StrictMode performs its development
@@ -225,13 +230,33 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     }
   }, [client]);
 
+  const refreshInitialData = useCallback(async (): Promise<void> => {
+    setInitialLoading(true);
+    setLoadError('');
+    try {
+      await Promise.all([
+        refreshConversations(),
+        refreshProviders(),
+        client.call('routing.presets.list', {}).then((value) => setRoutingPresets(value as RoutingPreset[])).catch(() => setRoutingPresets([])),
+        client.call('workspaces.list', {}).then((value) => setWorkspaces(value as WorkspaceInfo[])).catch(() => setWorkspaces([])),
+        refreshRuns(),
+      ]);
+    } catch (error) {
+      if (mountedRef.current) setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (mountedRef.current) setInitialLoading(false);
+    }
+  }, [client, refreshConversations, refreshProviders, refreshRuns]);
+
   useEffect(() => {
-    void refreshConversations();
-    void refreshProviders();
-    void client.call('routing.presets.list', {}).then((value) => setRoutingPresets(value as RoutingPreset[])).catch(() => setRoutingPresets([]));
-    void client.call('workspaces.list', {}).then((value) => setWorkspaces(value as WorkspaceInfo[])).catch(() => setWorkspaces([]));
-    void refreshRuns();
-  }, [client, pc, refreshConversations, refreshProviders, refreshRuns]);
+    void refreshInitialData();
+  }, [pc.id, refreshInitialData]);
+
+  useEffect(() => {
+    if (!keyboardVisible || !stickToBottom.current) return;
+    const timer = setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), Platform.OS === 'ios' ? 280 : 80);
+    return () => clearTimeout(timer);
+  }, [keyboardVisible]);
 
   useEffect(() => {
     const scrollIfFollowing = (): void => {
@@ -695,20 +720,20 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   );
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
-      <View style={styles.modeBar}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
+      {!keyboardVisible && <View style={styles.modeBar}>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
-      </View>
-      <ScrollView horizontal style={styles.conversationBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationBarContent} keyboardShouldPersistTaps="handled">
+      </View>}
+      {!keyboardVisible && <ScrollView horizontal style={styles.conversationBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationBarContent} keyboardShouldPersistTaps="handled">
           <TouchableOpacity style={[styles.newChat, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.newChatText}>＋</Text></TouchableOpacity>
           {conversations.map((c) => (
             <TouchableOpacity key={c.id} style={[styles.conversationChip, conversation?.id === c.id && styles.conversationChipOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void loadConversation(c.id)} onLongPress={() => void togglePin(c)}>
               <Text style={styles.conversationChipText} numberOfLines={1}>{c.pinned ? '📌 ' : ''}{c.title}</Text>
             </TouchableOpacity>
           ))}
-      </ScrollView>
-      <ScrollView horizontal style={styles.controlBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlBarContent} keyboardShouldPersistTaps="handled">
+      </ScrollView>}
+      {!keyboardVisible && <ScrollView horizontal style={styles.controlBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlBarContent} keyboardShouldPersistTaps="handled">
         <TouchableOpacity style={[styles.effortBtn, !conversation?.routingPresetId && conversation?.providerId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
           <Text style={styles.effortText} numberOfLines={1}>
             {conversation?.providerId
@@ -721,7 +746,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowAccess(true)} disabled={configurationLocked}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
-      </ScrollView>
+      </ScrollView>}
+      {loadError ? <View style={styles.loadError} accessibilityLiveRegion="assertive"><View style={styles.loadErrorCopy}><Text style={styles.loadErrorTitle}>대화 정보를 불러오지 못했습니다</Text><Text style={styles.loadErrorText} numberOfLines={2}>{loadError}</Text></View><TouchableOpacity style={styles.loadRetryBtn} onPress={() => void refreshInitialData()} accessibilityRole="button" accessibilityLabel="대화 다시 불러오기"><Text style={styles.loadRetryText}>재시도</Text></TouchableOpacity></View> : null}
       <FlatList
         ref={listRef}
         style={styles.scroll}
@@ -732,15 +758,17 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         maxToRenderPerBatch={12}
         windowSize={9}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
         onScroll={onMessageScroll}
         scrollEventThrottle={80}
+        onLayout={() => { if (stickToBottom.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false })); }}
         onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false }); }}
         ListEmptyComponent={(
           <View style={styles.empty}>
-            <Text style={styles.emptyIcon}>✦</Text>
-            <Text style={styles.emptyTitle}>무엇을 도와드릴까요?</Text>
-            <Text style={styles.emptyText}>모바일 요청을 PC 에이전트에 위임합니다.{`\n`}파일 찾기·앱 실행·작업 수행까지.</Text>
+            {initialLoading ? <ActivityIndicator color={colors.accent2} accessibilityLabel="대화 불러오는 중" /> : <Text style={styles.emptyIcon}>✦</Text>}
+            <Text style={styles.emptyTitle}>{initialLoading ? '대화를 불러오는 중…' : '무엇을 도와드릴까요?'}</Text>
+            {!initialLoading && <Text style={styles.emptyText}>모바일 요청을 PC 에이전트에 위임합니다.{`\n`}파일 찾기·앱 실행·작업 수행까지.</Text>}
           </View>
         )}
         renderItem={({ item: m }) => (
@@ -767,9 +795,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
-      <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom) }]}>
+      <View style={[styles.inputBar, compact && styles.inputBarCompact, { paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom) }]}>
         <View style={styles.inputRow}>
-          <TouchableOpacity accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
           <TextInput
             style={styles.input}
             value={input}
@@ -777,16 +805,17 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             placeholder={busy ? '실행 중인 작업에 추가 명령…' : 'PC에 시킬 일을 입력하세요…'}
             placeholderTextColor={colors.faint}
             multiline
+            textAlignVertical="top"
+            accessibilityLabel="PC 에이전트에게 보낼 명령"
           />
-          {busy ? (
-            <View style={styles.busyActions}><TouchableOpacity style={styles.sendBtn} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>끼워넣기</Text></TouchableOpacity><TouchableOpacity style={[styles.sendBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '중지'}</Text></TouchableOpacity></View>
-          ) : (
-            <TouchableOpacity style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
+          {!busy && (
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
               <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
             </TouchableOpacity>
           )}
         </View>
-        <View style={styles.reasoningBar}>
+        {busy && <View style={styles.busyActions}><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>추가 명령 끼워넣기</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text></TouchableOpacity></View>}
+        {!keyboardVisible && <View style={[styles.reasoningBar, compact && styles.reasoningBarCompact]}>
           <Text style={[styles.reasoningLabel, (reasoningSaveFailed || configurationSaveFailed) && styles.reasoningLabelError]}>{configurationSaveFailed ? '설정 · 저장 실패' : savingReasoning ? '추론 · 저장 중' : savingConfiguration ? '설정 저장 중' : busy ? '추론 · 실행 중 잠김' : '추론'}</Text>
           <ScrollView horizontal style={styles.reasoningScroll} contentContainerStyle={styles.reasoningChoices} showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always">
             {reasoningEfforts.map((effort) => {
@@ -802,12 +831,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               ><Text style={[styles.reasoningChipText, selected && styles.reasoningChipTextOn]}>{effort}</Text></TouchableOpacity>;
             })}
           </ScrollView>
-        </View>
+        </View>}
       </View>
 
-      <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)}>
-        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
-          <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+      <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)} accessibilityViewIsModal>
+        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
+          <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
             <View style={styles.modal}>
               <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
               <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
@@ -819,9 +848,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={showScenarios} transparent animationType="fade" onRequestClose={() => setShowScenarios(false)}>
-        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
-          <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+      <Modal visible={showScenarios} transparent animationType="fade" onRequestClose={() => setShowScenarios(false)} accessibilityViewIsModal>
+        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
+          <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
             <View style={styles.modal}>
               <Text style={styles.modalTitle}>모바일 실행 방식</Text>
               <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
@@ -841,23 +870,40 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={showWorkspaces} transparent animationType="fade" onRequestClose={() => setShowWorkspaces(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>작업 폴더</Text><Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text><ScrollView style={styles.modelList}><TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}</ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
+      <Modal visible={showWorkspaces} transparent animationType="fade" onRequestClose={() => setShowWorkspaces(false)} accessibilityViewIsModal>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>작업 폴더</Text>
+            <Text style={styles.modalText}>Codex·Claude 네이티브 에이전트와 첨부 파일이 이 폴더 안에서 작업합니다.</Text>
+            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+              <TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace()}><Text style={styles.modelProvider}>선택 안 함</Text></TouchableOpacity>
+              {workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectWorkspace(workspace.id)}><Text style={styles.modelProvider}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</Text><Text style={styles.faintChoice}>{workspace.path}</Text></TouchableOpacity>)}
+            </ScrollView>
+            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowWorkspaces(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
-      <Modal visible={showAccess} transparent animationType="fade" onRequestClose={() => setShowAccess(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}><View style={styles.modal}><Text style={styles.modalTitle}>이 대화의 액세스</Text><Text style={styles.modalText}>Codex처럼 대화마다 저장됩니다. PC에 등록된 이 기기의 권한 상한은 넘을 수 없습니다.</Text><ScrollView style={styles.modelList}>
-          {([
-            ['read-only', '읽기 전용', '파일과 상태만 읽고 변경은 모두 차단'],
-            ['ask', '변경 전 확인', '파일·명령 변경 직전에 모바일에서 승인'],
-            ['workspace', '작업 폴더 자동', '선택한 작업 폴더 안 변경만 자동 실행'],
-            ['full', '전체 허용', '이 기기 권한 상한 안에서 확인 없이 실행'],
-          ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectAccess(value)}><Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
-        </ScrollView><TouchableOpacity style={styles.bigBtn} onPress={() => setShowAccess(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity></View></View>
+      <Modal visible={showAccess} transparent animationType="fade" onRequestClose={() => setShowAccess(false)} accessibilityViewIsModal>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>이 대화의 액세스</Text>
+            <Text style={styles.modalText}>Codex처럼 대화마다 저장됩니다. PC에 등록된 이 기기의 권한 상한은 넘을 수 없습니다.</Text>
+            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+              {([
+                ['read-only', '읽기 전용', '파일과 상태만 읽고 변경은 모두 차단'],
+                ['ask', '변경 전 확인', '파일·명령 변경 직전에 모바일에서 승인'],
+                ['workspace', '작업 폴더 자동', '선택한 작업 폴더 안 변경만 자동 실행'],
+                ['full', '전체 허용', '이 기기 권한 상한 안에서 확인 없이 실행'],
+              ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectAccess(value)}><Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
+            </ScrollView>
+            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowAccess(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
-      <Modal visible={confirm !== null} transparent animationType="fade" onRequestClose={() => void respondConfirm(false)}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
+      <Modal visible={confirm !== null} transparent animationType="fade" onRequestClose={() => void respondConfirm(false)} accessibilityViewIsModal>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>작업 승인 필요</Text>
             <Text style={styles.modalText}>{confirm?.conversationId === activeId.current ? `현재 대화 ‘${confirm?.conversationTitle}’의 요청입니다.` : `백그라운드 대화 ‘${confirm?.conversationTitle ?? '알 수 없는 대화'}’의 요청입니다. 현재 보고 있는 대화와 다릅니다.`}</Text>
@@ -884,7 +930,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
 const styles = StyleSheet.create({
   modeBar: { flexDirection: 'row', gap: 6, paddingHorizontal: 10, paddingTop: 8 },
-  modeBtn: { flex: 1, alignItems: 'center', paddingVertical: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg },
+  modeBtn: { flex: 1, minHeight: 44, justifyContent: 'center', alignItems: 'center', paddingVertical: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg },
   modeBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.2)' },
   modeText: { color: colors.faint, fontSize: 11.5, fontWeight: '700' },
   modeTextOn: { color: colors.text },
@@ -892,12 +938,18 @@ const styles = StyleSheet.create({
   conversationBarContent: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 8 },
   controlBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: 'rgba(124,92,255,.04)' },
   controlBarContent: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7 },
-  newChat: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  loadError: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: 'rgba(248,113,113,.3)', backgroundColor: 'rgba(248,113,113,.09)' },
+  loadErrorCopy: { flex: 1, minWidth: 0 },
+  loadErrorTitle: { color: colors.err, fontSize: 12.5, fontWeight: '800' },
+  loadErrorText: { color: colors.dim, fontSize: 10.5, lineHeight: 15, marginTop: 2 },
+  loadRetryBtn: { minHeight: 40, justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(248,113,113,.4)', borderRadius: radius.sm, paddingHorizontal: 12 },
+  loadRetryText: { color: colors.err, fontSize: 12, fontWeight: '800' },
+  newChat: { width: 40, height: 40, borderRadius: 10, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   newChatText: { color: '#fff', fontWeight: '800', fontSize: 18 },
-  conversationChip: { maxWidth: 130, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: colors.inputBg },
+  conversationChip: { minHeight: 40, justifyContent: 'center', maxWidth: 150, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: colors.inputBg },
   conversationChipOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.22)' },
   conversationChipText: { color: colors.dim, fontSize: 11.5, fontWeight: '600' },
-  effortBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg, paddingHorizontal: 9, paddingVertical: 8, maxWidth: 240 },
+  effortBtn: { minHeight: 40, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg, paddingHorizontal: 9, paddingVertical: 8, maxWidth: 240 },
   effortBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.16)' },
   effortText: { color: colors.dim, fontSize: 10.5, fontWeight: '700' },
   scroll: { flex: 1 },
@@ -942,8 +994,9 @@ const styles = StyleSheet.create({
   runStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 7, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: 'rgba(34,211,238,.05)' },
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
   inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
+  inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
-  toolBtn: { width: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
+  toolBtn: { width: 44, minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
   toolBtnCancel: { borderColor: 'rgba(248,113,113,.5)', backgroundColor: 'rgba(248,113,113,.16)' },
   toolBtnText: { color: colors.text, fontSize: 17, fontWeight: '800' },
   input: {
@@ -956,13 +1009,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 14.5,
+    minHeight: 44,
     maxHeight: 110,
   },
-  sendBtn: { backgroundColor: colors.accent, borderRadius: radius.md, paddingHorizontal: 16, justifyContent: 'center' },
+  sendBtn: { minHeight: 44, backgroundColor: colors.accent, borderRadius: radius.md, paddingHorizontal: 16, justifyContent: 'center', alignItems: 'center' },
   cancelBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },
-  busyActions: { flexDirection: 'row', gap: 5 },
+  busyActions: { flexDirection: 'row', gap: 7 },
+  busyActionBtn: { flex: 1 },
   sendText: { color: '#fff', fontWeight: '700' },
   reasoningBar: { minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  reasoningBarCompact: { alignItems: 'flex-start' },
   reasoningLabel: { color: colors.faint, fontSize: 10.5, fontWeight: '800', flexShrink: 0 },
   reasoningLabelError: { color: colors.err },
   reasoningScroll: { flex: 1 },
@@ -973,11 +1029,11 @@ const styles = StyleSheet.create({
   reasoningChipText: { color: colors.dim, fontSize: 10.5, fontWeight: '700' },
   reasoningChipTextOn: { color: colors.text },
   modalKeyboardAvoiding: { flex: 1 },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', padding: 24 },
-  modal: { width: '100%', maxHeight: '92%', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 22, gap: 12 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', paddingHorizontal: 12 },
+  modal: { width: '100%', maxWidth: 560, maxHeight: '92%', alignSelf: 'center', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 18, gap: 12 },
   modalTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
   modalText: { color: colors.dim, fontSize: 14 },
-  modelList: { maxHeight: 420, flexShrink: 1 },
+  modelList: { maxHeight: 420, flexShrink: 1, minHeight: 0 },
   modelChoice: { backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, marginBottom: 8 },
   modelChoiceOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.16)' },
   modelProvider: { color: colors.text, fontWeight: '700', fontSize: 13 },
@@ -995,7 +1051,7 @@ const styles = StyleSheet.create({
   confirmTool: { color: '#a78bfa', fontWeight: '700', fontSize: 13 },
   confirmSummary: { color: colors.text, fontSize: 13, lineHeight: 19 },
   modalActions: { flexDirection: 'row', gap: 10 },
-  bigBtn: { flex: 1, backgroundColor: colors.accent, borderRadius: radius.md, paddingVertical: 13, alignItems: 'center' },
+  bigBtn: { flex: 1, minHeight: 44, justifyContent: 'center', backgroundColor: colors.accent, borderRadius: radius.md, paddingVertical: 13, alignItems: 'center' },
   denyBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },
   bigBtnText: { color: '#fff', fontWeight: '700' },
 });

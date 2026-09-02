@@ -66,11 +66,26 @@ const secretPatterns = [
   ['Google API key', /\bAIza[0-9A-Za-z_-]{30,}\b/g, false],
   ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, false],
   ['Slack token', /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g, false],
-  ['DPAPI runtime payload', /dpapi:v1\/[A-Za-z0-9+/=]{16,}/g, false],
+  ['DPAPI runtime payload', /dpapi:v1(?::|\/)[A-Za-z0-9+/=]{16,}/g, false],
+  ['Cloudflare Access service secret', /\bcfast_[A-Za-z0-9]{48}\b/g, false],
   ['JWT or Cloudflare Tunnel credential', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, false],
   ['literal high-entropy credential', /["']?(?:secret|adminSecret|pairingSecret|accessClientId|accessClientSecret|clientSecret|tunnelToken|api[_-]?key)["']?\s*[:=]\s*(?:["'][A-Za-z0-9+/_=-]{32,}["']|[A-Za-z0-9+/_=-]{32,})/gi, true],
   ['pairing or one-time code', /(?:(?:current|pairing|one[- ]?time)[\s_-]*(?:pin|code)|(?:현재|일회용|페어링)\s*(?:PIN|핀|코드))\s*[:=]\s*\d{6,12}\b/gi, true],
 ];
+
+// Fail closed if a future regex edit silently disables the two runtime-secret
+// detectors most relevant to remote access. Build canaries dynamically so the
+// audit script itself never contains a value that its repository scan flags.
+for (const [kind, canary] of [
+  ['DPAPI runtime payload', `dpapi:v1:${'A'.repeat(32)}`],
+  ['Cloudflare Access service secret', `cfast_${'A'.repeat(48)}`],
+]) {
+  const entry = secretPatterns.find(([candidate]) => candidate === kind);
+  if (!entry) throw new Error(`public audit detector missing: ${kind}`);
+  const pattern = entry[1];
+  pattern.lastIndex = 0;
+  if (!pattern.test(canary)) throw new Error(`public audit detector self-test failed: ${kind}`);
+}
 
 function inspectText(label, path, text, options = {}) {
   const testFixture = /(?:^|\/)test(?:s)?\//i.test(path);

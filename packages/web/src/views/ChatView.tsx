@@ -130,6 +130,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [initialized, setInitialized] = useState(false);
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(160);
   const scroller = useRef<HTMLDivElement>(null);
+  const composerBar = useRef<HTMLDivElement>(null);
+  const conversationMenuRef = useRef<HTMLDivElement>(null);
+  const conversationMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const stickToBottomRef = useRef(true);
   const uploadRef = useRef<HTMLInputElement>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadAbortReason = useRef<'user' | 'timeout' | null>(null);
@@ -239,6 +243,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setBusy(true);
     setStatus('모델 선택 중…');
     setRoute(null);
+    stickToBottomRef.current = true;
     setMessages((items) => [...items, { id: nextId(), role: 'user', content: text, tools: [], done: true }, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }]);
     try {
       const result = await client.call('chat.start', {
@@ -434,16 +439,77 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     return () => { offList(); offProviders(); offPresets(); offWorkspaces(); offDelta(); offTool(); offStatus(); offDone(); offError(); offConfirm(); offVoice(); offVoiceReady(); offVoiceTimeout(); };
   }, [client, discoverProviderModels, flushDelta, later, showArchived]);
 
-  useEffect(() => { if (messages.length > 0 && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [messages]);
+  useEffect(() => {
+    const scroll = scroller.current;
+    if (!scroll) return;
+    const rememberPosition = (): void => {
+      stickToBottomRef.current = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 96;
+    };
+    // A different conversation owns a different scroll position. Always open it
+    // at the newest message; otherwise the old conversation's scrollTop (often
+    // zero) is mistaken for an intentional "read older messages" position.
+    stickToBottomRef.current = true;
+    scroll.scrollTop = scroll.scrollHeight;
+    const frame = window.requestAnimationFrame(() => {
+      scroll.scrollTop = scroll.scrollHeight;
+      rememberPosition();
+    });
+    scroll.addEventListener('scroll', rememberPosition, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scroll.removeEventListener('scroll', rememberPosition);
+    };
+  }, [selected?.id]);
+
+  useEffect(() => {
+    if (!messages.length || !stickToBottomRef.current || !scroller.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages]);
+
+  useEffect(() => {
+    const composer = composerBar.current;
+    if (!composer || typeof ResizeObserver === 'undefined') return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+      });
+    });
+    observer.observe(composer);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [selected?.id]);
 
   useEffect(() => {
     if (!conversationMenu) return;
     const close = (): void => setConversationMenu(null);
-    const key = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
+    const key = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+      queueMicrotask(() => conversationMenuTriggerRef.current?.focus());
+    };
+    const focusMenu = window.requestAnimationFrame(() => conversationMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus());
     window.addEventListener('pointerdown', close);
     window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
     window.addEventListener('keydown', key);
-    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', key); };
+    return () => {
+      window.cancelAnimationFrame(focusMenu);
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('keydown', key);
+    };
   }, [conversationMenu]);
 
   const createConversation = async (): Promise<void> => {
@@ -726,17 +792,21 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
             onContextMenu={(event) => {
               event.preventDefault();
-              setConversationMenu({ conversation: c, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) });
+              conversationMenuTriggerRef.current = event.currentTarget.querySelector<HTMLButtonElement>('.conversation-more');
+              setConversationMenu({ conversation: c, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 214)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220)) });
             }}
           ><button type="button" className="conversation-item-main" onClick={() => void loadConversation(c.id)}><span className="conversation-title">{c.pinned && <span className="conversation-pin">📌</span>}{c.title}</span><span className="conversation-meta">{new Date(c.updatedAt).toLocaleDateString()} · {c.messageCount}개 메시지</span></button><button
             type="button"
             className="conversation-more"
             aria-label={`${c.title} 메뉴`}
+            aria-haspopup="menu"
+            aria-expanded={conversationMenu?.conversation.id === c.id}
             title="대화 메뉴"
             onClick={(event) => {
               event.stopPropagation();
+              conversationMenuTriggerRef.current = event.currentTarget;
               const rect = event.currentTarget.getBoundingClientRect();
-              setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.min(rect.bottom + 7, window.innerHeight - 220) });
+              setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
             }}
           >•••</button></div>)}
           {conversations.length === 0 && <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : '대화가 없습니다.'}</div>}
@@ -835,11 +905,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
         </div>
 
-        <div className="chat-inputbar">
+        <div ref={composerBar} className="chat-inputbar">
           {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
-          <textarea className="chat-input" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
             <div className="composer-options">
               <label className="composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '이 대화에 사용할 추론 강도'}>
@@ -860,13 +930,18 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
       </section>
 
-      {conversationMenu && <div className="conversation-context-menu" role="menu" aria-label={`${conversationMenu.conversation.title} 대화 메뉴`} style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+      {conversationMenu && <div ref={conversationMenuRef} className="conversation-context-menu" role="menu" aria-label={`${conversationMenu.conversation.title} 대화 메뉴`} style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
+        const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === 'ArrowDown' ? (current + 1) % items.length : event.key === 'ArrowUp' ? (current - 1 + items.length) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : -1;
+        if (next >= 0 && items[next]) { event.preventDefault(); items[next].focus(); }
+      }}>
         <div className="context-menu-title">{conversationMenu.conversation.title}</div>
-        <button onClick={() => void pinConversation(conversationMenu.conversation)}><span>📌</span> {conversationMenu.conversation.pinned ? '고정 해제' : '대화 고정'}</button>
-        <button onClick={() => openRename(conversationMenu.conversation)}><span>✎</span> 이름 바꾸기</button>
-        <button onClick={() => void archiveFromMenu(conversationMenu.conversation)}><span>▣</span> {conversationMenu.conversation.status === 'archived' ? '진행 중으로 복원' : '보관함으로 이동'}</button>
+        <button type="button" role="menuitem" onClick={() => void pinConversation(conversationMenu.conversation)}><span>📌</span> {conversationMenu.conversation.pinned ? '고정 해제' : '대화 고정'}</button>
+        <button type="button" role="menuitem" onClick={() => openRename(conversationMenu.conversation)}><span>✎</span> 이름 바꾸기</button>
+        <button type="button" role="menuitem" onClick={() => void archiveFromMenu(conversationMenu.conversation)}><span>▣</span> {conversationMenu.conversation.status === 'archived' ? '진행 중으로 복원' : '보관함으로 이동'}</button>
         <div className="context-menu-separator" />
-        <button className="danger" onClick={() => void deleteFromMenu(conversationMenu.conversation)}><span>⌫</span> 삭제</button>
+        <button type="button" role="menuitem" className="danger" onClick={() => void deleteFromMenu(conversationMenu.conversation)}><span>⌫</span> 삭제</button>
       </div>}
 
       <Modal open={renameTarget !== null} onClose={() => setRenameTarget(null)} title="대화 이름 바꾸기">{renameTarget && <div className="rename-dialog"><Input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveRename(); }} /><div className="modal-actions"><Button variant="ghost" onClick={() => setRenameTarget(null)}>취소</Button><Button variant="accent" disabled={!renameDraft.trim()} onClick={() => void saveRename()}>이름 저장</Button></div></div>}</Modal>

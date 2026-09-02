@@ -7,6 +7,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
+import { createHash, randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -19,10 +20,10 @@ const here = dirnameOf(import.meta);
 const dist = resolve(here, '..', 'dist');
 
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
-const { CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } = await import(pathToFileURL(join(dist, 'access-probe.js')).href);
+const { CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } = await import(pathToFileURL(join(dist, 'access-probe.js')).href);
 const { browserOriginAllowed, createByteLimitStream, isSecurePlainPeerTransport, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
 const { createRemoteLinkPlugin, localTunnelCredentialsFromToken, localTunnelIngressConfig, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
-const { SecretVault } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
+const { SecretVault, unprotectRemoteLinkWithLegacyProviderFallback } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { screenSize } = await import(pathToFileURL(join(dist, 'computer', 'screen.js')).href);
@@ -122,6 +123,29 @@ if (process.platform === 'win32') {
   const secondCiphertext = vault.protect('smoke-secret-no-plaintext-cache');
   check('DPAPI vault does not retain and reuse a plaintext-keyed process cache', firstCiphertext !== secondCiphertext);
   check('DPAPI vault still round-trips without a plaintext cache', vault.unprotect(firstCiphertext) === 'smoke-secret-no-plaintext-cache');
+  const remoteLinkVault = new SecretVault('remote-link');
+  const legacyProviderCiphertext = vault.protect('legacy-remote-link-secret');
+  const purposeOrder = [];
+  const migratedSecret = unprotectRemoteLinkWithLegacyProviderFallback(
+    legacyProviderCiphertext,
+    (value) => { purposeOrder.push('remote-link'); return remoteLinkVault.unprotect(value); },
+    (value) => { purposeOrder.push('provider'); return vault.unprotect(value); },
+  );
+  check('remote-link DPAPI migration tries the isolated purpose before the legacy provider purpose',
+    purposeOrder.join(',') === 'remote-link,provider'
+    && migratedSecret.migratedFromLegacyProvider === true
+    && migratedSecret.plaintext === 'legacy-remote-link-secret');
+  let corruptLegacyCiphertextRejected = false;
+  try {
+    unprotectRemoteLinkWithLegacyProviderFallback(
+      'dpapi:v1:not-valid-ciphertext',
+      (value) => remoteLinkVault.unprotect(value),
+      (value) => vault.unprotect(value),
+    );
+  } catch (error) {
+    corruptLegacyCiphertextRejected = !String(error).includes('not-valid-ciphertext');
+  }
+  check('damaged ciphertext fails closed without echoing protected input', corruptLegacyCiphertextRejected);
 }
 const trustFakeCloudflared = (candidate) => ({ trusted: true, executable: candidate, diagnostic: 'test Authenticode trusted' });
 class FakeTunnelProcess extends EventEmitter {
@@ -189,6 +213,18 @@ const namedToken = Buffer.from(JSON.stringify({
 })).toString('base64url');
 const accessClientId = 'mr-robot-test-client-0123456789.access';
 const accessClientSecret = 'mr-robot-test-secret-0123456789abcdef';
+const fakeAccessAssertion = [
+  Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'),
+  Buffer.from(JSON.stringify({
+    type: 'app',
+    aud: ['0123456789abcdef0123456789abcdef'],
+    exp: Math.floor(Date.now() / 1000) + 600,
+    iss: 'https://test-team.cloudflareaccess.com',
+    common_name: accessClientId,
+    sub: '',
+  })).toString('base64url'),
+  's'.repeat(64),
+].join('.');
 const decodedNamed = localTunnelCredentialsFromToken(namedToken);
 check('connector token becomes local credentials without changing tunnel identity',
   decodedNamed.tunnelId === namedTunnelId && JSON.parse(decodedNamed.contents).TunnelID === namedTunnelId);
@@ -277,12 +313,24 @@ let verifyRequestHeaders = {};
 let anonymousProbeCount = 0;
 let exposeAgentWithoutAccess = false;
 let exposeTicketWithoutAccess = false;
+let namedBootstrapEvent;
+let legacyPurposeDecrypts = 0;
+let remotePurposeDecrypts = 0;
 const remoteRuntime = mkdtempSync(join(tmpdir(), 'mr-robot-remote-runtime-'));
 const namedPlugin = createRemoteLinkPlugin({
   findExecutable: () => 'fake-cloudflared',
   verifyExecutable: trustFakeCloudflared,
   protectSecret: (value) => `protected:${value}`,
-  unprotectSecret: (value) => value.replace(/^protected:/, ''),
+  unprotectSecret: (value) => {
+    remotePurposeDecrypts += 1;
+    if (!value.startsWith('protected:')) throw new Error('wrong current purpose');
+    return value.slice('protected:'.length);
+  },
+  unprotectLegacySecret: (value) => {
+    legacyPurposeDecrypts += 1;
+    if (!value.startsWith('legacy-provider:')) throw new Error('wrong legacy purpose');
+    return value.slice('legacy-provider:'.length);
+  },
   runtimeDirectory: remoteRuntime,
   spawnProcess: (_executable, args, options) => {
     spawnedArgs = [...args];
@@ -294,6 +342,22 @@ const namedPlugin = createRemoteLinkPlugin({
   fetchUrl: async (url, options) => {
     const headers = options?.headers ?? {};
     const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
+    const hasBootstrapToken = headers['cf-access-token'] === fakeAccessAssertion;
+    if (url.pathname === '/api/pair' && JSON.parse(String(options?.body ?? '{}')).probe === CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE) {
+      if (!hasAccess && !hasBootstrapToken) return new Response('Access denied', { status: 403 });
+      const request = JSON.parse(String(options?.body ?? '{}'));
+      return new Response(JSON.stringify({
+        app: 'mr-robot',
+        probe: CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
+        challenge: request.challenge,
+      }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': `__Host-MrRobot-Access-Bootstrap=${fakeAccessAssertion}; Max-Age=60; Path=/; Secure; HttpOnly; SameSite=Strict`,
+        },
+      });
+    }
     if (url.pathname === '/api/pair') {
       if (!hasAccess) {
         anonymousProbeCount += 1;
@@ -324,6 +388,7 @@ const namedContext = {
   ...fakePluginContext,
   storage: { get: (key) => namedStorage.get(key), set: (key, value) => namedStorage.set(key, value) },
   registerCommand: (name, handler) => namedCommands.set(name, handler),
+  emit: (event, data) => { if (event === 'remote-link.bootstrap.created') namedBootstrapEvent = data; },
 };
 namedPlugin.activate(namedContext);
 const savedNamed = await namedCommands.get('remote-link.config.set')({
@@ -336,6 +401,19 @@ check('Access service credential is protected at rest and omitted from config re
   persistedNamed.accessCredentialsProtected === `protected:${JSON.stringify({ clientId: accessClientId, clientSecret: accessClientSecret })}`
   && !JSON.stringify(savedNamed).includes(accessClientSecret)
   && savedNamed.hasAccessCredentials === true);
+check('new remote-link credentials are explicitly marked with the isolated purpose',
+  persistedNamed.tunnelTokenPurpose === 'remote-link-v1'
+  && persistedNamed.accessCredentialsPurpose === 'remote-link-v1');
+// Reproduce a v0.3.9 config: provider-purpose ciphertexts had no purpose
+// marker. Access is consumed first and Tunnel later, so each field must carry
+// its own one-time migration state.
+namedStorage.set('config', {
+  ...persistedNamed,
+  tunnelTokenProtected: `legacy-provider:${namedToken}`,
+  accessCredentialsProtected: `legacy-provider:${JSON.stringify({ clientId: accessClientId, clientSecret: accessClientSecret })}`,
+  tunnelTokenPurpose: undefined,
+  accessCredentialsPurpose: undefined,
+});
 const exactPeerHeaders = namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/files/download'));
 check('agent-side peer requests use the local Access credential only for the exact named-Tunnel host',
   exactPeerHeaders['CF-Access-Client-Id'] === accessClientId
@@ -344,6 +422,12 @@ check('agent-side peer requests use the local Access credential only for the exa
   && Object.keys(namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com.evil/api/ping'))).length === 0
   && Object.keys(namedPlugin.peerRequestHeaders(new URL('https://other.example.com/api/ping'))).length === 0
   && Object.keys(namedPlugin.peerRequestHeaders(new URL('http://pc1.example.com/api/ping'))).length === 0);
+const accessMigratedConfig = namedStorage.get('config');
+check('legacy Access ciphertext is immediately re-encrypted and marked without exposing plaintext',
+  accessMigratedConfig.accessCredentialsProtected === `protected:${JSON.stringify({ clientId: accessClientId, clientSecret: accessClientSecret })}`
+  && accessMigratedConfig.accessCredentialsPurpose === 'remote-link-v1'
+  && accessMigratedConfig.tunnelTokenProtected === `legacy-provider:${namedToken}`
+  && accessMigratedConfig.tunnelTokenPurpose === undefined);
 const apexNamed = await namedCommands.get('remote-link.config.set')({
   provider: 'cloudflare-named', localUrl: 'http://127.0.0.1:8787', hostname: 'example.com',
   peerHostnames: ['pc2.example.com'], autoStart: false,
@@ -385,13 +469,50 @@ try {
 }
 check('named tunnel refuses Access QR before a running protected link is verified', preStartPairingRejected);
 const namedStart = namedCommands.get('remote-link.start')({});
+const namedStartFollower = namedCommands.get('remote-link.start')({});
 namedChild.stderr.write(`INF Registered tunnel connection connIndex=0 token=${namedToken}`);
-const namedStatus = await namedStart;
+const [namedStatus, namedFollowerStatus] = await Promise.all([namedStart, namedStartFollower]);
+check('concurrent named start callers share one launch and one completed Access verification',
+  namedFollowerStatus.publicUrl === namedStatus.publicUrl
+  && namedFollowerStatus.accessProtected === true
+  && namedFollowerStatus.reachable === true);
 check('named tunnel uses local in-memory credentials instead of a remotely-managed token',
   JSON.parse(spawnedCredentials).TunnelID === namedTunnelId
   && !spawnedArgs.join(' ').includes(namedToken)
   && !spawnedArgs.includes('--token')
   && spawnedArgs.includes(namedTunnelId));
+const fullyMigratedConfig = namedStorage.get('config');
+check('legacy Tunnel ciphertext migrates independently before process launch and fallback is one-time',
+  fullyMigratedConfig.tunnelTokenProtected === `protected:${namedToken}`
+  && fullyMigratedConfig.tunnelTokenPurpose === 'remote-link-v1'
+  && fullyMigratedConfig.accessCredentialsPurpose === 'remote-link-v1'
+  && legacyPurposeDecrypts === 2
+  && remotePurposeDecrypts >= 2);
+const legacyDecryptsAfterMigration = legacyPurposeDecrypts;
+const damagedMarkedCiphertext = 'damaged-marked-access-ciphertext';
+namedStorage.set('config', { ...fullyMigratedConfig, accessCredentialsProtected: damagedMarkedCiphertext });
+let damagedMarkedRejected = false;
+try {
+  namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/ping'));
+} catch (error) {
+  damagedMarkedRejected = !String(error).includes(damagedMarkedCiphertext);
+}
+check('a marked remote-link ciphertext never reopens legacy fallback and fails without plaintext logging',
+  damagedMarkedRejected && legacyPurposeDecrypts === legacyDecryptsAfterMigration);
+namedStorage.set('config', {
+  ...fullyMigratedConfig,
+  accessCredentialsProtected: `legacy-provider:${JSON.stringify({ clientId: accessClientId, clientSecret: accessClientSecret })}`,
+  accessCredentialsPurpose: 'unknown-purpose',
+});
+let unknownPurposeRejected = false;
+try {
+  namedPlugin.peerRequestHeaders(new URL('https://pc1.example.com/api/ping'));
+} catch {
+  unknownPurposeRejected = true;
+}
+check('an unknown purpose marker is rejected without trying provider fallback',
+  unknownPurposeRejected && legacyPurposeDecrypts === legacyDecryptsAfterMigration);
+namedStorage.set('config', fullyMigratedConfig);
 check('named tunnel process is locked to one loopback Agent route plus catch-all 404',
   spawnedConfig.includes('hostname: "pc1.example.com"')
   && spawnedConfig.includes('service: "http://127.0.0.1:8787"')
@@ -402,11 +523,15 @@ const protectedPairing = JSON.parse(await namedCommands.get('remote-link.pairing
   host: 'https://pc1.example.com', pin: '123456789012', expiresAt: Date.now() + 60_000,
 }));
 check('protected pairing payload is one-use and never exports the long-lived Access credential',
-  protectedPairing.version === 3
-  && protectedPairing.requiresCloudflareAccess === true
+  protectedPairing.version === 5
   && protectedPairing.expiresAt > Date.now()
+  && protectedPairing.expiresAt <= Date.now() + 5 * 60_000
+  && protectedPairing.cloudflareBootstrap?.type === 'cf-authorization'
+  && protectedPairing.cloudflareBootstrap?.token === fakeAccessAssertion
   && !Object.hasOwn(protectedPairing, 'cloudflareAccess')
-  && !JSON.stringify(protectedPairing).includes(accessClientSecret));
+  && !JSON.stringify(protectedPairing).includes(accessClientSecret)
+  && namedBootstrapEvent?.origin === 'https://pc1.example.com'
+  && !JSON.stringify(namedBootstrapEvent).includes(fakeAccessAssertion));
 const verifiedNamed = await namedCommands.get('remote-link.verify')({});
 check('named tunnel verifies the public endpoint before pairing', verifiedNamed.ok === true && verifiedNamed.url === 'https://pc1.example.com');
 check('named tunnel verification crosses Access with the protected service credential',
@@ -433,6 +558,7 @@ await namedStop;
 check('ephemeral local tunnel config is removed when connector stops', !existsSync(spawnedConfigPath));
 const clearedNamed = await namedCommands.get('remote-link.config.set')({ ...savedNamed, clearTunnelToken: true });
 check('saved tunnel credential can be explicitly cleared', clearedNamed.hasTunnelToken === false && !namedStorage.get('config').tunnelTokenProtected);
+check('saving corrected remote settings clears the stopped endpoint previous failure', namedCommands.get('remote-link.status')({}).lastError === undefined);
 const clearedAccess = await namedCommands.get('remote-link.config.set')({ ...clearedNamed, clearAccessCredentials: true });
 check('saved Access credential can be explicitly cleared', clearedAccess.hasAccessCredentials === false
   && !namedStorage.get('config').accessCredentialsProtected
@@ -536,6 +662,9 @@ await transientCommands.get('remote-link.config.set')({
 });
 const savedBeforeTransientQuick = JSON.stringify(transientStorage.get('config'));
 const transientQuickStart = transientCommands.get('remote-link.quick.start')({ localUrl: 'http://127.0.0.1:8787' });
+const namedDuringQuick = await Promise.resolve(transientCommands.get('remote-link.start')({})).catch((error) => error);
+check('a named Access-protected start never adopts an in-flight Quick Tunnel result',
+  namedDuringQuick instanceof Error && /다른 원격 연결 시작 작업/.test(namedDuringQuick.message));
 transientQuickChild.stderr.write('INF route https://temporary-safe.trycloudflare.com ready');
 const transientQuickStatus = await transientQuickStart;
 check('transient Quick Link preserves the saved named tunnel credential and auto-start configuration',
@@ -736,6 +865,53 @@ check('Access pairing probes are exact, side-effect-free invalid requests outsid
   pairProbeResponses.every(({ status, body }) => status === 400
     && body.app === 'mr-robot'
     && body.error === CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR));
+
+const reflectionHandoff = server.createRemoteHandoff(10);
+const reflectionChallenge = randomBytes(32).toString('base64url');
+const sha256Hex = (value) => createHash('sha256').update(value).digest('hex');
+server.bus.emit('remote-link.bootstrap.challenge', {
+  pinHash: sha256Hex(reflectionHandoff.pin),
+  challengeHash: sha256Hex(reflectionChallenge),
+  clientIdHash: sha256Hex(accessClientId),
+  origin: 'https://robot.example.com',
+  expiresAt: Date.now() + 30_000,
+});
+const reflectionRequest = () => new Promise((resolve, reject) => {
+  const body = JSON.stringify({ probe: CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE, challenge: reflectionChallenge });
+  const request = httpRequest(`${base}/api/pair`, {
+    method: 'POST',
+    headers: {
+      host: 'robot.example.com',
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(body),
+      'cf-ray': 'abcd1234ef567890-icn',
+      'cf-connecting-ip': '203.0.113.19',
+      'cf-access-jwt-assertion': fakeAccessAssertion,
+    },
+  }, (response) => {
+    const chunks = [];
+    response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    response.on('end', () => resolve({
+      status: response.statusCode ?? 0,
+      cookie: Array.isArray(response.headers['set-cookie']) ? response.headers['set-cookie'].join(', ') : '',
+      text: Buffer.concat(chunks).toString('utf8'),
+    }));
+  });
+  request.on('error', reject);
+  request.end(body);
+});
+const bootstrapProbe = await reflectionRequest();
+const bootstrapProbeText = bootstrapProbe.text;
+const bootstrapCookie = bootstrapProbe.cookie;
+check('Access bootstrap assertion is delivered only in a short HttpOnly host cookie, never reflected in JSON',
+  bootstrapProbe.status === 200
+  && /__Host-MrRobot-Access-Bootstrap=/.test(bootstrapCookie)
+  && /HttpOnly/i.test(bootstrapCookie)
+  && !bootstrapProbeText.includes(fakeAccessAssertion),
+  JSON.stringify({ status: bootstrapProbe.status, cookiePresent: Boolean(bootstrapCookie), httpOnly: /HttpOnly/i.test(bootstrapCookie), reflected: bootstrapProbeText.includes(fakeAccessAssertion) }));
+const replayedBootstrapProbe = await reflectionRequest();
+check('Access bootstrap challenge is consumed atomically and rejects replay', replayedBootstrapProbe.status === 404);
+server.revokeRemoteHandoff('bootstrap reflection regression test complete');
 
 const proxiedShortPin = await fetch(`${base}/api/pair`, {
   method: 'POST',

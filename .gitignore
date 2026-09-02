@@ -88,6 +88,7 @@ release/*
 !release/Mr.Robot-Setup-0.3.7-x64.exe
 !release/Mr.Robot-Setup-0.3.8-x64.exe
 !release/Mr.Robot-Setup-0.3.9-x64.exe
+!release/Mr.Robot-Setup-0.4.0-x64.exe
 !release/SHA256SUMS-0.3.3.txt
 !release/SHA256SUMS-0.3.4.txt
 !release/SHA256SUMS-0.3.5.txt
@@ -95,6 +96,7 @@ release/*
 !release/SHA256SUMS-0.3.7.txt
 !release/SHA256SUMS-0.3.8.txt
 !release/SHA256SUMS-0.3.9.txt
+!release/SHA256SUMS-0.4.0.txt
 !release/mobile/
 release/mobile/*
 !release/mobile/Mr.Robot-Mobile-0.2.1.apk
@@ -107,3 +109,4 @@ release/mobile/*
 !release/mobile/Mr.Robot-Mobile-0.3.7.apk
 !release/mobile/Mr.Robot-Mobile-0.3.8.apk
 !release/mobile/Mr.Robot-Mobile-0.3.9.apk
+!release/mobile/Mr.Robot-Mobile-0.4.0.apk

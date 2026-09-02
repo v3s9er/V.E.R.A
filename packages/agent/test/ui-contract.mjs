@@ -123,7 +123,7 @@ if (!app.includes("client.call('chat.runs'")
   || !chat.includes('onExecutionBusyChange?.(true)')) throw new Error('desktop can abandon a running job while changing execution PCs');
 if (!connectGate.includes("/^(?:\\d{6}|\\d{12})$/.test(pin)") || !connectGate.includes("slice(0, 12)") || !connectGate.includes('외출용 12자리 일회용 코드')) throw new Error('desktop remote-PC registration does not accept the stronger travel handoff code');
 if (!main.includes("openSync(file, 'r+')")) throw new Error('Windows desktop registry fsync can regress to an EPERM-prone read-only handle');
-if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback guards');
+if (!remoteLink.includes('operationGeneration') || !remoteLink.includes('pendingStart') || !remoteLink.includes('pendingStartPromise') || !remoteLink.includes('pendingConfiguredStartPromise') || !remoteLink.includes('ownsCurrentProcess')) throw new Error('remote link lifecycle lacks stale child callback or duplicate-start guards');
 if (!pluginsView.includes('refreshRemotePairing(status)') || !pluginsView.includes('host: status.publicUrl') || !pluginsView.includes("QRCode.toDataURL(payload") || !pluginsView.includes('모바일 원탭 연결')) throw new Error('remote link does not refresh a one-tap HTTPS handoff QR safely');
 const passivePluginQrRefresh = pluginsView.slice(pluginsView.indexOf('const refreshRemotePairing'), pluginsView.indexOf('const revealNamedPairingQr'));
 const passiveSettingsQrRefresh = settings.slice(settings.indexOf('const remoteOrigin = remoteStatus?.running'), settings.indexOf('const applyPreset'));
@@ -136,14 +136,14 @@ if (![pluginsView, settings].every((source) => source.includes('ACCESS_QR_REVEAL
   && source.includes('window.clearTimeout'))
   || !pluginsView.includes('clearRemotePairingQr();')
   || !settings.includes('clearPairingQr();')) throw new Error('named-tunnel QR lacks explicit approval, 60-second expiry, no-secret guidance, or state cleanup');
-if (remoteLink.includes('cloudflareAccess: access') || !remoteLink.includes('requiresCloudflareAccess: true')) throw new Error('named-tunnel QR can regress to exporting the long-lived Cloudflare Access credential');
+if (remoteLink.includes('cloudflareAccess: access') || remoteLink.includes('requiresCloudflareAccess: true') || !remoteLink.includes('cloudflareBootstrap')) throw new Error('named-tunnel QR can regress to exporting the long-lived Cloudflare Access credential');
 if ((serverSource.match(/'remote-link\.changed'/g) ?? []).length < 2 || !pluginsView.includes("client.on('remote-link.changed'") || !settings.includes("client.on('remote-link.changed'")) throw new Error('Quick Link runtime status is not delivered live to both administrator views');
 if (!pluginsView.includes('plugin-live-route') || !css.includes('.plugin-live-route') || !pluginsView.includes('expanded !== p.id')) throw new Error('running Quick Link address disappears when the plugin card is collapsed');
 if (!settings.includes("name: 'remote-link.status'") || !settings.includes("'고정 Tunnel'") || !settings.includes('host: remoteOrigin') || !settings.includes('원격 보안 페어링 QR')) throw new Error('mobile connection settings do not merge the active HTTPS remote link into the visible route and QR');
-if (!settings.includes("pairing?.host !== '127.0.0.1'") || !settings.includes('pairing-remote-required') || !settings.includes('Quick Link를 먼저 시작하세요')) throw new Error('mobile connection settings can render a loopback QR that mobile clients must reject');
+if (!settings.includes("pairing?.host !== '127.0.0.1'") || !settings.includes('pairing-remote-required') || !settings.includes('원격 연결을 먼저 준비하세요')) throw new Error('mobile connection settings can render a loopback QR that mobile clients must reject');
 if (!settings.includes('startPairingQuickLink') || !settings.includes('Quick Link 시작·QR 만들기') || !settings.includes("client.call('pairing.createRemoteHandoff'")) throw new Error('mobile connection settings cannot bootstrap a strong remote handoff QR from the empty state');
 if (![settings, pluginsView].every((source) => source.includes("width: 300, margin: 4, errorCorrectionLevel: 'M'") && source.includes('hosts: [...new Set(['))) throw new Error('remote pairing QR readability or duplicate-host normalization can regress');
-if (!settings.includes("client.call('pairing.createRemoteHandoff'") || !pluginsView.includes("client.call('pairing.createRemoteHandoff'") || !settings.includes('12자리 외출 코드') || !pluginsView.includes('24시간·1회용 외출 코드 생성')) throw new Error('Quick Link administrator views lack the separate 24-hour one-use remote handoff code');
+if (!settings.includes("client.call('pairing.createRemoteHandoff'") || !pluginsView.includes("client.call('pairing.createRemoteHandoff'") || !settings.includes('12자리 외출 코드') || !pluginsView.includes('10분·1회용 외출 코드 생성') || ![settings, pluginsView].every((source) => source.includes('ttlMinutes: 10'))) throw new Error('Quick Link administrator views lack the bounded one-use remote handoff code');
 if (!settings.includes('pin: remoteHandoff.pin') || !pluginsView.includes('pin: handoff.pin') || !settings.includes('일반 6자리 PIN을 받지 않으며') || !pluginsView.includes('일반 6자리 PIN은 공개 주소에서 거부됩니다.')) throw new Error('public remote QR can regress to the ordinary six-digit pairing PIN');
 if (/remoteOrigin[\s\S]{0,240}pin:\s*pairing\.pin/.test(settings) || /status\.publicUrl[\s\S]{0,300}pin:\s*pairing\.pin/.test(pluginsView)) throw new Error('ordinary six-digit pairing PIN is embedded in a public Cloudflare QR');
 if (!settings.includes("client.call('pairing.revokeRemoteHandoff'") || !pluginsView.includes("client.call('pairing.revokeRemoteHandoff'") || !settings.includes('즉시 폐기') || !pluginsView.includes('즉시 폐기')) throw new Error('remote handoff code cannot be explicitly revoked from administrator views');
@@ -152,18 +152,32 @@ if (!pluginsView.includes('공개 연결 승인') || !pluginsView.includes('위�
 if (!pluginsView.includes('if (remoteActionRef.current) return') || !pluginsView.includes("setRemoteStage('사전 상태 확인')")) throw new Error('Quick Link fast connect lacks duplicate-click and staged loading guards');
 if (!pluginsView.includes("client.call('dependencies.install', { id: 'cloudflared' }, 20 * 60_000)") || !pluginsView.includes("client.call('plugins.setEnabled', { id: plugin.id, enabled: true })") || !pluginsView.includes('Quick Link 빠른 연결')) throw new Error('Quick Link does not bootstrap its dependency and plugin after approval');
 if (!pluginsView.includes('remoteStatusRef.current') || pluginsView.includes('refreshRemotePairing, remoteStatus]') || !pluginsView.includes('interactive = false')) throw new Error('Orca and Remote Link passive refresh can regress into an RPC/render/busy-opacity loop');
+if (!pluginsView.includes('remotePairingRouteRef.current === routeKey') || !pluginsView.includes('remoteStatusRevisionRef.current') || !settings.includes('remoteRouteRef.current !== routeKey') || !settings.includes('pairingRemoteActionRef.current')) throw new Error('remote administrator views can regress to duplicate status/pairing refresh races or QR flicker');
 if (!pluginsView.includes('cloudflared 설치') || !dependencySetup.includes("'cloudflared'") || !dependencySetup.includes('DEPENDENCY_INSTALL_TIMEOUT_MS')) throw new Error('cloudflared is missing from explicit and first-run dependency installation UX');
 if (!dependenciesSource.includes("envPath('ProgramFiles(x86)')") || !dependenciesSource.includes("'--installer-type', 'portable', '--scope', 'user'") || ![dependenciesSource, remoteLink].every((source) => source.includes('Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe'))) throw new Error('cloudflared install/probe paths can diverge after WinGet installation');
 if (!pluginsView.includes('기존 원격 설정을 복원했습니다.') || !pluginsView.includes('이번에 켠 플러그인을 다시 껐습니다.') || !pluginsView.includes('터널 상태를 다시 확인할 수 없어')) throw new Error('Quick Link partial failures lack safe rollback or preservation messaging');
 if (!pluginsView.includes('mountedRef.current') || !pluginsView.includes('remoteActionRef.current = true')) throw new Error('Quick Link async completion can update an unmounted view');
-if (!pluginsView.includes("value=\"cloudflare-named\"") || !pluginsView.includes('고정 공개 호스트명') || !pluginsView.includes('Cloudflare Tunnel 토큰')) throw new Error('named Cloudflare Tunnel cannot be configured directly from the plugin UI');
+if (!pluginsView.includes("value=\"cloudflare-named\"") || !pluginsView.includes('이 PC 전용 고정 호스트명') || !pluginsView.includes('Cloudflare Tunnel 토큰')) throw new Error('named Cloudflare Tunnel cannot be configured directly from the plugin UI');
 if (!pluginsView.includes('PC마다 고유한 호스트명·전용 Tunnel') || !pluginsView.includes('같은 호스트명을 두 PC Connector가 공유하면')) throw new Error('multi-PC Cloudflare setup can omit the unique-hostname requirement');
+if (![pluginsView, settings].every((source) => source.includes('remote-status-board') && source.includes('remote-address-row')) || !pluginsView.includes('remote-readiness') || !pluginsView.includes('remoteFailureRecovery') || !settings.includes('remoteExternalReady')) throw new Error('remote connection UX does not show the phone address, external readiness, setup gaps, and recovery in one place');
+if (!settings.includes('remoteConfiguredNamed') || !settings.includes("name: 'remote-link.start'") || !settings.includes('고정 연결 복구·QR 만들기')) throw new Error('mobile pairing recovery does not prefer an already secured named Tunnel over a temporary Quick Link');
 if (!pluginsView.includes('clearRemoteTunnelToken') || !pluginsView.includes("name: 'remote-link.verify'") || !pluginsView.includes('Windows DPAPI')) throw new Error('named Tunnel credential lifecycle or public endpoint verification is missing from the UI');
 if (!remoteLink.includes('protectSecret') || !remoteLink.includes('redactRemoteLinkDiagnostics') || !remoteLink.includes('TUNNEL_TOKEN') || remoteLink.includes("'--token', tunnelToken")) throw new Error('named Tunnel token is not protected from storage, diagnostics, and process arguments');
 if (!remoteLink.includes('localTunnelCredentialsFromToken') || !remoteLink.includes('service: http_status:404') || !remoteLink.includes('cloudflaredEnvironment')) throw new Error('named Tunnel can fall back to remotely-managed extra routes or inherit unrelated credentials');
 if (!desktopMain.includes('assertTrustedRenderer(event)') || !desktopMain.includes("redirect: 'error'") || !desktopMain.includes('resolveDesktopCredential(token, parsed.origin)') || !desktopMain.includes('MAX_DESKTOP_DOWNLOAD_BYTES')) throw new Error('desktop IPC/download trust boundary can leak a remote token or accept an unbounded redirect');
 if (!remoteLink.includes('normalizeNamedTunnelHostname') || !remoteLink.includes('readSmallJson') || !remoteLink.includes("redirect: 'error'")) throw new Error('named Tunnel hostname or verification response is not tightly validated');
-if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"') || !mobileAppConfig.includes('"softwareKeyboardLayoutMode": "resize"') || !mobileHome.includes('!keyboardVisible') || !mobileChat.includes("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}") || !mobileChat.includes('paddingBottom: keyboardVisible ? 8 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
+if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"')
+  || mobileManifest.includes('android:screenOrientation=')
+  || !mobileAppConfig.includes('"softwareKeyboardLayoutMode": "resize"')
+  || !mobileAppConfig.includes('"orientation": "default"')
+  || !mobileHome.includes('{!keyboardVisible && <View style={[styles.header')
+  || !mobileHome.includes('{!keyboardVisible && <View style={[styles.tabbar')
+  || !mobileChat.includes("behavior={Platform.OS === 'ios' ? 'padding' : undefined}")
+  || mobileChat.includes("Platform.OS === 'ios' ? 'padding' : 'height'")
+  || !mobileChat.includes("automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}")
+  || !mobileChat.includes('if (!keyboardVisible || !stickToBottom.current) return;')
+  || !mobileChat.includes('onLayout={() => { if (stickToBottom.current)')
+  || !mobileChat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
 if (!mobileManifest.includes('android:usesCleartextTraffic="false"') || !mobileAppConfig.includes('"usesCleartextTraffic": false')) throw new Error('Android release can regress to sending device credentials over cleartext HTTP');
 if (!mobileChat.includes('controlBar') || !mobileChat.includes('🤖 단일 모델 선택') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
 if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
@@ -171,7 +185,7 @@ if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEff
   || !mobileChat.includes('provider?.supportedReasoning')
   || !mobileChat.includes("effort === 'auto' || supportedSet.has(effort)")) throw new Error('mobile reasoning choices can lose provider capabilities, none support, auto, or the common fallback');
 const mobileInputBar = mobileChat.indexOf('<View style={[styles.inputBar');
-const mobileReasoningBar = mobileChat.indexOf('<View style={styles.reasoningBar}>');
+const mobileReasoningBar = mobileChat.indexOf('<View style={[styles.reasoningBar');
 const mobileModelModal = mobileChat.indexOf('<Modal visible={showModels}');
 if (mobileInputBar < 0 || mobileReasoningBar < mobileInputBar || mobileReasoningBar > mobileModelModal
   || !mobileChat.includes('keyboardShouldPersistTaps="always"')

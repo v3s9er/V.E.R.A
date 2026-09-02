@@ -27,7 +27,7 @@ import type {
   ChatUsage,
   SyncMergeResult,
 } from '@mr-robot/shared';
-import { safeEqual, maskSecret, pairingPayload } from '../auth.js';
+import { hashToken, safeEqual, maskSecret, pairingPayload } from '../auth.js';
 import { ConfigStore } from '../config.js';
 import { EventBus } from '../eventbus.js';
 import { Logger } from '../logger.js';
@@ -57,7 +57,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.3.9';
+export const VERSION = '0.4.0';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -459,7 +459,21 @@ export class AgentServer {
   private hub: WsHub | null = null;
   private pinLimiter = new PinLimiter();
   /** Explicitly-created, memory-only enrollment code for an unattended handoff. */
-  private remoteHandoff: { pin: string; expiresAt: number } | null = null;
+  private remoteHandoff: {
+    pin: string;
+    expiresAt: number;
+    bootstrap?: { assertionHash: string; origin: string; expiresAt: number };
+  } | null = null;
+  private remoteHandoffTombstone: {
+    pinHash: string;
+    code: 'PAIRING_CONSUMED' | 'PAIRING_EXPIRED';
+    expiresAt: number;
+  } | null = null;
+  private readonly remoteBootstrapChallenges = new Map<string, {
+    origin: string;
+    clientIdHash: string;
+    expiresAt: number;
+  }>();
   private startedAt = 0;
   private boundHost = '127.0.0.1';
   private boundPort = 0;
@@ -590,15 +604,138 @@ export class AgentServer {
     return { isAdmin: false, linkId: link.id, permissionCap: link.permissionCap };
   }
 
-  exchangePin(pin: string, deviceName = '연결된 기기', permissionCap: PermissionMode = 'ask', clientKey = 'unknown'): { ok: boolean; secret?: string; linkId?: string; error?: string } {
+  private bindRemoteHandoffBootstrap(value: unknown): boolean {
+    const body = value as { pinHash?: unknown; assertionHash?: unknown; origin?: unknown; expiresAt?: unknown };
+    const handoff = this.remoteHandoff;
+    const now = Date.now();
+    if (!handoff || handoff.expiresAt <= now
+      || typeof body?.pinHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.pinHash)
+      || typeof body?.assertionHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.assertionHash)
+      || !safeEqual(body.pinHash, hashToken(handoff.pin))) return false;
+    const expiresAt = Number(body.expiresAt);
+    let origin: string;
+    try {
+      const parsed = new URL(String(body.origin ?? ''));
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password
+        || (parsed.port && parsed.port !== '443') || parsed.pathname !== '/'
+        || parsed.search || parsed.hash || parsed.origin !== String(body.origin)) return false;
+      origin = parsed.origin;
+    } catch {
+      return false;
+    }
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= now + 30_000
+      || expiresAt > handoff.expiresAt || expiresAt > now + 10 * 60_000) return false;
+    handoff.bootstrap = { assertionHash: body.assertionHash, origin, expiresAt };
+    this.bus.emit('pairing.changed', { at: now });
+    return true;
+  }
+
+  private registerRemoteBootstrapChallenge(value: unknown): boolean {
+    const body = value as {
+      pinHash?: unknown;
+      challengeHash?: unknown;
+      clientIdHash?: unknown;
+      origin?: unknown;
+      expiresAt?: unknown;
+    };
+    const handoff = this.remoteHandoff;
+    const now = Date.now();
+    if (!handoff || handoff.expiresAt <= now
+      || typeof body?.pinHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.pinHash)
+      || !safeEqual(body.pinHash, hashToken(handoff.pin))
+      || typeof body?.challengeHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.challengeHash)
+      || typeof body?.clientIdHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.clientIdHash)) return false;
+    const expiresAt = Number(body.expiresAt);
+    let origin = '';
+    try {
+      const parsed = new URL(String(body.origin ?? ''));
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password
+        || (parsed.port && parsed.port !== '443') || parsed.pathname !== '/'
+        || parsed.search || parsed.hash || parsed.origin !== body.origin) return false;
+      origin = parsed.origin;
+    } catch {
+      return false;
+    }
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > now + 30_000) return false;
+    for (const [key, challenge] of this.remoteBootstrapChallenges) {
+      if (challenge.expiresAt <= now) this.remoteBootstrapChallenges.delete(key);
+    }
+    if (this.remoteBootstrapChallenges.size >= 8) this.remoteBootstrapChallenges.delete(this.remoteBootstrapChallenges.keys().next().value!);
+    this.remoteBootstrapChallenges.set(body.challengeHash, { origin, clientIdHash: body.clientIdHash, expiresAt });
+    return true;
+  }
+
+  consumeRemoteBootstrapChallenge(challenge: string, assertion: string, origin: string): boolean {
+    const now = Date.now();
+    const key = hashToken(challenge);
+    const pending = this.remoteBootstrapChallenges.get(key);
+    // Delete before parsing so simultaneous requests cannot replay a challenge.
+    this.remoteBootstrapChallenges.delete(key);
+    if (!pending || pending.expiresAt <= now || pending.origin !== origin
+      || !/^[A-Za-z0-9_-]{43}$/.test(challenge)
+      || assertion.length < 64 || assertion.length > 4_096
+      || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(assertion)) return false;
+    try {
+      const raw = Buffer.from(assertion.split('.')[1]!, 'base64url');
+      if (raw.length === 0 || raw.length > 8 * 1024) return false;
+      const payload = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+      const issuer = new URL(String(payload.iss ?? ''));
+      const expiresAt = Number(payload.exp) * 1_000;
+      const commonName = String(payload.common_name ?? '');
+      return payload.type === 'app'
+        && payload.sub === ''
+        && Number.isSafeInteger(expiresAt)
+        && expiresAt > now + 30_000
+        && issuer.protocol === 'https:'
+        && issuer.hostname.toLowerCase().endsWith('.cloudflareaccess.com')
+        && safeEqual(hashToken(commonName), pending.clientIdHash);
+    } catch {
+      return false;
+    }
+  }
+
+  exchangePin(
+    pin: string,
+    deviceName = '연결된 기기',
+    permissionCap: PermissionMode = 'ask',
+    clientKey = 'unknown',
+    remoteProof?: { assertion: string; origin: string },
+  ): {
+    ok: boolean;
+    secret?: string;
+    linkId?: string;
+    cloudflareAccess?: { clientId: string; clientSecret: string };
+    code?: 'PAIRING_CONSUMED' | 'PAIRING_EXPIRED';
+    error?: string;
+  } {
     const check = this.pinLimiter.check(clientKey);
     if (!check.allowed) return { ok: false, error: `too many attempts, retry in ${Math.ceil((check.retryAfterMs ?? 0) / 1000)}s` };
     const now = Date.now();
-    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) this.remoteHandoff = null;
+    if (this.remoteHandoffTombstone && now > this.remoteHandoffTombstone.expiresAt) this.remoteHandoffTombstone = null;
+    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) {
+      this.remoteHandoffTombstone = {
+        pinHash: hashToken(this.remoteHandoff.pin),
+        code: 'PAIRING_EXPIRED',
+        expiresAt: now + 10 * 60_000,
+      };
+      this.remoteHandoff = null;
+      this.remoteBootstrapChallenges.clear();
+    }
+    const tombstone = this.remoteHandoffTombstone;
+    if (/^\d{12}$/.test(pin) && tombstone && safeEqual(hashToken(pin), tombstone.pinHash)) {
+      return {
+        ok: false,
+        code: tombstone.code,
+        error: tombstone.code === 'PAIRING_CONSUMED'
+          ? '이 외출용 등록 코드는 이미 사용되었습니다. PC에서 새 코드를 만드세요.'
+          : '이 외출용 등록 코드가 만료되었습니다. PC에서 새 코드를 만드세요.',
+      };
+    }
+    const handoff = this.remoteHandoff;
     const remoteHandoffMatch = Boolean(
-      this.remoteHandoff
-      && now <= this.remoteHandoff.expiresAt
-      && safeEqual(pin, this.remoteHandoff.pin),
+      handoff
+      && now <= handoff.expiresAt
+      && safeEqual(pin, handoff.pin),
     );
     if (!remoteHandoffMatch && now - this.config.pinCreatedAt > PAIRING_PIN_TTL_MS) {
       this.config.regeneratePin();
@@ -609,6 +746,40 @@ export class AgentServer {
     if (!remoteHandoffMatch && !safeEqual(pin, this.config.pin)) {
       this.pinLimiter.recordFailure(clientKey);
       return { ok: false, error: 'invalid pin' };
+    }
+    let cloudflareAccess: { clientId: string; clientSecret: string } | undefined;
+    if (remoteHandoffMatch && handoff?.bootstrap) {
+      const proof = remoteProof;
+      const assertion = String(proof?.assertion ?? '').trim();
+      let origin = '';
+      try {
+        const parsed = new URL(String(proof?.origin ?? ''));
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password
+          || (parsed.port && parsed.port !== '443') || parsed.pathname !== '/'
+          || parsed.search || parsed.hash || parsed.origin !== proof?.origin) throw new Error('invalid origin');
+        origin = parsed.origin;
+      } catch {
+        this.pinLimiter.recordFailure(clientKey);
+        return { ok: false, error: '자동 보안 등록 요청의 원격 주소가 올바르지 않습니다.' };
+      }
+      if (handoff.bootstrap.expiresAt <= now
+        || origin !== handoff.bootstrap.origin
+        || assertion.length < 64 || assertion.length > 4_096
+        || !safeEqual(hashToken(assertion), handoff.bootstrap.assertionHash)) {
+        this.pinLimiter.recordFailure(clientKey);
+        return { ok: false, error: '자동 보안 등록 세션이 만료되었거나 이 QR과 일치하지 않습니다.' };
+      }
+      // This bridge is not an RPC/plugin command. It returns credentials only
+      // for the exact DPAPI-configured named host after the one-time assertion
+      // and PIN have both matched, before either credential is consumed.
+      const headers = this.remoteLinkPlugin.peerRequestHeaders(new URL(origin));
+      const clientId = String(headers['CF-Access-Client-Id'] ?? '');
+      const clientSecret = String(headers['CF-Access-Client-Secret'] ?? '');
+      if (clientId.length < 20 || clientId.length > 512 || clientSecret.length < 20 || clientSecret.length > 512
+        || !/^[A-Za-z0-9._~-]+$/.test(clientId) || !/^[A-Za-z0-9._~-]+$/.test(clientSecret)) {
+        return { ok: false, error: 'PC의 Cloudflare Access 보안 저장소를 읽지 못했습니다. 원격 연결 설정을 다시 확인하세요.' };
+      }
+      cloudflareAccess = { clientId, clientSecret };
     }
     this.pinLimiter.recordSuccess(clientKey);
     const allowed: PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
@@ -624,11 +795,24 @@ export class AgentServer {
     const created = this.config.createDeviceLink(deviceName, cap);
     // Every displayed enrollment code is single-use. Consuming either the
     // short QR PIN or the explicit remote handoff code invalidates both.
+    if (remoteHandoffMatch && handoff) {
+      this.remoteHandoffTombstone = {
+        pinHash: hashToken(handoff.pin),
+        code: 'PAIRING_CONSUMED',
+        expiresAt: now + 10 * 60_000,
+      };
+    }
     this.remoteHandoff = null;
+    this.remoteBootstrapChallenges.clear();
     this.config.regeneratePin();
     this.pinLimiter.reset();
     this.bus.emit('pairing.changed', { at: Date.now() });
-    return { ok: true, secret: created.token, linkId: created.link.id };
+    return {
+      ok: true,
+      secret: created.token,
+      linkId: created.link.id,
+      ...(cloudflareAccess ? { cloudflareAccess } : {}),
+    };
   }
 
   /**
@@ -644,6 +828,7 @@ export class AgentServer {
     while (pin === this.config.pin || pin === this.remoteHandoff?.pin);
     const expiresAt = Date.now() + boundedMinutes * 60_000;
     this.remoteHandoff = { pin, expiresAt };
+    this.remoteBootstrapChallenges.clear();
     this.pinLimiter.reset();
     this.bus.emit('pairing.changed', { at: Date.now() });
     this.logger.info(`remote handoff code created (expires in ${boundedMinutes} minutes; memory-only)`);
@@ -652,7 +837,13 @@ export class AgentServer {
 
   revokeRemoteHandoff(reason = 'administrator request'): boolean {
     if (!this.remoteHandoff) return false;
+    this.remoteHandoffTombstone = {
+      pinHash: hashToken(this.remoteHandoff.pin),
+      code: 'PAIRING_EXPIRED',
+      expiresAt: Date.now() + 10 * 60_000,
+    };
     this.remoteHandoff = null;
+    this.remoteBootstrapChallenges.clear();
     this.bus.emit('pairing.changed', { at: Date.now() });
     this.logger.info(`remote handoff code revoked (${reason})`);
     return true;
@@ -686,7 +877,15 @@ export class AgentServer {
       this.config.regeneratePin();
       this.pinLimiter.reset();
     }
-    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) this.remoteHandoff = null;
+    if (this.remoteHandoff && now > this.remoteHandoff.expiresAt) {
+      this.remoteHandoffTombstone = {
+        pinHash: hashToken(this.remoteHandoff.pin),
+        code: 'PAIRING_EXPIRED',
+        expiresAt: now + 10 * 60_000,
+      };
+      this.remoteHandoff = null;
+      this.remoteBootstrapChallenges.clear();
+    }
     const port = this.boundPort || this.config.settings.network.port;
     // The generic pairing response is local-controller metadata only. Never
     // advertise a raw 100.64/10 HTTP address: the client cannot prove that its
@@ -704,7 +903,7 @@ export class AgentServer {
         pin: this.config.pin,
         pinExpiresAt: this.config.pinCreatedAt + PAIRING_PIN_TTL_MS,
         qrPayload: pairingPayload(host, port, this.config.pin, hosts),
-        ...(this.remoteHandoff ? { remoteHandoff: { ...this.remoteHandoff } } : {}),
+        ...(this.remoteHandoff ? { remoteHandoff: { pin: this.remoteHandoff.pin, expiresAt: this.remoteHandoff.expiresAt } } : {}),
       } : {}),
       ...(includeLocalSecret ? { localSecret: this.secret } : {}),
     };
@@ -968,6 +1167,15 @@ export class AgentServer {
       const status = data as { running?: unknown };
       if (status?.running === false) this.revokeRemoteHandoff('remote link stopped');
     }));
+    // Internal-only event: the plugin publishes hashes and an exact origin,
+    // never the Access assertion or service credential. It is intentionally
+    // absent from the network event allowlists.
+    this.busSubscriptions.push(this.bus.on('remote-link.bootstrap.created', (data) => {
+      this.bindRemoteHandoffBootstrap(data);
+    }));
+    this.busSubscriptions.push(this.bus.on('remote-link.bootstrap.challenge', (data) => {
+      this.registerRemoteBootstrapChallenge(data);
+    }));
 
     this.logger.info(`listening on http://${this.boundHost}:${this.boundPort}`);
     return { host: this.boundHost, port: this.boundPort };
@@ -1124,6 +1332,7 @@ export class AgentServer {
     h.set('pairing.regenerate', (_params, client) => {
       assertAdmin(client);
       this.remoteHandoff = null;
+      this.remoteBootstrapChallenges.clear();
       const secret = this.config.regenerateSecret();
       const pin = this.config.regeneratePin();
       this.pinLimiter.reset();
@@ -1142,6 +1351,7 @@ export class AgentServer {
     h.set('pairing.regeneratePin', (_params, client) => {
       assertAdmin(client);
       this.remoteHandoff = null;
+      this.remoteBootstrapChallenges.clear();
       const pin = this.config.regeneratePin();
       this.pinLimiter.reset();
       this.bus.emit('pairing.changed', { at: Date.now() });

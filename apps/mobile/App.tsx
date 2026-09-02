@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { AppState, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { initialWindowMetrics, SafeAreaProvider } from 'react-native-safe-area-context';
 import { MrRobotClient } from './src/rpc';
 import type { SavedPc } from './src/types';
 import { PcListScreen } from './src/screens/PcListScreen';
@@ -200,7 +200,7 @@ export default function App() {
   };
 
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <View style={{ flex: 1, backgroundColor: colors.bg }}>
         <StatusBar style="light" />
         {!activePc ? (

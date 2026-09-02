@@ -8,6 +8,13 @@ export interface CloudflareAccessCredentials {
   clientSecret: string;
 }
 
+export interface CloudflareAccessBootstrap {
+  type: 'cf-authorization';
+  /** Short-lived Access session JWT. Never persisted after enrollment. */
+  token: string;
+  expiresAt: number;
+}
+
 export interface SavedPc {
   id: string;
   name: string;
@@ -37,16 +44,14 @@ export interface PairingPayload {
   hosts?: string[];
   protocol?: 'http' | 'https';
   port: number;
-  version: 3 | 4;
+  version: 3 | 5;
   pin: string;
   /** Present on unattended QR handoffs; rejected when expired or over 25 hours ahead. */
   expiresAt?: number;
-  /** The QR deliberately omits the long-lived edge credential; enter it locally on Android. */
-  requiresCloudflareAccess?: boolean;
-  /** Version 4 only. Allows native clients through a Cloudflare Access service-token policy. */
-  cloudflareAccess?: CloudflareAccessCredentials;
-  /** Runtime-derived exact origin for the version 4 Access credential. */
-  cloudflareAccessOrigin?: string;
+  /** Version 5 only: one-use, short-lived edge admission without the long-lived Service Token. */
+  cloudflareBootstrap?: CloudflareAccessBootstrap;
+  /** Runtime-derived exact origin allowed to receive the short-lived application-token header. */
+  cloudflareBootstrapOrigin?: string;
 }
 
 export interface SystemStatus {

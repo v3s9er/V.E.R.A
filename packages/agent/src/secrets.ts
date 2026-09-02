@@ -1,7 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-export type SecretVaultPurpose = 'provider' | 'pairing-administrator' | 'mcp-server-environment';
+export type SecretVaultPurpose = 'provider' | 'pairing-administrator' | 'mcp-server-environment' | 'remote-link';
+
+export interface SecretPurposeFallbackResult {
+  plaintext: string;
+  migratedFromLegacyProvider: boolean;
+}
 
 const ENTROPY: Record<SecretVaultPurpose, string> = {
   // Keep the legacy provider entropy byte-for-byte compatible.
@@ -12,6 +17,8 @@ const ENTROPY: Record<SecretVaultPurpose, string> = {
   // MCP process environments may contain arbitrary third-party credentials.
   // Keep their ciphertext outside both provider and administrator domains.
   'mcp-server-environment': 'Mr.Robot/mcp-server-environment/v1',
+  // Tunnel and Access credentials are isolated from every other secret class.
+  'remote-link': 'Mr.Robot/remote-link/v1',
 };
 
 function protectScript(entropy: string): string {
@@ -42,6 +49,29 @@ export class SecretVault {
     const prefix = 'dpapi:v1:';
     if (!value.startsWith(prefix)) throw new Error('unsupported protected secret format');
     return runPowerShell(unprotectScript(this.entropy), value.slice(prefix.length));
+  }
+}
+
+/**
+ * Transitional reader for v0.3.x remote-link ciphertexts, which were written
+ * with the provider entropy before remote-link domain separation existed.
+ * Callers must persist a new remote-link ciphertext before using plaintext
+ * returned from the legacy branch. No protected value or plaintext is included
+ * in the terminal error.
+ */
+export function unprotectRemoteLinkWithLegacyProviderFallback(
+  protectedValue: string,
+  unprotectRemoteLink: (value: string) => string,
+  unprotectLegacyProvider: (value: string) => string,
+): SecretPurposeFallbackResult {
+  try {
+    return { plaintext: unprotectRemoteLink(protectedValue), migratedFromLegacyProvider: false };
+  } catch {
+    try {
+      return { plaintext: unprotectLegacyProvider(protectedValue), migratedFromLegacyProvider: true };
+    } catch {
+      throw new Error('저장된 암호문을 현재 또는 구버전 보안 영역에서 해독할 수 없습니다.');
+    }
   }
 }
 

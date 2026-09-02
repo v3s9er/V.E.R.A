@@ -1,18 +1,25 @@
-import type { CloudflareAccessCredentials, PairingPayload } from './types';
+import type { CloudflareAccessBootstrap, PairingPayload } from './types';
 
-const isSafeHeaderCredential = (value: unknown): value is string => typeof value === 'string'
-  && value.length > 0
-  && value.length <= 4_096
-  && /^[\x21-\x7E]+$/.test(value);
+const BOOTSTRAP_TTL_MAX_MS = 10 * 60_000;
 
-function parseCloudflareAccess(value: unknown): CloudflareAccessCredentials | undefined {
+function parseCloudflareBootstrap(value: unknown, payloadExpiresAt: number): CloudflareAccessBootstrap | undefined {
   if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Cloudflare Access 정보가 올바르지 않습니다.');
-  const candidate = value as Partial<CloudflareAccessCredentials>;
-  if (!isSafeHeaderCredential(candidate.clientId) || !isSafeHeaderCredential(candidate.clientSecret)) {
-    throw new Error('Cloudflare Access 정보가 올바르지 않습니다.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Cloudflare 부트스트랩 정보가 올바르지 않습니다.');
+  const candidate = value as Partial<CloudflareAccessBootstrap>;
+  const now = Date.now();
+  const expiresAt = Number(candidate.expiresAt);
+  if (candidate.type !== 'cf-authorization'
+    || typeof candidate.token !== 'string'
+    || candidate.token.length < 64
+    || candidate.token.length > 4_096
+    || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(candidate.token)
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt <= now
+    || expiresAt > now + BOOTSTRAP_TTL_MAX_MS
+    || expiresAt > payloadExpiresAt) {
+    throw new Error('Cloudflare 부트스트랩 정보가 만료되었거나 올바르지 않습니다.');
   }
-  return { clientId: candidate.clientId, clientSecret: candidate.clientSecret };
+  return { type: 'cf-authorization', token: candidate.token, expiresAt };
 }
 
 function securePairingOrigin(value: string, port: number, protocol: 'http' | 'https'): string {
@@ -40,27 +47,46 @@ export function pairingOrigins(payload: PairingPayload): string[] {
     .map((host) => securePairingOrigin(host, payload.port, protocol)))];
 }
 
+/** Give the scanner a useful recovery message without accepting stale data. */
+export function pairingPayloadExpired(raw: string, now = Date.now()): boolean {
+  try {
+    const obj = JSON.parse(raw) as { app?: unknown; version?: unknown; expiresAt?: unknown; cloudflareBootstrap?: { expiresAt?: unknown } };
+    if (obj.app !== 'mr-robot' || (obj.version !== 3 && obj.version !== 5)) return false;
+    const payloadExpiry = Number(obj.expiresAt);
+    const bootstrapExpiry = Number(obj.cloudflareBootstrap?.expiresAt);
+    return (Number.isSafeInteger(payloadExpiry) && payloadExpiry <= now)
+      || (obj.version === 5 && Number.isSafeInteger(bootstrapExpiry) && bootstrapExpiry <= now);
+  } catch {
+    return false;
+  }
+}
+
 export function parsePairingPayload(raw: string): PairingPayload | null {
   try {
-    const obj = JSON.parse(raw) as Partial<PairingPayload>;
-    if (obj?.app !== 'mr-robot' || (obj.version !== 3 && obj.version !== 4)) return null;
+    const obj = JSON.parse(raw) as Partial<PairingPayload> & {
+      cloudflareAccess?: unknown;
+      requiresCloudflareAccess?: unknown;
+    };
+    if (obj?.app !== 'mr-robot' || (obj.version !== 3 && obj.version !== 5)) return null;
     if (typeof obj.host !== 'string' || !obj.host.trim() || obj.host.length > 2_048) return null;
     if (!Number.isInteger(obj.port) || Number(obj.port) < 1 || Number(obj.port) > 65_535) return null;
     if (typeof obj.pin !== 'string' || !/^(?:\d{6}|\d{12})$/.test(obj.pin)) return null;
+    if (obj.version === 5 && !/^\d{12}$/.test(obj.pin)) return null;
     if (obj.protocol !== undefined && obj.protocol !== 'http' && obj.protocol !== 'https') return null;
     if (obj.hosts !== undefined && (!Array.isArray(obj.hosts)
       || obj.hosts.length > 8
       || obj.hosts.some((host) => typeof host !== 'string' || !host.trim() || host.length > 2_048))) return null;
-    if (obj.version === 3 && obj.cloudflareAccess !== undefined) return null;
-    if (obj.version === 4 && obj.cloudflareAccess === undefined) return null;
-    if (obj.requiresCloudflareAccess !== undefined && obj.requiresCloudflareAccess !== true) return null;
+    if (obj.cloudflareAccess !== undefined) return null;
+    if (obj.requiresCloudflareAccess !== undefined) return null;
+    if (obj.version === 5 && obj.cloudflareBootstrap === undefined) return null;
+    if (obj.version !== 5 && obj.cloudflareBootstrap !== undefined) return null;
     const expiresAt = Number(obj.expiresAt);
     const hasExpiry = obj.expiresAt !== undefined;
-    if ((obj.version === 4 || obj.requiresCloudflareAccess === true) && !hasExpiry) return null;
+    if (obj.version === 5 && !hasExpiry) return null;
     if (hasExpiry && (!Number.isSafeInteger(expiresAt)
       || expiresAt <= Date.now()
       || expiresAt > Date.now() + 25 * 60 * 60_000)) return null;
-    const cloudflareAccess = parseCloudflareAccess(obj.cloudflareAccess);
+    const cloudflareBootstrap = parseCloudflareBootstrap(obj.cloudflareBootstrap, expiresAt);
     const payload: PairingPayload = {
       app: 'mr-robot',
       version: obj.version,
@@ -70,11 +96,10 @@ export function parsePairingPayload(raw: string): PairingPayload | null {
       port: Number(obj.port),
       pin: obj.pin,
       ...(hasExpiry ? { expiresAt } : {}),
-      ...(obj.requiresCloudflareAccess === true ? { requiresCloudflareAccess: true } : {}),
-      ...(cloudflareAccess ? { cloudflareAccess } : {}),
+      ...(cloudflareBootstrap ? { cloudflareBootstrap } : {}),
     };
     const origins = pairingOrigins(payload);
-    if (cloudflareAccess) payload.cloudflareAccessOrigin = origins[0];
+    if (cloudflareBootstrap) payload.cloudflareBootstrapOrigin = origins[0];
     return payload;
   } catch {
     return null;

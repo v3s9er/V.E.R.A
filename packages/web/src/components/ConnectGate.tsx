@@ -332,8 +332,8 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
               </div>
             </div>
             <div className="pc-actions">
-              <Button onClick={() => void connectTo(pc)}>이 PC에서 실행</Button>
-              <Button variant="ghost" onClick={() => void deletePc(pc.id)} title="등록 해제">
+              <Button className="pc-run-button" onClick={() => void connectTo(pc)}>이 PC에서 실행</Button>
+              <Button className="pc-remove-button" variant="ghost" onClick={() => void deletePc(pc.id)} title="등록 해제" aria-label={`${pc.name} 등록 해제`}>
                 ✕
               </Button>
             </div>
@@ -345,8 +345,8 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
             <Field label="PC 이름 (선택)">
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 서재 데스크톱" />
             </Field>
-            <Field label="PC 주소" hint="해당 PC의 설정 → 모바일 연결 탭에 표시되는 주소">
-              <Input value={hostPort} onChange={(e) => setHostPort(e.target.value)} placeholder="https://example.trycloudflare.com" />
+            <Field label="PC 주소" hint="고정 도메인 또는 설정 → 모바일 연결에 표시된 임시 Quick Link 주소를 그대로 입력하세요.">
+              <Input value={hostPort} onChange={(e) => setHostPort(e.target.value)} placeholder="예: https://pc1.v3s9er.com 또는 https://…trycloudflare.com" />
             </Field>
             <Field label="연결 코드" hint="해당 PC의 6자리 PIN 또는 외출용 12자리 일회용 코드">
               <Input
@@ -357,7 +357,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
               />
             </Field>
             {window.mrRobotDesktop && <>
-              <Field label="Cloudflare Access Client ID (선택)" hint="원격 PC가 Cloudflare Access로 보호된 경우 Service Token 값을 입력합니다.">
+              <Field label="Cloudflare Access Client ID (선택)" hint="고정 주소가 Cloudflare Access로 보호된 경우에만 Service Token 두 값을 입력합니다.">
                 <Input type="password" value={accessClientId} onChange={(e) => setAccessClientId(e.target.value)} autoComplete="off" placeholder="…access" />
               </Field>
               <Field label="Cloudflare Access Client Secret (선택)" hint="두 값은 등록 직후 Windows 보안 저장소로 이동하고 화면에서 지워집니다.">

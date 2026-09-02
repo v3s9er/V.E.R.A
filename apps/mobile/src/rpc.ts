@@ -1,5 +1,5 @@
-export { pairingOrigins, parsePairingPayload } from './pairing';
-import { cloudflareAccessHeaders } from './pcs';
+export { pairingOrigins, pairingPayloadExpired, parsePairingPayload } from './pairing';
+import { cloudflareAccessHeaders, explainCredentialFetchFailure } from './pcs';
 import type { CloudflareAccessCredentials } from './types';
 
 export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | 'online';
@@ -31,12 +31,17 @@ async function publicWebSocketProtocols(
   }
   if (parsed.protocol !== 'wss:') return undefined;
   const endpoint = new URL('/api/ws-ticket', `https://${parsed.host}`);
-  const response = await fetch(endpoint.toString(), {
-    method: 'POST',
-    headers: { ...accessHeaders, 'x-mr-robot-token': secret, accept: 'application/json' },
-    redirect: 'error',
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(endpoint.toString(), {
+      method: 'POST',
+      headers: { ...accessHeaders, 'x-mr-robot-token': secret, accept: 'application/json' },
+      redirect: 'error',
+      signal,
+    });
+  } catch (error) {
+    throw explainCredentialFetchFailure(error, Object.keys(accessHeaders).length > 0);
+  }
   if (!response.ok) throw new Error(`WebSocket 보안 티켓 발급 실패 (HTTP ${response.status})`);
   const ticket = await response.json() as WsUpgradeTicketInfo;
   if (typeof ticket.protocol !== 'string'

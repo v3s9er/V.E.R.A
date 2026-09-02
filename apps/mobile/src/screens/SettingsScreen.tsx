@@ -107,7 +107,7 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
   };
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.root} contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom + 22, 30) }]} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
       {status && (
         <View style={styles.card}>
           <Text style={styles.title}>PC 정보</Text>
@@ -123,7 +123,7 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
       <View style={styles.card}>
         <View style={styles.cardHead}>
           <Text style={styles.title}>AI 제공자</Text>
-          <TouchableOpacity style={styles.smallBtn} onPress={() => setShowAdd(true)}>
+          <TouchableOpacity style={styles.smallBtn} onPress={() => setShowAdd(true)} accessibilityRole="button" accessibilityLabel="AI 제공자 추가">
             <Text style={styles.smallBtnText}>＋ 추가</Text>
           </TouchableOpacity>
         </View>
@@ -141,7 +141,7 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
                 {p.baseUrl}
               </Text>
             </View>
-            <View style={{ gap: 6 }}>
+            <View style={styles.providerActions}>
               {!p.isDefault && (
                 <TouchableOpacity style={styles.smallBtn} onPress={() => void client.call('providers.setDefault', { id: p.id }).catch(() => undefined)}>
                   <Text style={styles.smallBtnText}>기본으로</Text>
@@ -177,10 +177,10 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
         </View>
       )}
 
-      <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={[styles.modalBackdrop, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
-          <ScrollView style={styles.modal} contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+      <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)} accessibilityViewIsModal>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(10, insets.left + 8), paddingRight: Math.max(10, insets.right + 8) }]}>
+          <ScrollView style={styles.modal} contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
             <Text style={styles.title}>제공자 추가</Text>
             <Text style={styles.faint}>서비스를 고르면 주소·모델이 자동 입력됩니다 — 키만 넣으세요.</Text>
             <View style={styles.chipRow}>
@@ -253,7 +253,7 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { padding: 14, gap: 12, paddingBottom: 30 },
   card: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 14, gap: 10 },
-  cardHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  cardHead: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between', alignItems: 'center' },
   title: { color: colors.text, fontSize: 15, fontWeight: '700' },
   dim: { color: colors.dim, fontSize: 13, lineHeight: 19 },
   faint: { color: colors.faint, fontSize: 12, lineHeight: 17 },
@@ -269,14 +269,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   providerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'stretch',
     gap: 10,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     paddingTop: 10,
   },
   providerName: { color: colors.text, fontWeight: '700', fontSize: 14 },
+  providerActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   smallBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 7, alignItems: 'center' },
   smallBtnText: { color: colors.text, fontWeight: '700', fontSize: 12.5 },
   dangerBtn: { borderColor: 'rgba(248,113,113,0.4)', backgroundColor: 'rgba(248,113,113,0.1)' },
@@ -288,8 +289,8 @@ const styles = StyleSheet.create({
   chipText: { color: colors.dim, fontSize: 12.5, fontWeight: '600' },
   chipTextOn: { color: '#fff' },
   errorText: { color: colors.err, fontSize: 13 },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', padding: 24 },
-  modal: { maxHeight: '92%', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', paddingHorizontal: 10 },
+  modal: { width: '100%', maxWidth: 620, maxHeight: '92%', alignSelf: 'center', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
   modalContent: { padding: 20, gap: 8 },
   modalActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
 });

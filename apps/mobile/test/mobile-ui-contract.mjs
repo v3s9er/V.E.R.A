@@ -1,0 +1,73 @@
+import { readFileSync } from 'node:fs';
+
+const read = (relativePath) => readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+const appConfig = JSON.parse(read('app.json'));
+const app = read('App.tsx');
+const manifest = read('android/app/src/main/AndroidManifest.xml');
+const home = read('src/screens/HomeScreen.tsx');
+const chat = read('src/screens/ChatScreen.tsx');
+const pcList = read('src/screens/PcListScreen.tsx');
+const settings = read('src/screens/SettingsScreen.tsx');
+const schedules = read('src/screens/SchedulesScreen.tsx');
+
+function check(description, condition) {
+  if (!condition) throw new Error(`MOBILE UI CONTRACT FAILED: ${description}`);
+}
+
+check('Expo and the committed Android activity both resize the app viewport for the soft keyboard',
+  appConfig.expo?.android?.softwareKeyboardLayoutMode === 'resize'
+  && manifest.includes('android:windowSoftInputMode="adjustResize"'));
+check('phone, tablet, and landscape layouts are allowed by both generated and native configuration',
+  appConfig.expo?.orientation === 'default'
+  && !manifest.includes('android:screenOrientation='));
+check('safe-area metrics are available on the first painted frame',
+  app.includes('initialWindowMetrics')
+  && app.includes('<SafeAreaProvider initialMetrics={initialWindowMetrics}>'));
+
+const keyboardScreens = [chat, pcList, settings, schedules];
+check('Android does not double-shrink adjustResize screens with KeyboardAvoidingView height behavior',
+  keyboardScreens.every((source) => !source.includes("Platform.OS === 'ios' ? 'padding' : 'height'"))
+  && keyboardScreens.every((source) => !source.includes("Platform.OS === 'android' ? 'height'")));
+check('chat relies on native Android resize while retaining iOS keyboard insets',
+  chat.includes("behavior={Platform.OS === 'ios' ? 'padding' : undefined}")
+  && chat.includes("automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}"));
+check('opening the keyboard follows the latest message and list size changes preserve bottom following',
+  chat.includes('if (!keyboardVisible || !stickToBottom.current) return;')
+  && chat.includes('listRef.current?.scrollToEnd({ animated: true })')
+  && chat.includes('onContentSizeChange={() => { if (stickToBottom.current)')
+  && chat.includes('onLayout={() => { if (stickToBottom.current)'));
+check('keyboard entry mode frees vertical space without covering the composer',
+  home.includes('{!keyboardVisible && <View style={[styles.header')
+  && home.includes('{!keyboardVisible && <View style={[styles.tabbar')
+  && chat.includes('{!keyboardVisible && <View style={styles.modeBar}')
+  && chat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)'));
+check('busy steering and stop actions occupy their own responsive row',
+  chat.includes('{busy && <View style={styles.busyActions}>')
+  && chat.includes('busyActionBtn: { flex: 1 }'));
+
+check('small screens and enlarged fonts switch connection cards to a stacked layout',
+  pcList.includes('width < 480 || fontScale > 1.25')
+  && pcList.includes('compact && styles.pcCardCompact')
+  && pcList.includes("pcCardCompact: { flexDirection: 'column'"));
+check('QR camera and confirmation controls use separate scrollable responsive panes',
+  pcList.includes('scannerLandscape')
+  && pcList.includes('styles.scanCameraPane')
+  && pcList.includes('styles.scanPanelLandscape')
+  && pcList.includes('<ScrollView style={[styles.scanPanel'));
+check('remote enrollment keeps optional Access details progressive and validates partial credentials',
+  pcList.includes('showAdvancedAccess')
+  && pcList.includes('hasPartialAccess')
+  && pcList.includes('disabled={busy || !canRegister}')
+  && pcList.includes('const clearAccessFields = (): void =>')
+  && pcList.includes('const closeAddPc = (): void =>')
+  && pcList.includes('? optionalCloudflareAccess(accessClientId, accessClientSecret)')
+  && pcList.includes('if (value) clearAccessFields();'));
+check('critical connection, loading, and transfer state is exposed to accessibility services',
+  home.includes('accessibilityLiveRegion="polite"')
+  && chat.includes('accessibilityLiveRegion="assertive"')
+  && pcList.includes('accessibilityLiveRegion="assertive"'));
+check('text-entry sheets use scrollable keyboard insets on iOS and native resize on Android',
+  settings.includes('automaticallyAdjustKeyboardInsets={Platform.OS === \'ios\'}')
+  && schedules.includes('automaticallyAdjustKeyboardInsets={Platform.OS === \'ios\'}'));
+
+console.log('MOBILE UI CONTRACT PASSED');

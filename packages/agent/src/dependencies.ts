@@ -136,7 +136,7 @@ const DEFINITIONS: Definition[] = [
   },
   {
     id: 'cloudflared', name: 'Cloudflare cloudflared', command: 'cloudflared', versionArgs: ['--version'], required: false, requiresLogin: false,
-    description: 'VPN 없이 선택형 임시 HTTPS/WSS 원격 링크를 만들 때만 사용합니다. 기본 설치·실행은 꺼져 있습니다.',
+    description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다. 실행은 기본 OFF입니다.',
     wingetId: 'Cloudflare.cloudflared',
     candidates: () => [
       join(localAppData(), 'Microsoft', 'WinGet', 'Links', 'cloudflared.exe'),

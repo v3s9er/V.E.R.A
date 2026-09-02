@@ -22,7 +22,13 @@ import { mrRobotHome } from '../config.js';
 import { authPrincipal, webSocketTicketBinding, WsUpgradeTicketAdmissionError, type AuthContext, type WsUpgradeTickets } from './ws.js';
 import { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress, tailscaleInterfaceAddresses } from './transport.js';
 import { FileTransferAdmission, FileTransferAdmissionError, type FileTransferLease } from './transfer-admission.js';
-import { CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, isCloudflareAccessPairProbe } from '../access-probe.js';
+import {
+  CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE,
+  CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
+  CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR,
+  cloudflareAccessBootstrapChallenge,
+  isCloudflareAccessPairProbe,
+} from '../access-probe.js';
 
 export { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress } from './transport.js';
 
@@ -550,7 +556,21 @@ export interface HttpApiHost {
   isAdminSecret(secret: string): boolean;
   isSyncSecret(secret: string): boolean;
   pairingInfo(includeLocalSecret?: boolean, includePairingCode?: boolean): PairingInfo;
-  exchangePin(pin: string, deviceName?: string, permissionCap?: PermissionMode, clientKey?: string): { ok: boolean; secret?: string; linkId?: string; error?: string };
+  consumeRemoteBootstrapChallenge(challenge: string, assertion: string, origin: string): boolean;
+  exchangePin(
+    pin: string,
+    deviceName?: string,
+    permissionCap?: PermissionMode,
+    clientKey?: string,
+    remoteProof?: { assertion: string; origin: string },
+  ): {
+    ok: boolean;
+    secret?: string;
+    linkId?: string;
+    cloudflareAccess?: { clientId: string; clientSecret: string };
+    code?: 'PAIRING_CONSUMED' | 'PAIRING_EXPIRED';
+    error?: string;
+  };
   status(): SystemStatus;
   getSettings(): AppSettings;
   updateSettings(patch: Partial<AppSettings>): AppSettings;
@@ -781,6 +801,26 @@ export function createHttpApi(
     if (isLoopback(direct) && isIP(forwarded) > 0 && /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray)) return forwarded;
     return undefined;
   };
+  const cloudflareRequestOrigin = (req: Request): string | undefined => {
+    if (!cloudflarePairClient(req)) return undefined;
+    const rawHost = String(req.header('host') ?? '').trim().toLowerCase();
+    if (!rawHost || /[\s/@\\]/.test(rawHost)) return undefined;
+    try {
+      const parsed = new URL(`https://${rawHost}`);
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password
+        || (parsed.port && parsed.port !== '443') || parsed.pathname !== '/'
+        || parsed.search || parsed.hash) return undefined;
+      return parsed.origin;
+    } catch {
+      return undefined;
+    }
+  };
+  const preventCredentialCaching = (res: Response): void => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  };
   const pairClientKey = (req: Request): string => {
     const forwarded = cloudflarePairClient(req);
     if (forwarded) return `cloudflare:${forwarded}`;
@@ -846,6 +886,34 @@ export function createHttpApi(
   // the direct client (or Cloudflare's asserted edge client IP) so one remote
   // attacker cannot cheaply lock every legitimate device out at this layer.
   app.post('/api/pair', (req, res) => {
+    preventCredentialCaching(res);
+    // Cloudflare deployments commonly keep a strict allowlist for the
+    // established pairing endpoint. Reuse that already-audited POST surface
+    // for the exact bootstrap schema instead of requiring a second public
+    // route or weakening an existing WAF rule. A pre-registered, one-use
+    // challenge lets the trusted desktop process obtain the short application
+    // assertion without exposing it to page JavaScript. The desktop reads the
+    // HttpOnly response cookie directly, then proves it again with Cloudflare's
+    // documented cf-access-token header.
+    const bootstrapChallenge = cloudflareAccessBootstrapChallenge(req.body);
+    if (bootstrapChallenge) {
+      const assertion = String(req.header('cf-access-jwt-assertion') ?? '').trim();
+      const requestOrigin = cloudflareRequestOrigin(req);
+      if (!requestOrigin
+        || assertion.length < 64 || assertion.length > 4_096
+        || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(assertion)
+        || !host.consumeRemoteBootstrapChallenge(bootstrapChallenge, assertion, requestOrigin)) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      res.setHeader('Set-Cookie', `${CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE}=${assertion}; Max-Age=60; Path=/; Secure; HttpOnly; SameSite=Strict`);
+      res.json({
+        app: 'mr-robot',
+        probe: CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
+        challenge: bootstrapChallenge,
+      });
+      return;
+    }
     // Cloudflare Access verification uses one fixed, intentionally invalid
     // schema. Reject it before deriving a client key, touching rate-limit
     // state, reading a PIN, or calling exchangePin. This makes repeated
@@ -880,14 +948,24 @@ export function createHttpApi(
     const requested: PermissionMode = ['read-only', 'ask', 'workspace', 'full'].includes(rawPermission)
       ? rawPermission as PermissionMode
       : 'ask';
-    const result = host.exchangePin(pin, name, requested, key);
+    const assertion = String(req.header('cf-access-jwt-assertion') ?? '').trim();
+    const proofOrigin = cloudflareRequestOrigin(req);
+    const remoteProof = proofOrigin && assertion
+      ? { assertion, origin: proofOrigin }
+      : undefined;
+    const result = host.exchangePin(pin, name, requested, key, remoteProof);
     if (!result.ok) {
       recordPairFailure(key);
-      res.status(400).json({ error: result.error });
+      const status = result.code === 'PAIRING_EXPIRED' ? 410 : result.code === 'PAIRING_CONSUMED' ? 409 : 400;
+      res.status(status).json({ error: result.error, ...(result.code ? { code: result.code } : {}) });
       return;
     }
     pairAttempts.delete(key);
-    res.json({ secret: result.secret, linkId: result.linkId });
+    res.json({
+      secret: result.secret,
+      linkId: result.linkId,
+      ...(result.cloudflareAccess ? { cloudflareAccess: result.cloudflareAccess } : {}),
+    });
   });
 
   app.get('/api/status', requireAuth, (_req, res) => {

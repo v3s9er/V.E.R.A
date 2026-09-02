@@ -934,11 +934,11 @@ function Chip({ label, active, compact, onPress }: {
   );
 }
 
-function Sheet({ children, insets }: { children: ReactNode; insets: { bottom: number } }) {
+function Sheet({ children, insets }: { children: ReactNode; insets: { bottom: number; left: number; right: number } }) {
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <View style={[styles.backdrop, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-        <ScrollView style={styles.sheet} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <View style={[styles.backdrop, { paddingBottom: Math.max(insets.bottom, 8), paddingLeft: Math.max(insets.left, 8), paddingRight: Math.max(insets.right, 8) }]}>
+        <ScrollView style={styles.sheet} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
           {children}
         </ScrollView>
       </View>
@@ -950,7 +950,7 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { padding: 14, gap: 12 },
   calendarCard: { backgroundColor: colors.card, borderWidth: 1, borderColor: 'rgba(124,92,255,.45)', borderRadius: radius.md, padding: 14, gap: 9 },
-  calendarHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  calendarHead: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   eyebrow: { color: colors.accent2, fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
   title: { color: colors.text, fontSize: 19, fontWeight: '800', marginTop: 2 },
   sectionTitle: { color: colors.text, fontSize: 17, fontWeight: '800', marginTop: 2 },
@@ -981,7 +981,7 @@ const styles = StyleSheet.create({
   permissionNote: { backgroundColor: 'rgba(251,191,36,.10)', borderColor: 'rgba(251,191,36,.28)', borderWidth: 1, borderRadius: radius.sm, color: colors.warn, fontSize: 11.5, lineHeight: 16, padding: 9 },
   error: { color: colors.err, fontSize: 12.5, lineHeight: 17 },
   detail: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 14, gap: 7 },
-  detailHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  detailHeader: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   detailDate: { color: colors.text, fontSize: 15, fontWeight: '800' },
   detailStatus: { color: colors.dim, fontSize: 12, marginTop: 2 },
   edit: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.inputBg, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 7 },
@@ -998,8 +998,8 @@ const styles = StyleSheet.create({
   generalCard: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 14, gap: 8 },
   secondaryAdd: { backgroundColor: 'rgba(124,92,255,.22)', borderWidth: 1, borderColor: colors.accent, borderRadius: radius.sm, paddingHorizontal: 11, paddingVertical: 7 },
   secondaryAddText: { color: colors.text, fontSize: 12, fontWeight: '700' },
-  calendarRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border },
-  schedulerHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 2 },
+  calendarRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border },
+  schedulerHead: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 2 },
   addBtn: { backgroundColor: colors.accent, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 9, alignItems: 'center' },
   addText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   empty: { color: colors.faint, textAlign: 'center', paddingVertical: 12 },
@@ -1014,7 +1014,7 @@ const styles = StyleSheet.create({
   delete: { alignSelf: 'flex-start', backgroundColor: 'rgba(248,113,113,.15)', borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 7 },
   deleteText: { color: colors.err, fontSize: 12.5, fontWeight: '700' },
   backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(4,6,12,.7)' },
-  sheet: { maxHeight: '92%', backgroundColor: colors.card, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  sheet: { width: '100%', maxWidth: 720, maxHeight: '94%', alignSelf: 'center', backgroundColor: colors.card, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
   sheetContent: { padding: 20, gap: 8 },
   modalTitle: { color: colors.text, fontSize: 18, fontWeight: '700' },
   label: { color: colors.dim, fontSize: 13, fontWeight: '600', marginTop: 4 },
@@ -1026,7 +1026,7 @@ const styles = StyleSheet.create({
   chipText: { color: colors.dim, fontSize: 13, fontWeight: '600' },
   chipTextOn: { color: '#fff' },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  actions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
   action: { flex: 1, alignItems: 'center', borderRadius: radius.md, backgroundColor: colors.accent, paddingVertical: 13 },
   cancel: { backgroundColor: colors.inputBg },
   restore: { backgroundColor: 'rgba(248,113,113,.18)' },
