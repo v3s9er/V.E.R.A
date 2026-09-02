@@ -755,13 +755,21 @@ const home = mkdtempSync(join(tmpdir(), 'mr-robot-test-'));
 process.env.MR_ROBOT_HOME = home;
 
 const server = new AgentServer();
+const pluginWorkspaceRoot = join(home, 'plugin-workspace');
+mkdirSync(pluginWorkspaceRoot);
+const pluginWorkspace = server.workspaceAdd(pluginWorkspaceRoot, 'Plugin test workspace');
 const helloPath = resolve(here, '..', '..', '..', 'examples', 'plugins', 'hello', 'index.js');
 const monitorPath = resolve(here, '..', '..', '..', 'examples', 'plugins', 'monitor', 'index.js');
 
 const logListenersBefore = server.bus.listenerCount('log');
 
 const hello = await server.plugins.load(helloPath);
-check('hello loads', hello.status === 'loaded' && hello.commands.includes('hello.greet'));
+check('hello loads with a backwards-compatible category', hello.status === 'loaded' && hello.commands.includes('hello.greet') && hello.category === 'other');
+server.plugins.setCategory('hello', 'productivity');
+check('plugin category override updates the catalog', server.plugins.list().find((plugin) => plugin.id === 'hello')?.category === 'productivity');
+let invalidPluginCategoryRejected = false;
+try { server.plugins.setCategory('hello', 'unknown'); } catch { invalidPluginCategoryRejected = true; }
+check('unknown plugin categories are rejected', invalidPluginCategoryRejected);
 
 const greet = await server.plugins.call('hello.greet', { name: 'Mr.Robot' });
 check('plugin command call', greet?.reply === 'Hello, Mr.Robot!');
@@ -788,6 +796,7 @@ check('hello unloaded', server.plugins.list().length === 0);
 // CJS-style cache test: loading the same ESM file twice yields fresh modules.
 await server.plugins.load(helloPath);
 const first = await server.plugins.call('hello.greet', {});
+check('plugin category override survives unload and reload', server.plugins.list().find((plugin) => plugin.id === 'hello')?.category === 'productivity');
 await server.plugins.unload('hello');
 await server.plugins.load(helloPath);
 const second = await server.plugins.call('hello.greet', {});
@@ -807,6 +816,12 @@ const base = `http://127.0.0.1:${port}`;
 
 const builtInOrca = server.plugins.list().find((plugin) => plugin.id === 'orca');
 check('built-in Orca integration loads', builtInOrca?.commands.includes('orca.delegate'));
+check('low-traffic security plugins are attached as built-ins',
+  server.plugins.list().find((plugin) => plugin.id === 'resource-archiver')?.commands.includes('resource-archiver.archive')
+  && server.plugins.list().find((plugin) => plugin.id === 'sslscan-auditor')?.commands.includes('sslscan.scan'));
+check('built-in plugins receive stable default categories', builtInOrca?.category === 'development'
+  && server.plugins.list().find((plugin) => plugin.id === 'ctf-toolpack')?.category === 'pentest'
+  && server.plugins.list().find((plugin) => plugin.id === 'remote-link')?.category === 'system');
 check('Orca plugin defaults to disabled', builtInOrca?.enabled === false);
 check('Orca schemas hidden for ordinary chat', !server.plugins.aiTools('안녕').some((tool) => tool.name.startsWith('orca.')));
 check('disabled Orca schemas hidden for coding chat', !server.plugins.aiTools('이 저장소 버그를 코딩해서 고쳐줘').some((tool) => tool.name === 'orca.delegate'));
@@ -1283,13 +1298,15 @@ server.bus.emit('log', { ts: Date.now(), level: 'error', scope: 'private', messa
 server.bus.emit('voice.command', { text: 'PRIVATE_VOICE_TRANSCRIPT' });
 server.bus.emit('providers.changed', [{ id: 'private-provider', label: 'PRIVATE_PROVIDER' }]);
 server.bus.emit('remote-link.changed', { running: true, publicUrl: 'https://private-route.trycloudflare.com' });
+server.bus.emit('resource-archiver.progress', { phase: 'fetching', detail: 'PRIVATE_TARGET_URL' });
+server.bus.emit('sslscan-auditor.progress', { phase: 'protocols', target: 'PRIVATE_TLS_TARGET' });
 server.bus.emit('pairing.changed', { at: Date.now() });
 server.bus.emit('future.unreviewed.secret', { secret: 'PRIVATE_FUTURE_EVENT' });
 await new Promise((resolveTimer) => setTimeout(resolveTimer, 30));
 ws.off('message', collectPaired);
 adminEventWs.off('message', collectAdmin);
-const sensitiveEvents = new Set(['scheduler.changed', 'log', 'voice.command', 'providers.changed', 'remote-link.changed', 'pairing.changed']);
-check('non-admin WS receives no scheduler, log, voice, provider, or remote-link administrator events', !pairedEvents.some((message) => sensitiveEvents.has(message.event)));
+const sensitiveEvents = new Set(['scheduler.changed', 'log', 'voice.command', 'providers.changed', 'remote-link.changed', 'resource-archiver.progress', 'sslscan-auditor.progress', 'pairing.changed']);
+check('non-admin WS receives no scheduler, log, voice, provider, plugin-target, or remote-link administrator events', !pairedEvents.some((message) => sensitiveEvents.has(message.event)));
 check('administrator WS receives reviewed sensitive events', [...sensitiveEvents].every((event) => adminEvents.some((message) => message.event === event)));
 check('unreviewed event types fail closed for every WS client', !pairedEvents.some((message) => message.event === 'future.unreviewed.secret') && !adminEvents.some((message) => message.event === 'future.unreviewed.secret'));
 adminEventWs.close();
@@ -1310,8 +1327,42 @@ check('persistent conversation list', conversationList.ok === true && conversati
 
 const blockedEscalation = await rpc(ws, 'settings.set', { safety: { mode: 'full' } });
 check('device token cannot escalate global permission', blockedEscalation.ok === false);
+const blockedCategoryChange = await rpc(ws, 'plugins.setCategory', { id: 'ctf-toolpack', category: 'other' });
+check('paired device cannot change plugin categories', blockedCategoryChange.ok === false
+  && server.plugins.list().find((plugin) => plugin.id === 'ctf-toolpack')?.category === 'pentest');
 const adminAuth = await rpc(ws, 'auth', { secret: server.secret });
 check('loopback admin auth', adminAuth.ok === true && adminAuth.result?.ok === true);
+const badPluginWorkspace = await rpc(ws, 'plugins.call', {
+  name: 'resource-archiver.archive',
+  workspaceId: 'not-a-registered-workspace',
+  params: {
+    authorizationConfirmed: true,
+    pageUrl: 'https://example.com/',
+    fetchMissing: false,
+    capturedResources: [{ url: 'https://example.com/', mimeType: 'text/html', bodyText: '<!doctype html><title>offline</title>' }],
+  },
+});
+check('plugin workbench rejects an unregistered workspace id', badPluginWorkspace.ok === false);
+const archivedFromWorkbench = await rpc(ws, 'plugins.call', {
+  name: 'resource-archiver.archive',
+  workspaceId: pluginWorkspace.id,
+  params: {
+    authorizationConfirmed: true,
+    pageUrl: 'https://example.com/',
+    outputPath: 'resource-archives/smoke.zip',
+    fetchMissing: false,
+    capturedResources: [{ url: 'https://example.com/', mimeType: 'text/html', bodyText: '<!doctype html><title>offline</title>' }],
+  },
+});
+check('plugin workbench confines output to the selected registered workspace', archivedFromWorkbench.ok === true
+  && archivedFromWorkbench.result?.outputPath === join(pluginWorkspaceRoot, 'resource-archives', 'smoke.zip')
+  && existsSync(archivedFromWorkbench.result.outputPath));
+const categoryChange = await rpc(ws, 'plugins.setCategory', { id: 'ctf-toolpack', category: 'other' });
+const categorizedPlugins = await rpc(ws, 'plugins.list', {});
+check('administrator category change is stored and exposed over RPC', categoryChange.ok === true
+  && categoryChange.result?.category === 'other'
+  && categorizedPlugins.result?.find((plugin) => plugin.id === 'ctf-toolpack')?.category === 'other');
+await rpc(ws, 'plugins.setCategory', { id: 'ctf-toolpack', category: 'pentest' });
 const presetList = await rpc(ws, 'routing.presets.list', {});
 check('routing presets exposed over RPC', presetList.ok === true && presetList.result?.length >= 4);
 const presetSave = await rpc(ws, 'routing.presets.save', { name: 'RPC 테스트 트리' });

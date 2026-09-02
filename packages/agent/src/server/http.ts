@@ -582,7 +582,7 @@ export interface HttpApiHost {
   pluginsList(): PluginInfo[];
   pluginsLoad(source: string): Promise<PluginInfo>;
   pluginsUnload(id: string): Promise<boolean>;
-  pluginsCall(name: string, params: unknown, auth: AuthContext): Promise<unknown>;
+  pluginsCall(name: string, params: unknown, auth: AuthContext, workspaceId?: string): Promise<unknown>;
   /** Host-only Cloudflare Access headers for an exact configured peer origin. */
   peerRequestHeaders(url: URL): Record<string, string>;
   chatOnce(text: string, auth: AuthContext): Promise<{ text: string }>;
@@ -1356,7 +1356,12 @@ export function createHttpApi(
   });
   app.post('/api/plugins/call', requireAuth, async (req, res) => {
     try {
-      res.json(await host.pluginsCall(String(req.body?.name ?? ''), req.body?.params, requestAuth(res)));
+      res.json(await host.pluginsCall(
+        String(req.body?.name ?? ''),
+        req.body?.params,
+        requestAuth(res),
+        typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : undefined,
+      ));
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }

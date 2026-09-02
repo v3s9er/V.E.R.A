@@ -39,6 +39,7 @@ const app = read('packages/web/src/App.tsx');
 const ui = read('packages/web/src/components/ui.tsx');
 const settings = read('packages/web/src/views/SettingsView.tsx');
 const pluginsView = read('packages/web/src/views/PluginsView.tsx');
+const pluginCategories = read('packages/web/src/plugin-categories.ts');
 const schedulesView = read('packages/web/src/views/SchedulesView.tsx');
 const dependencySetup = read('packages/web/src/components/DependencySetup.tsx');
 const routingGraph = read('packages/web/src/components/RoutingGraphEditor.tsx');
@@ -249,6 +250,11 @@ if (!schedulesView.includes('clearNaverCredentials: true')
   || !schedulesView.includes('집 주소와 근무 일정은 유지됩니다.')) throw new Error('NAVER credential removal lacks an explicit scoped confirmation dialog');
 if (!dependencySetup.includes('const canManage = client.isAdmin') || !dependencySetup.includes('disabled={!canManage')) throw new Error('dependency setup is not safely read-only for paired devices');
 if (!pluginsView.includes('if (!canManage)') || !pluginsView.includes('플러그인 관리는 PC 전용입니다') || !pluginsView.includes('if (!canManage) return;')) throw new Error('plugin management is not replaced by a read-only catalog for paired devices');
+if ((pluginsView.match(/className="plugin-category-list"/g) ?? []).length !== 2
+  || !pluginsView.includes('groupPluginsByCategory(plugins)')
+  || !pluginsView.includes("client.call('plugins.setCategory'")
+  || !pluginCategories.includes("pentest: '모의해킹'")
+  || !css.includes('.plugin-category-head')) throw new Error('plugin categories are not grouped into labeled sections in both administrator and read-only catalogs');
 if (!schedulesView.includes('Promise.allSettled') || !schedulesView.includes('canManageJobs ? client.call(\'scheduler.list\'') || !schedulesView.includes('일정 보기 모드')) throw new Error('paired-device scheduler denial can still block general calendar use');
 if (!schedulesView.includes('disabled={busy || !importPerson.trim()}')
   || schedulesView.includes('disabled={busy || !importPerson.trim() || !importTeam.trim()}')) throw new Error('optional workbook team filter is incorrectly required by the UI');

@@ -3,6 +3,7 @@ import QRCode from 'qrcode';
 import type {
   DependencyInfo,
   DependencyInstallResult,
+  PluginCategory,
   PluginInfo,
   RemoteLinkConfig,
   RemoteLinkStatus,
@@ -10,6 +11,8 @@ import type {
 } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Input, Modal, Select } from '../components/ui';
+import { PluginWorkbench } from '../components/PluginWorkbench';
+import { PLUGIN_CATEGORY_LABELS, groupPluginsByCategory } from '../plugin-categories';
 
 interface OrcaConfig {
   enabled: boolean;
@@ -80,6 +83,8 @@ export function PluginsView() {
   const [mcpArgs, setMcpArgs] = useState('');
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfig | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [workbenchId, setWorkbenchId] = useState<string | null>(null);
+  const [categoryBusy, setCategoryBusy] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteLinkStatus | null>(null);
   const [remoteConfig, setRemoteConfig] = useState<RemoteLinkConfig>(DEFAULT_REMOTE_CONFIG);
   const [remoteTunnelToken, setRemoteTunnelToken] = useState('');
@@ -399,6 +404,20 @@ export function PluginsView() {
         remoteActionRef.current = false;
         setRemoteBusy(false);
       }
+    }
+  };
+
+  const setPluginCategory = async (plugin: PluginInfo, category: PluginCategory): Promise<void> => {
+    if (categoryBusy) return;
+    setCategoryBusy(plugin.id);
+    setError('');
+    try {
+      const updated = await client.call('plugins.setCategory', { id: plugin.id, category }) as PluginInfo;
+      setPlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, ...updated } : item));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCategoryBusy(null);
     }
   };
 
@@ -746,6 +765,11 @@ export function PluginsView() {
     }
   };
 
+  const closeWorkbench = useCallback((): void => setWorkbenchId(null), []);
+  const recordWorkbenchResult = useCallback((pluginId: string, value: unknown): void => {
+    setDetails((current) => ({ ...current, [pluginId]: value }));
+  }, []);
+
   const remotePlugin = plugins.find((plugin) => plugin.id === 'remote-link');
   const namedMode = remoteConfig.provider === 'cloudflare-named';
   const accessDraftComplete = Boolean(remoteAccessClientId.trim() && remoteAccessClientSecret.trim());
@@ -786,6 +810,8 @@ export function PluginsView() {
 
   const enabledCount = plugins.filter((plugin) => plugin.enabled).length;
   const healthyCount = plugins.filter((plugin) => plugin.status === 'loaded').length;
+  const pluginGroups = groupPluginsByCategory(plugins);
+  const workbenchPlugin = workbenchId ? plugins.find((plugin) => plugin.id === workbenchId) : undefined;
 
   if (!canManage) {
     return (
@@ -796,20 +822,25 @@ export function PluginsView() {
         </section>
         <div className="access-scope-banner" role="status"><span>🔒</span><div><b>플러그인 관리는 PC 전용입니다</b><p>추가·제거·설정·실행과 원격 링크 변경은 해당 PC의 데스크톱 관리자 연결에서만 가능합니다. 대화에서 이미 허용된 도구를 사용하거나 파일·일정을 조회하는 기능은 그대로 유지됩니다.</p></div></div>
         {plugins.length === 0 ? <Card className="panel empty"><p>설치된 플러그인이 없습니다.</p></Card> : (
-          <div className="plugin-grid">{plugins.map((plugin) => (
+          <div className="plugin-category-list">{pluginGroups.map((group) => (
+            <section key={group.category} className="plugin-category-section" aria-labelledby={`plugin-category-readonly-${group.category}`}>
+              <header className="plugin-category-head"><h3 id={`plugin-category-readonly-${group.category}`}>{group.label}</h3><span>{group.plugins.length}개</span></header>
+              <div className="plugin-grid">{group.plugins.map((plugin) => (
             <Card key={plugin.id} className="panel plugin-card plugin-card-readonly">
               <div className="plugin-head">
                 <div className="plugin-identity">
-                  <span className="plugin-icon">{plugin.id === 'orca' ? '⌘' : plugin.id === 'calendar' ? '◷' : plugin.id === 'remote-link' ? '☁' : plugin.id === 'tailscale-connect' ? '↔' : plugin.id === 'docker-sandbox' ? '▣' : plugin.id === 'ctf-toolpack' ? '⌁' : plugin.id === 'mcp-host' ? '◇' : '◉'}</span>
+                  <span className="plugin-icon">{plugin.id === 'orca' ? '⌘' : plugin.id === 'calendar' ? '◷' : plugin.id === 'remote-link' ? '☁' : plugin.id === 'tailscale-connect' ? '↔' : plugin.id === 'docker-sandbox' ? '▣' : plugin.id === 'ctf-toolpack' ? '⌁' : plugin.id === 'mcp-host' ? '◇' : plugin.id === 'resource-archiver' ? '⇩' : plugin.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
                   <div><h3 className="plugin-name">{plugin.name} <span className="plugin-ver">v{plugin.version}</span></h3><p className="plugin-desc">{plugin.description || plugin.id}</p></div>
                 </div>
                 <div className="plugin-status"><span className={`status-dot ${plugin.enabled ? 'ok' : 'off'}`} /><span>{plugin.enabled ? '사용 중' : '꺼짐'}</span></div>
               </div>
-              <div className="plugin-meta"><Badge tone="accent">{KIND_LABEL[plugin.kind] ?? plugin.kind}</Badge><Badge>{plugin.builtin ? '기본 모듈' : '사용자 모듈'}</Badge><Badge>읽기 전용</Badge></div>
+              <div className="plugin-meta"><Badge tone="accent">{KIND_LABEL[plugin.kind] ?? plugin.kind}</Badge><Badge>{group.label}</Badge><Badge>{plugin.builtin ? '기본 모듈' : '사용자 모듈'}</Badge><Badge>읽기 전용</Badge></div>
               {plugin.capabilities.length > 0 && <div className="plugin-capabilities">{plugin.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
               {plugin.permissions.length > 0 && <p className="panel-hint">요청 권한: {plugin.permissions.join(' · ')}</p>}
               {plugin.dependencies.length > 0 && <p className="panel-hint">의존성: {plugin.dependencies.map((dependency) => `${dependency.name}${dependency.required ? ' (필수)' : ''}`).join(' · ')}</p>}
             </Card>
+              ))}</div>
+            </section>
           ))}</div>
         )}
       </div>
@@ -836,23 +867,35 @@ export function PluginsView() {
             {busy ? '불러오는 중…' : '불러오기'}
           </Button>
         </div>
-        {error && <div className="gate-error">{error}</div>}
+        {error && <div className="gate-error" role="alert">{error}</div>}
         <p className="panel-hint">
           예제: <code>{'<mr-robot 설치폴더>\\examples\\plugins\\hello'}</code> — 플러그인은 언제든 떼어내도 메모리 누수가
           없습니다. (리스너·타이머·명령·모듈 캐시 자동 정리)
         </p>
       </Card>
 
+      {workbenchPlugin && <PluginWorkbench
+        key={workbenchPlugin.id}
+        plugin={workbenchPlugin}
+        client={client}
+        initialResult={details[workbenchPlugin.id]}
+        onClose={closeWorkbench}
+        onResult={recordWorkbenchResult}
+      />}
+
       {plugins.length === 0 ? (
         <Card className="panel empty">
           <p>불러온 플러그인이 없습니다.</p>
         </Card>
       ) : (
-        <div className="plugin-grid">{plugins.map((p) => (
+        <div className="plugin-category-list">{pluginGroups.map((group) => (
+          <section key={group.category} className="plugin-category-section" aria-labelledby={`plugin-category-${group.category}`}>
+            <header className="plugin-category-head"><h3 id={`plugin-category-${group.category}`}>{group.label}</h3><span>{group.plugins.length}개</span></header>
+            <div className="plugin-grid">{group.plugins.map((p) => (
           <Card key={p.id} className={`panel plugin-card ${expanded === p.id ? 'expanded' : ''}`}>
             <div className="plugin-head">
               <div className="plugin-identity">
-                <span className="plugin-icon">{p.id === 'orca' ? '⌘' : p.id === 'calendar' ? '◷' : p.id === 'remote-link' ? '☁' : p.id === 'tailscale-connect' ? '↔' : p.id === 'docker-sandbox' ? '▣' : p.id === 'ctf-toolpack' ? '⌁' : p.id === 'mcp-host' ? '◇' : '◉'}</span>
+                <span className="plugin-icon">{p.id === 'orca' ? '⌘' : p.id === 'calendar' ? '◷' : p.id === 'remote-link' ? '☁' : p.id === 'tailscale-connect' ? '↔' : p.id === 'docker-sandbox' ? '▣' : p.id === 'ctf-toolpack' ? '⌁' : p.id === 'mcp-host' ? '◇' : p.id === 'resource-archiver' ? '⇩' : p.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
                 <div>
                 <h3 className="plugin-name">
                   {p.name} <span className="plugin-ver">v{p.version}</span>
@@ -866,9 +909,24 @@ export function PluginsView() {
               <Badge tone="accent">{KIND_LABEL[p.kind] ?? p.kind}</Badge>
               <Badge>{p.builtin ? '기본 모듈' : '사용자 모듈'}</Badge>
               <Badge>명령 {p.commands.length}개</Badge>
+              <label className="plugin-category-picker">
+                <span>카테고리</span>
+                <Select value={group.category} onChange={(event) => void setPluginCategory(p, event.target.value as PluginCategory)} disabled={categoryBusy !== null} aria-label={`${p.name} 카테고리`}>
+                  {Object.entries(PLUGIN_CATEGORY_LABELS).map(([category, label]) => <option key={category} value={category}>{label}</option>)}
+                </Select>
+              </label>
             </div>
             <div className="plugin-actions">
               {p.id !== 'voice-wake' && <Button variant={p.enabled ? 'ghost' : 'accent'} onClick={() => void togglePlugin(p)} disabled={p.id === 'remote-link' && remoteBusy}>{p.enabled ? '끄기' : '켜기'}</Button>}
+              {p.commands.length > 0 && <Button
+                id={`plugin-workbench-trigger-${p.id}`}
+                variant={workbenchId === p.id ? 'accent' : 'ghost'}
+                aria-pressed={workbenchId === p.id}
+                onClick={() => {
+                  setWorkbenchId((current) => current === p.id ? null : p.id);
+                  setExpanded(null);
+                }}
+              >{workbenchId === p.id ? '작업 화면 닫기' : '작업 화면'}</Button>}
               <Button variant="ghost" onClick={() => setExpanded((current) => current === p.id ? null : p.id)}>{expanded === p.id ? '설정 닫기' : '설정·상세'}</Button>
               {p.id === 'orca' ? <>
                 <Button variant="ghost" onClick={() => void refreshOrca(true)} disabled={orcaBusy}>상태 확인</Button>
@@ -876,7 +934,7 @@ export function PluginsView() {
               </> : <>
                 {p.id === 'remote-link'
                   ? <Button variant="ghost" onClick={() => void refreshRemoteLink(true)} disabled={remoteBusy}>상태 확인</Button>
-                  : p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>)}
+                  : p.builtin ? p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>) : null}
                 {p.id === 'tailscale-connect' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'tailscale.peers')}>기기 목록</Button>}
                 {p.id === 'docker-sandbox' && <Button onClick={() => void pluginCall(p.id, 'docker.ctf.image.ensure')} disabled={busy}>CTF 이미지 준비</Button>}
                 {p.id === 'mcp-host' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'mcp.servers.list')}>연결 목록</Button>}
@@ -1014,6 +1072,8 @@ export function PluginsView() {
             </div>}
             </div>}
           </Card>
+            ))}</div>
+          </section>
         ))}</div>
       )}
 

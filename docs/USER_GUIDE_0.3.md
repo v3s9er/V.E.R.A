@@ -110,7 +110,7 @@ CTF는 본인이 소유하거나 명시적으로 허가받은 문제·워게임 
 
 ## 9. 설치 파일
 
-- Windows x64: `release/Mr.Robot-Setup-0.4.0-x64.exe`
+- Windows x64: `release/Mr.Robot-Setup-0.4.1-x64.exe`
 - Android: 기존 릴리스 키로 `release/mobile/Mr.Robot-Mobile-0.4.0.apk` 생성
 
 0.2.1 이하 모바일 시험판은 Android 디버그 인증서로 서명됐고, 0.3.0부터는 Mr.Robot 전용 릴리스 인증서를 사용합니다. Android 보안 정책상 기존 시험판 위에 바로 덮어쓸 수 없으므로, 필요한 대화·프리셋을 먼저 PC와 동기화한 뒤 기존 앱을 한 번 제거하고 0.4.0을 설치해 다시 페어링하세요. 0.3.0~0.3.9 사용자는 같은 릴리스 키와 더 높은 versionCode 15를 사용하는 0.4.0으로 바로 업데이트할 수 있습니다.

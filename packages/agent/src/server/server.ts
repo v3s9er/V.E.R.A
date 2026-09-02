@@ -13,6 +13,7 @@ import type {
   ReasoningEffort,
   RoutingSettings,
   RoutingPreset,
+  PluginCategory,
   PluginInfo,
   ProviderAddInput,
   ProviderInfo,
@@ -47,6 +48,8 @@ import { createCtfPlugin } from '../plugins/ctf.js';
 import { createMcpPlugin } from '../plugins/mcp.js';
 import { createVoicePlugin } from '../plugins/voice.js';
 import { createRemoteLinkPlugin } from '../plugins/remote-link.js';
+import { createResourceArchiverPlugin } from '../plugins/resource-archiver/index.js';
+import { createSslScanPlugin } from '../plugins/sslscan/index.js';
 import { computer } from '../computer/index.js';
 import { Scheduler, SchedulerStore } from '../scheduler.js';
 import { DependencyManager } from '../dependencies.js';
@@ -57,7 +60,7 @@ import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.4.1';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -78,6 +81,8 @@ const ADMIN_EVENT_ALLOWLIST = new Set([
   'dependencies.changed', 'memory.changed', 'scheduler.changed', 'scheduler.ran',
   'voice.wake', 'voice.command', 'voice.command.ready', 'voice.command.timeout',
   'voice.status', 'pairing.changed', 'remote-link.changed',
+  'resource-archiver.progress', 'sslscan-auditor.progress',
+  'sslscan-auditor.completed',
 ]);
 
 export function serverEventAudience(event: string): ServerEventAudience {
@@ -1006,6 +1011,10 @@ export class AgentServer {
     return this.plugins.list();
   }
 
+  pluginsSetCategory(id: string, category: PluginCategory): PluginInfo {
+    return this.plugins.setCategory(id, category);
+  }
+
   async pluginsLoad(source: string): Promise<PluginInfo> {
     return this.plugins.load(source);
   }
@@ -1014,7 +1023,7 @@ export class AgentServer {
     return this.plugins.unload(id);
   }
 
-  async pluginsCall(name: string, params: unknown, auth?: AuthContext): Promise<unknown> {
+  async pluginsCall(name: string, params: unknown, auth?: AuthContext, workspaceId?: string): Promise<unknown> {
     const permissionMode = effectiveMode(this.config.settings.safety.mode, auth?.permissionCap);
     const deviceCapabilities = auth?.isAdmin
       ? ['work-sync', 'private-calendar', 'file-transfer']
@@ -1026,10 +1035,18 @@ export class AgentServer {
     if (this.plugins.isDestructive(name) && !auth?.isAdmin && permissionMode !== 'full' && !narrowCapabilityAllowsWrite) {
       throw new Error('직접 변경형 플러그인 호출은 전체 허용 모드가 필요합니다. 대화에서 위임하면 현재 권한 정책에 따라 승인됩니다.');
     }
+    let workspaceRoot: string | undefined;
+    if (workspaceId !== undefined) {
+      if (!auth?.isAdmin) throw new Error('플러그인 작업 폴더 선택은 관리자 권한이 필요합니다.');
+      const workspace = this.config.workspaces.find((item) => item.id === workspaceId);
+      if (!workspace) throw new Error('등록된 작업 폴더를 찾을 수 없습니다.');
+      workspaceRoot = workspace.path;
+    }
     return this.plugins.call(name, params, {
       permissionMode,
       isAdmin: auth?.isAdmin === true,
       deviceCapabilities,
+      workspaceRoot,
       destructiveApproved: auth?.isAdmin === true || !this.plugins.isDestructive(name) || permissionMode === 'full' || narrowCapabilityAllowsWrite,
       approvalSource: this.plugins.isDestructive(name) ? 'policy' : 'not-required',
     });
@@ -1110,6 +1127,8 @@ export class AgentServer {
     await this.plugins.loadBuiltin(createCtfPlugin());
     await this.plugins.loadBuiltin(createMcpPlugin());
     await this.plugins.loadBuiltin(createVoicePlugin());
+    await this.plugins.loadBuiltin(createResourceArchiverPlugin());
+    await this.plugins.loadBuiltin(createSslScanPlugin());
     const settings = this.config.settings.network;
     // A persisted 0.0.0.0 value never opens the LAN unless the separate
     // externalAccess consent is also enabled. Explicit StartOptions remain
@@ -1162,6 +1181,7 @@ export class AgentServer {
       'memory.changed', 'scheduler.changed', 'scheduler.ran', 'workspaces.changed',
       'calendar.changed', 'calendar.work.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
       'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed',
+      'resource-archiver.progress', 'sslscan-auditor.progress', 'sslscan-auditor.completed',
     ].forEach(forward);
     this.busSubscriptions.push(this.bus.on('remote-link.changed', (data) => {
       const status = data as { running?: unknown };
@@ -1424,7 +1444,19 @@ export class AgentServer {
     h.set('plugins.load', async (params, client) => { assertAdmin(client); return this.plugins.load(str(p(params).path)); });
     h.set('plugins.unload', async (params, client) => { assertAdmin(client); return this.plugins.unload(str(p(params).id)); });
     h.set('plugins.setEnabled', (params, client) => { assertAdmin(client); return this.plugins.setEnabled(str(p(params).id), p(params).enabled === true); });
-    h.set('plugins.call', (params, client) => this.pluginsCall(str(p(params).name), p(params).params, client.state.auth ?? undefined));
+    h.set('plugins.setCategory', (params, client) => {
+      assertAdmin(client);
+      return this.pluginsSetCategory(str(p(params).id), str(p(params).category) as PluginCategory);
+    });
+    h.set('plugins.call', (params, client) => {
+      const body = p(params);
+      return this.pluginsCall(
+        str(body.name),
+        body.params,
+        client.state.auth ?? undefined,
+        typeof body.workspaceId === 'string' ? body.workspaceId : undefined,
+      );
+    });
 
     // ---- persistent conversations and retained memory ----
     h.set('conversations.list', (params) => {

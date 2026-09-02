@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { PluginContext } from './context.js';
-import type { PluginDependency, PluginKind, PluginPermission } from '@mr-robot/shared';
+import { isPluginCategory, type PluginCategory, type PluginDependency, type PluginKind, type PluginPermission } from '@mr-robot/shared';
 
 const require = createRequire(import.meta.url);
 
@@ -13,6 +13,8 @@ export interface PluginManifest {
   version: string;
   description?: string;
   kind?: PluginKind;
+  /** Catalog section. Older plugins may omit this and receive a host default. */
+  category?: PluginCategory;
   capabilities?: string[];
   permissions?: PluginPermission[];
   dependencies?: PluginDependency[];
@@ -105,6 +107,7 @@ export function extractPlugin(mod: unknown): MrRobotPlugin {
       version: String(manifest.version ?? '0.0.0'),
       description: typeof manifest.description === 'string' ? manifest.description : undefined,
       kind: manifest.kind,
+      category: isPluginCategory(manifest.category) ? manifest.category : undefined,
       capabilities: Array.isArray(manifest.capabilities) ? manifest.capabilities.map(String) : undefined,
       permissions: Array.isArray(manifest.permissions) ? manifest.permissions : undefined,
       dependencies: Array.isArray(manifest.dependencies) ? manifest.dependencies : undefined,

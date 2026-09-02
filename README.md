@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.4.0**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.0.md](docs/RELEASE_NOTES_0.4.0.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.4.1**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.1.md](docs/RELEASE_NOTES_0.4.1.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.1.md](docs/PLUGIN_COMPARISON_0.4.1.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -26,7 +26,10 @@ PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에
 - 🌳 **의사결정 트리 프리셋** — 절약·균형·품질·코딩 기본 트리와 사용자 트리를 저장·적용·덮어쓰기·삭제
 - 🖥️🖥️ **다중 PC 등록·전환** — PC 여러 대를 등록하고 언제든 전환
 - ⏰ **예약 작업** — 특정 시각에 자동 실행 (일회성/매일/요일 반복): AI 작업·셸 명령·앱 실행
-- 🔌 **플러그인** — 붙였다 떼도 메모리 누수 0 (리스너·타이머·명령·모듈 캐시 전부 자동 정리, 600회 부착/분리 테스트 통과)
+- 🔌 **분류형 플러그인 + 작업 화면** — 시스템·연결/생산성/개발/모의해킹/기타로 묶고, 필요한 플러그인은 목록 안의 전용 작업 화면에서 입력·사전 점검·승인·실행 결과까지 처리
+- 📦 **허가된 웹 리소스 보존** — 이미 받은 HAR/캡처 본문을 우선 재사용하고, 선택한 경우에만 제한된 공개 자산을 요청해 오프라인 링크·SHA-256 manifest·중복 제거가 포함된 ZIP 생성
+- 🔎 **독립 SSL/TLS 점검** — 허가된 공개 호스트 하나의 TLS 버전·제한 암호군·인증서·정책 진단을 빠른 4연결 기본값과 캐시로 제공
+- 🧹 **결정적 플러그인 정리** — 붙였다 떼도 메모리 누수 0 (리스너·타이머·명령·모듈 캐시 전부 자동 정리, 600회 부착/분리 테스트 통과)
 - 🐋 **Orca 코딩 실행기** — 코딩 요청을 격리된 Orca worktree의 Codex·Claude 에이전트로 위임하고 상태·터미널을 다시 Mr.Robot에서 확인
 - 🔑 **모델 모듈 자유 선택** — API, 무료 원격, Ollama/LM Studio 로컬, 공식 Codex/Claude CLI를 등록하고 모델을 나중에도 즉시 변경
 - 🛡️ **4단계 권한** — 읽기 전용·변경 전 승인·지정 폴더 자동·전체 허용, 페어링 토큰 인증, PIN 교환 rate-limit
@@ -78,7 +81,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.4.0-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.4.1-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -141,7 +144,16 @@ Mr.Robot에는 `Orca 코딩 실행기`가 기본 플러그인으로 포함되지
 
 ## 플러그인
 
-플러그인 탭에서 경로로 불러오기/제거. 예제:
+플러그인 탭은 플러그인을 **시스템·연결 / 생산성 / 개발 / 모의해킹 / 기타**로 묶어 표시합니다. 관리자는 각 플러그인의 카테고리를 바꿀 수 있고 선택은 호스트 설정에 유지됩니다. `작업 화면` 버튼을 누르면 목록을 떠나지 않고 해당 플러그인의 입력, 안전 한도, 실행 전 확인, 진행률과 결과를 한 화면에서 다룰 수 있습니다. 검토된 기본 플러그인만 직접 실행 UI를 제공하며, 외부 플러그인의 임의 명령은 자동 실행하지 않습니다.
+
+0.4.1에 포함된 모의해킹 카테고리의 기본 플러그인:
+
+- **Authorized Web Resource Archiver** — HAR/브라우저 캡처 응답은 네트워크 요청 0회로 보존할 수 있습니다. 직접 수집은 명시적으로 켜야 하며 UI 기본값은 재시도 0회, 동시 요청 2개, 1단계 의존성, 리디렉션을 포함한 물리 GET 최대 40회입니다. 엔진은 전체 작업도 기본 60초로 중단합니다.
+- **SSL/TLS Inspector** — URL·CIDR·목록이 아닌 허가된 공개 호스트 하나만 받습니다. 기본 `quick`은 TLS 1.0~1.3 핸드셰이크 4회와 인증서만 확인하며 개별 암호군 탐색은 하지 않습니다. 같은 조건의 결과는 기본 5분 캐시됩니다.
+
+두 플러그인 모두 대상 소유 또는 명시적 허가 확인과 실행별 승인을 요구합니다. Resource Archiver는 같은 호스트와 정확히 허용한 공개 DNS 호스트만 GET하며, SSL/TLS Inspector는 허용 포트의 직접 TLS만 점검합니다. 사설·loopback·link-local·예약 주소와 DNS rebinding 경로는 기본 차단됩니다. 기능 범위와 비교 근거는 [플러그인 비교 문서](docs/PLUGIN_COMPARISON_0.4.1.md)에 정리했습니다.
+
+외부 플러그인은 경로로 불러오거나 제거할 수 있습니다. 예제:
 
 ```
 examples/plugins/hello    — 명령 등록 예제
@@ -152,7 +164,7 @@ examples/plugins/monitor  — 이벤트 구독 + 타이머 예제
 
 ```js
 export const plugin = {
-  manifest: { id: 'my-plugin', name: 'My Plugin', version: '1.0.0', description: '…' },
+  manifest: { id: 'my-plugin', name: 'My Plugin', version: '1.0.0', category: 'other', description: '…' },
   activate(ctx) {
     ctx.on('plugins.changed', (list) => ctx.logger.info('plugins: ' + list.map(p => p.id)));
     ctx.setInterval(() => ctx.logger.debug('tick'), 5000);       // 언로드 시 자동 정리
@@ -163,6 +175,8 @@ export const plugin = {
   deactivate(ctx) { /* 정리 코드 */ },
 };
 ```
+
+manifest의 `category`에는 `system`, `productivity`, `development`, `pentest`, `other` 중 하나를 씁니다. 생략한 외부 플러그인은 `other`로 시작하며 관리자가 화면에서 바꿀 수 있습니다.
 
 **누수 없는 이유**: 플러그인이 `ctx`를 통해 만든 모든 리소스(이벤트 구독·타이머·명령)를 관리자가 추적하고, 언로드 시 ①`deactivate()` 호출 → ②구독 해제 → ③타이머 해제 → ④명령 제거 → ⑤모듈 캐시 제거 → ⑥참조 해제 순서로 결정적으로 정리합니다. ESM 모듈은 파일 mtime 기반 캐시라서 같은 파일의 재로드는 모듈 맵에 아무것도 쌓지 않습니다(누수 테스트로 검증). 단, **모듈 스코프 변수는 파일 수정 전까지 유지**되므로 로드마다 초기화되는 상태는 `ctx`(storage 등)에 두세요.
 
@@ -178,6 +192,7 @@ export const plugin = {
 - 외부 접속은 기본 OFF인 Cloudflare Quick Link 또는 선택형 Tailscale 플러그인을 사용하며, 어떤 전송에서도 기기별 토큰 인증은 유지됩니다
 - `~/.mr-robot/` 에 설정·대화·기억·예약·라우팅 통계가 저장됩니다. API 키 값은 Windows 사용자 계정에 묶인 DPAPI 암호문으로만 기록됩니다.
 - 개인 근무표는 원본 Excel을 읽기 전용으로만 열고 필요한 날짜·근무지 값만 `~/.mr-robot/private/work-calendar/state.bin`의 DPAPI 암호문에 저장합니다. 원본 파일·행 식별값·NAVER 키는 Git이나 일반 기기 동기화에 넣지 않습니다.
+- 공개 GitHub 저장소의 **Secret scanning**과 **Push protection**을 켜서 알려진 비밀 패턴의 이력 탐지와 새 push 차단을 함께 적용합니다. 이는 로컬 DPAPI·로그 마스킹·릴리스 감사와 별개의 저장소 방어선입니다.
 
 ## 구조
 

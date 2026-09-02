@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { PluginInfo } from '@mr-robot/shared';
+import { isPluginCategory, type PluginCategory, type PluginInfo } from '@mr-robot/shared';
 import type { EventBus } from '../eventbus.js';
 import type { Logger } from '../logger.js';
 import type { Computer } from '../computer/index.js';
@@ -18,6 +18,21 @@ interface LoadedPlugin {
   ctx: PluginContextImpl;
 }
 
+const BUILTIN_CATEGORY_DEFAULTS: Readonly<Record<string, PluginCategory>> = {
+  calendar: 'productivity',
+  'voice-wake': 'productivity',
+  orca: 'development',
+  'mcp-host': 'development',
+  'docker-sandbox': 'pentest',
+  'ctf-toolpack': 'pentest',
+};
+
+function defaultCategory(plugin: MrRobotPlugin, builtin: boolean): PluginCategory {
+  if (isPluginCategory(plugin.manifest.category)) return plugin.manifest.category;
+  if (!builtin) return 'other';
+  return BUILTIN_CATEGORY_DEFAULTS[plugin.manifest.id] ?? 'system';
+}
+
 /**
  * Owns every live plugin and guarantees clean attach/detach:
  *
@@ -33,7 +48,7 @@ export class PluginManager {
   readonly commands = new PluginCommandRegistry();
   private readonly storage: PluginStorage;
   private readonly plugins = new Map<string, LoadedPlugin>();
-  private readonly enabledState: { get<T>(key: string): T | undefined; set(key: string, value: unknown): void };
+  private readonly hostState: { get<T>(key: string): T | undefined; set(key: string, value: unknown): void };
 
   constructor(
     private readonly bus: EventBus,
@@ -43,7 +58,7 @@ export class PluginManager {
     private readonly logger: Logger,
   ) {
     this.storage = new PluginStorage(join(config.dir, 'plugins'));
-    this.enabledState = this.storage.for('_host');
+    this.hostState = this.storage.for('_host');
   }
 
   list(): PluginInfo[] {
@@ -83,8 +98,9 @@ export class PluginManager {
       description: plugin.manifest.description ?? '',
       status: 'loaded',
       kind: plugin.manifest.kind ?? 'integration',
+      category: this.savedCategory(id) ?? defaultCategory(plugin, false),
       builtin: false,
-      enabled: this.enabledState.get<boolean>(`enabled:${id}`) ?? plugin.manifest.enabledByDefault !== false,
+      enabled: this.hostState.get<boolean>(`enabled:${id}`) ?? plugin.manifest.enabledByDefault !== false,
       capabilities: plugin.manifest.capabilities ?? [],
       permissions: plugin.manifest.permissions ?? [],
       dependencies: plugin.manifest.dependencies ?? [],
@@ -118,8 +134,9 @@ export class PluginManager {
       description: plugin.manifest.description ?? '',
       status: 'loaded',
       kind: plugin.manifest.kind ?? 'integration',
+      category: this.savedCategory(id) ?? defaultCategory(plugin, true),
       builtin: true,
-      enabled: this.enabledState.get<boolean>(`enabled:${id}`) ?? plugin.manifest.enabledByDefault !== false,
+      enabled: this.hostState.get<boolean>(`enabled:${id}`) ?? plugin.manifest.enabledByDefault !== false,
       capabilities: plugin.manifest.capabilities ?? [],
       permissions: plugin.manifest.permissions ?? [],
       dependencies: plugin.manifest.dependencies ?? [],
@@ -172,9 +189,25 @@ export class PluginManager {
     const plugin = this.plugins.get(id);
     if (!plugin) throw new Error('플러그인을 찾을 수 없습니다.');
     plugin.info.enabled = enabled;
-    this.enabledState.set(`enabled:${id}`, enabled);
+    this.hostState.set(`enabled:${id}`, enabled);
     this.bus.emit('plugins.changed', this.list());
     return { ...plugin.info };
+  }
+
+  /** Persist an administrator catalog override independently of plugin code. */
+  setCategory(id: string, category: PluginCategory): PluginInfo {
+    const plugin = this.plugins.get(id);
+    if (!plugin) throw new Error('플러그인을 찾을 수 없습니다.');
+    if (!isPluginCategory(category)) throw new Error('지원하지 않는 플러그인 카테고리입니다.');
+    plugin.info.category = category;
+    this.hostState.set(`category:${id}`, category);
+    this.bus.emit('plugins.changed', this.list());
+    return { ...plugin.info };
+  }
+
+  private savedCategory(id: string): PluginCategory | undefined {
+    const value = this.hostState.get<unknown>(`category:${id}`);
+    return isPluginCategory(value) ? value : undefined;
   }
 
   isDestructive(name: string): boolean {
