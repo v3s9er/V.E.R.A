@@ -77,7 +77,7 @@ if (!chat.includes("const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['
   || !chat.includes('provider?.supportedReasoning.length')
   || !chat.includes("value === 'auto' || supported.has(value)")) throw new Error('desktop reasoning choices can lose provider capabilities, auto, or the common fallback');
 const desktopComposerInput = chat.indexOf('<textarea className="chat-input"');
-const desktopReasoningControl = chat.indexOf('className="composer-reasoning"');
+const desktopReasoningControl = chat.indexOf('className="composer-select-control composer-reasoning"');
 if (desktopComposerInput < 0 || desktopReasoningControl < desktopComposerInput
   || !chat.includes('aria-label="입력창 추론 강도"')
   || !chat.includes('disabled={executionControlsDisabled}')) throw new Error('desktop reasoning selector is not accessible, composer-local, or locked during a run or settings save');
@@ -90,9 +90,9 @@ if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g
 if (!chat.includes('updateExecutionConfig({ workspaceId:')
   || !chat.includes('updateExecutionConfig({ permissionMode:')
   || !chat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')) throw new Error('desktop workspace, access, or default-provider settings can race command execution');
-if (!css.includes('.composer-options { min-width: 0; flex: 1 1 250px;')
+if (!css.includes('.composer-options { min-width: 0; flex: 1 1 360px;')
   || !css.includes('.composer-options { width: 100%; flex-basis: 100%; }')
-  || !css.includes('.composer-reasoning-label { display: none; }')) throw new Error('desktop reasoning selector can clip or crowd compact chat layouts');
+  || !css.includes('.composer-select-control .composer-control-select { width: 100%; min-width: 0; max-width: none; }')) throw new Error('desktop reasoning selector can clip or crowd compact chat layouts');
 if (!routingGraph.includes('graph-port-in') || !routingGraph.includes('graph-port-out') || !routingGraph.includes('edge-preview')) throw new Error('routing graph lacks intuitive directional drag connection ports');
 if (!routingGraph.includes('previewColumnStep') || !routingGraph.includes('graph-content-sizer')) throw new Error('read-only routing preview can overlap nodes instead of scrolling on narrow screens');
 if (!routingGraph.includes('removeEdge') || !routingGraph.includes('reverseEdge') || !routingGraph.includes('edge-inspector')) throw new Error('routing edges cannot be selected, reversed and deleted');
@@ -184,11 +184,11 @@ if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEff
   || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes('provider?.supportedReasoning')
   || !mobileChat.includes("effort === 'auto' || supportedSet.has(effort)")) throw new Error('mobile reasoning choices can lose provider capabilities, none support, auto, or the common fallback');
-const mobileInputBar = mobileChat.indexOf('<View style={[styles.inputBar');
-const mobileReasoningBar = mobileChat.indexOf('<View style={[styles.reasoningBar');
-const mobileModelModal = mobileChat.indexOf('<Modal visible={showModels}');
-if (mobileInputBar < 0 || mobileReasoningBar < mobileInputBar || mobileReasoningBar > mobileModelModal
-  || !mobileChat.includes('keyboardShouldPersistTaps="always"')
+const mobileInputBar = mobileChat.indexOf('ref={composerRef}');
+const mobileReasoningControl = mobileChat.indexOf('accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}');
+const mobileReasoningModal = mobileChat.indexOf('<Modal visible={showReasoning}');
+if (mobileInputBar < 0 || mobileReasoningControl < mobileInputBar || mobileReasoningModal < mobileReasoningControl
+  || !mobileChat.includes('style={styles.composerToolbar}')
   || mobileChat.includes('cycleEffort')) throw new Error('mobile reasoning control is not a compact explicit selector at the keyboard-safe composer bottom');
 if (!mobileChat.includes("client.call('conversations.update', { id: conversationId, reasoningEffort })")
   || !mobileChat.includes('const reasoningLocked = !conversation || busy || savingConfiguration')
@@ -196,7 +196,7 @@ if (!mobileChat.includes("client.call('conversations.update', { id: conversation
   || !mobileChat.includes('beginConfigurationSave()')
   || !mobileChat.includes('finishConfigurationSave()')
   || !mobileChat.includes('disabled={reasoningLocked}')
-  || !mobileChat.includes('accessibilityState={{ selected, disabled: reasoningLocked }}')) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or change during a run');
+  || !mobileChat.includes('accessibilityState={{ selected, disabled: savingConfiguration }}')) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or change during a run');
 if (!mobileChat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')
   || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider)')
   || !mobileChat.includes('applyConversationConfiguration(conversationId')

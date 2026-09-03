@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.4.0**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.0.md](docs/RELEASE_NOTES_0.4.0.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.4.1**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.1.md](docs/RELEASE_NOTES_0.4.1.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -78,7 +78,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.4.0-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.4.1-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -94,10 +94,10 @@ npx expo run:android
 
 1. 앱 실행 → `＋ PIN으로 PC 추가` 또는 `QR 코드 스캔`
 2. PC 화면의 **QR 코드**를 스캔하거나, **PC 주소 + PIN** 입력
-3. 하단 탭에서 **대화 / 예약 / 설정** 전환. 대화 입력창 아래에서 현재 모델이 지원하는 추론 강도 선택
+3. 하단 탭에서 **대화 / 예약 / 설정** 전환. 대화 입력창 안의 드롭다운에서 액세스 권한과 현재 모델이 지원하는 추론 강도 선택
 4. PC 여러 대 등록 가능 — 상단 `PC 전환` 버튼으로 전환
 
-Android 0.4.0은 versionCode 15이며 기존 Mr.Robot 릴리스 인증서로 `release/mobile/Mr.Robot-Mobile-0.4.0.apk`를 만듭니다. 0.3.0~0.3.9에서 바로 업데이트할 수 있습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 고정 Tunnel QR에는 12자리·10분·1회용 외출 코드와 최대 5분의 서버 결합 Access assertion만 들어가며 장기 Service Token은 포함되지 않습니다. 첫 등록이 성공하면 PC가 장기 Access 자격과 기기 토큰을 한 번만 전달하고 Android는 PC별 버전형 SecureStore bundle에 원자 저장합니다. 사용자가 Client ID/Secret을 직접 복사할 필요는 없습니다. Tailscale을 쓰는 경우에도 인증 연결은 Serve가 제공하는 HTTPS 이름을 사용합니다. 숫자형 `100.64/10` 및 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
+Android 0.4.1은 versionCode 16이며 기존 Mr.Robot 릴리스 인증서로 `release/mobile/Mr.Robot-Mobile-0.4.1.apk`를 만듭니다. 0.3.0 이후 버전에서 바로 업데이트할 수 있습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 고정 Tunnel QR에는 12자리·10분·1회용 외출 코드와 최대 5분의 서버 결합 Access assertion만 들어가며 장기 Service Token은 포함되지 않습니다. 첫 등록이 성공하면 PC가 장기 Access 자격과 기기 토큰을 한 번만 전달하고 Android는 PC별 버전형 SecureStore bundle에 원자 저장합니다. 사용자가 Client ID/Secret을 직접 복사할 필요는 없습니다. Tailscale을 쓰는 경우에도 인증 연결은 Serve가 제공하는 HTTPS 이름을 사용합니다. 숫자형 `100.64/10` 및 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
 
 ## 모델 모듈과 라우팅 설정
 
@@ -117,7 +117,7 @@ Android 0.4.0은 versionCode 15이며 기존 Mr.Robot 릴리스 인증서로 `re
 
 API 키는 Windows DPAPI(CurrentUser)로 암호화한 뒤 **PC의 `~/.mr-robot/config.json`에만 저장**됩니다. 기존 평문 키는 시작 시 자동 마이그레이션됩니다. 구독형 모듈은 로그인 자격 증명을 복사하지 않고 공식 CLI를 실행합니다.
 
-설정 → 모델 라우팅에서 LangChain식 캔버스에 입력·분류·모델·검증·메모리·응답 노드를 자유 배치하고 연결합니다. 절약·균형·품질·코딩 기본 의사결정 트리를 고르거나 현재 트리를 사용자 프리셋으로 저장해 목록에서 다시 적용할 수 있습니다. 모델 노드의 역할과 제공자를 선택하면 그래프 순서가 실제 역할별 우선순위가 됩니다. 대화에서 특정 모델을 고르면 자동 라우팅보다 우선합니다. 추론 강도는 데스크톱과 모바일 모두 입력창 하단에서 자동/없음/낮음/보통/높음/매우 높음/최대 중 현재 제공자가 지원하는 값만 선택하며 대화마다 저장됩니다. 같은 화면에서 토큰·도구 호출·실패·지연·예상 비용 통계를 확인합니다.
+설정 → 모델 라우팅에서 LangChain식 캔버스에 입력·분류·모델·검증·메모리·응답 노드를 자유 배치하고 연결합니다. 절약·균형·품질·코딩 기본 의사결정 트리를 고르거나 현재 트리를 사용자 프리셋으로 저장해 목록에서 다시 적용할 수 있습니다. 모델 노드의 역할과 제공자를 선택하면 그래프 순서가 실제 역할별 우선순위가 됩니다. 대화에서 특정 모델을 고르면 자동 라우팅보다 우선합니다. 액세스 권한과 추론 강도는 데스크톱과 모바일 모두 입력창 안의 드롭다운에서 바꾸며 대화마다 저장됩니다. 추론은 자동/없음/낮음/보통/높음/매우 높음/최대 중 현재 제공자가 지원하는 값만 표시합니다. 같은 화면에서 토큰·도구 호출·실패·지연·예상 비용 통계를 확인합니다.
 
 ## Orca 연결
 

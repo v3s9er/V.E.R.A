@@ -6,6 +6,7 @@ const app = read('App.tsx');
 const manifest = read('android/app/src/main/AndroidManifest.xml');
 const home = read('src/screens/HomeScreen.tsx');
 const chat = read('src/screens/ChatScreen.tsx');
+const rpc = read('src/rpc.ts');
 const pcList = read('src/screens/PcListScreen.tsx');
 const settings = read('src/screens/SettingsScreen.tsx');
 const schedules = read('src/screens/SchedulesScreen.tsx');
@@ -41,6 +42,28 @@ check('keyboard entry mode frees vertical space without covering the composer',
   && home.includes('{!keyboardVisible && <View style={[styles.tabbar')
   && chat.includes('{!keyboardVisible && <View style={styles.modeBar}')
   && chat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)'));
+check('composer measures real keyboard occlusion and lifts only by the uncovered overlap',
+  chat.includes('composerRef.current?.measureInWindow')
+  && chat.includes('const unliftedBottom = y + composerHeight + composerKeyboardLiftRef.current')
+  && chat.includes('const overlap = unliftedBottom - keyboardTopRef.current + 6')
+  && chat.includes('marginBottom: composerKeyboardLift')
+  && chat.includes('disableFullscreenUI')
+  && chat.includes("Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'"));
+check('conversation access and reasoning controls stay in the composer and use dropdown modals',
+  chat.includes('style={styles.composerToolbar}')
+  && chat.includes('accessibilityLabel={`대화 액세스 실제 적용 ${permissionLabel}')
+  && chat.includes('accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}')
+  && chat.includes('<Modal visible={showReasoning}')
+  && !chat.includes('style={[styles.reasoningChip'));
+check('mobile auth retains the server authority ceiling and the access picker cannot raise it',
+  rpc.includes("permissionCap: PermissionMode = 'read-only'")
+  && rpc.includes('this.isAdmin = this.authed && auth?.isAdmin === true')
+  && rpc.includes("this.permissionCap = 'read-only'")
+  && chat.includes('!permissionWithinCap(value, client.permissionCap)')
+  && chat.includes('effectivePermissionMode(requestedPermissionMode, client.permissionCap)')
+  && chat.includes("permissionCappedByDevice ? '·상한' : ''")
+  && chat.includes('updated.permissionMode !== permissionMode')
+  && chat.includes('PC 앱의 원격 PC 관리'));
 check('busy steering and stop actions occupy their own responsive row',
   chat.includes('{busy && <View style={styles.busyActions}>')
   && chat.includes('busyActionBtn: { flex: 1 }'));

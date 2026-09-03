@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -13,7 +14,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
+import type { KeyboardEvent, NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -43,6 +44,15 @@ const nextId = (): string => `m${uid++}`;
 
 const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
 const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
+const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
+
+function permissionWithinCap(mode: PermissionMode, cap: PermissionMode): boolean {
+  return PERMISSION_ORDER.indexOf(mode) <= PERMISSION_ORDER.indexOf(cap);
+}
+
+function effectivePermissionMode(mode: PermissionMode, cap: PermissionMode): PermissionMode {
+  return PERMISSION_ORDER[Math.min(PERMISSION_ORDER.indexOf(mode), PERMISSION_ORDER.indexOf(cap))] ?? 'read-only';
+}
 
 function reasoningEffortsFor(provider?: ProviderInfo): ReasoningEffort[] {
   const supported = provider?.supportedReasoning;
@@ -62,7 +72,7 @@ function describe(input: unknown): string {
 
 export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBusyChange }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean; onExecutionBusyChange?: (busy: boolean) => void }) {
   const insets = useSafeAreaInsets();
-  const { width, fontScale } = useWindowDimensions();
+  const { width, height, fontScale } = useWindowDimensions();
   const compact = width < 390 || fontScale > 1.25;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
@@ -80,18 +90,24 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [showScenarios, setShowScenarios] = useState(false);
   const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [showAccess, setShowAccess] = useState(false);
+  const [showReasoning, setShowReasoning] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [savingReasoning, setSavingReasoning] = useState(false);
   const [savingConfiguration, setSavingConfiguration] = useState(false);
   const [reasoningSaveFailed, setReasoningSaveFailed] = useState(false);
   const [configurationSaveFailed, setConfigurationSaveFailed] = useState(false);
+  const [permissionNotice, setPermissionNotice] = useState('');
   const configurationSaveInFlightRef = useRef(false);
   const conversationRef = useRef<ConversationDetail | null>(null);
   const uploadTaskRef = useRef<FileSystem.UploadTask | null>(null);
   const uploadStopReason = useRef<'user' | 'timeout' | null>(null);
   const mountedRef = useRef(true);
   const listRef = useRef<FlatList<UiMsg>>(null);
+  const composerRef = useRef<View>(null);
+  const keyboardTopRef = useRef<number | null>(null);
+  const composerKeyboardLiftRef = useRef(0);
+  const composerSyncTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>());
   const toolCounter = useRef(0);
   const activeId = useRef<string | null>(null);
   const loadGeneration = useRef(0);
@@ -102,6 +118,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [unseenMessages, setUnseenMessages] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [composerKeyboardLift, setComposerKeyboardLift] = useState(0);
 
   useEffect(() => {
     // Keep async upload state usable when StrictMode performs its development
@@ -114,9 +131,86 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     };
   }, []);
 
+  const applyComposerKeyboardLift = useCallback((next: number): void => {
+    const normalized = Math.max(0, Math.round(next));
+    composerKeyboardLiftRef.current = normalized;
+    setComposerKeyboardLift((current) => current === normalized ? current : normalized);
+  }, []);
+
+  const syncComposerWithKeyboard = useCallback((): void => {
+    if (Platform.OS === 'ios') {
+      // KeyboardAvoidingView follows the interactive iOS keyboard frame. The
+      // measured fallback is only for Android keyboards that overlay resize.
+      applyComposerKeyboardLift(0);
+      if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false });
+      return;
+    }
+    const metrics = Keyboard.metrics();
+    const keyboardTop = metrics?.screenY ?? keyboardTopRef.current ?? null;
+    if (keyboardTop !== null) keyboardTopRef.current = keyboardTop;
+    if (keyboardTop === null) {
+      applyComposerKeyboardLift(0);
+      return;
+    }
+    requestAnimationFrame(() => {
+      composerRef.current?.measureInWindow((_x, y, _width, composerHeight) => {
+        if (!mountedRef.current || keyboardTopRef.current === null) return;
+        // Some Android keyboards ignore adjustResize while edge-to-edge is active.
+        // Add the current lift back before calculating so measuring the lifted view
+        // cannot make the correction oscillate between zero and the overlap.
+        const unliftedBottom = y + composerHeight + composerKeyboardLiftRef.current;
+        const overlap = unliftedBottom - keyboardTopRef.current + 6;
+        const maximumSafeLift = Math.max(0, height - 160);
+        applyComposerKeyboardLift(Math.min(maximumSafeLift, Math.max(0, overlap)));
+        if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false });
+      });
+    });
+  }, [applyComposerKeyboardLift, height]);
+
+  const scheduleComposerKeyboardSync = useCallback((delays: readonly number[] = [0, 90]): void => {
+    for (const timer of composerSyncTimersRef.current) clearTimeout(timer);
+    composerSyncTimersRef.current.clear();
+    for (const delay of delays) {
+      const timer = setTimeout(() => {
+        composerSyncTimersRef.current.delete(timer);
+        syncComposerWithKeyboard();
+      }, delay);
+      composerSyncTimersRef.current.add(timer);
+    }
+  }, [syncComposerWithKeyboard]);
+
+  useEffect(() => {
+    const keyboardShown = (event: KeyboardEvent): void => {
+      keyboardTopRef.current = event.endCoordinates.screenY;
+      scheduleComposerKeyboardSync([0, 90, 240]);
+    };
+    const keyboardFrameChanged = (event: KeyboardEvent): void => {
+      keyboardTopRef.current = event.endCoordinates.screenY;
+      scheduleComposerKeyboardSync([0, 90]);
+    };
+    const keyboardHidden = (): void => {
+      keyboardTopRef.current = null;
+      applyComposerKeyboardLift(0);
+    };
+    const shown = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', keyboardShown);
+    const frame = Platform.OS === 'ios' ? Keyboard.addListener('keyboardWillChangeFrame', keyboardFrameChanged) : null;
+    const hidden = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', keyboardHidden);
+    return () => {
+      shown.remove();
+      frame?.remove();
+      hidden.remove();
+      for (const timer of composerSyncTimersRef.current) clearTimeout(timer);
+      composerSyncTimersRef.current.clear();
+    };
+  }, [applyComposerKeyboardLift, scheduleComposerKeyboardSync]);
+
   useEffect(() => {
     conversationRef.current = conversation;
   }, [conversation]);
+
+  useEffect(() => {
+    setPermissionNotice('');
+  }, [conversation?.id]);
 
   const activeRun = conversation ? runs[conversation.id] : undefined;
   const busy = Boolean(activeRun?.running);
@@ -131,6 +225,16 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const selectedReasoningEffort = conversation && reasoningEfforts.includes(conversation.reasoningEffort)
     ? conversation.reasoningEffort
     : 'auto';
+  const requestedPermissionMode = conversation?.permissionMode ?? 'ask';
+  const effectiveDevicePermissionMode = effectivePermissionMode(requestedPermissionMode, client.permissionCap);
+  const permissionCappedByDevice = requestedPermissionMode !== effectiveDevicePermissionMode;
+  const permissionLabel = effectiveDevicePermissionMode === 'read-only'
+    ? '읽기'
+    : effectiveDevicePermissionMode === 'workspace'
+      ? '폴더'
+      : effectiveDevicePermissionMode === 'full'
+        ? '전체'
+        : '확인';
   const reasoningLocked = !conversation || busy || savingConfiguration;
   const configurationLocked = busy || savingConfiguration;
 
@@ -254,9 +358,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
   useEffect(() => {
     if (!keyboardVisible || !stickToBottom.current) return;
+    scheduleComposerKeyboardSync([0, Platform.OS === 'ios' ? 280 : 80]);
     const timer = setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), Platform.OS === 'ios' ? 280 : 80);
     return () => clearTimeout(timer);
-  }, [keyboardVisible]);
+  }, [keyboardVisible, scheduleComposerKeyboardSync]);
+
+  useEffect(() => {
+    if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 100]);
+  }, [height, scheduleComposerKeyboardSync]);
 
   useEffect(() => {
     const scrollIfFollowing = (): void => {
@@ -443,6 +552,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         setConversation((current) => current?.id === conversationId ? { ...current, reasoningEffort: updated.reasoningEffort } : current);
       }
       setConversations((list) => list.map((item) => item.id === conversationId ? { ...item, reasoningEffort: updated.reasoningEffort } : item));
+      setShowReasoning(false);
     } catch {
       if (!mountedRef.current) return;
       if (activeId.current === conversationId) {
@@ -565,12 +675,22 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const selectAccess = async (permissionMode: PermissionMode): Promise<void> => {
-    if (!conversation || busy || !beginConfigurationSave()) return;
+    if (!conversation || busy) return;
+    if (!permissionWithinCap(permissionMode, client.permissionCap)) {
+      setPermissionNotice(`이 휴대폰은 ${client.permissionCap}까지 허용되어 있습니다. PC 앱의 원격 PC 관리에서 이 기기 권한을 먼저 높여 주세요.`);
+      return;
+    }
+    if (!beginConfigurationSave()) return;
     const conversationId = conversation.id;
     try {
       const updated = await client.call('conversations.update', { id: conversationId, permissionMode }) as ConversationDetail;
       applyConversationConfiguration(conversationId, { permissionMode: updated.permissionMode });
-      setShowAccess(false);
+      if (updated.permissionMode !== permissionMode) {
+        setPermissionNotice(`PC의 전체 액세스 정책이 ${updated.permissionMode}로 제한했습니다. PC 앱의 원격 PC 관리 또는 액세스 설정에서 상한을 높여 주세요.`);
+      } else {
+        setPermissionNotice('');
+        setShowAccess(false);
+      }
     } catch {
       if (mountedRef.current) setConfigurationSaveFailed(true);
     } finally {
@@ -795,9 +915,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
-      <View style={[styles.inputBar, compact && styles.inputBarCompact, { paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom) }]}>
-        <View style={styles.inputRow}>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.toolBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+      <View
+        ref={composerRef}
+        onLayout={() => { if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 80]); }}
+        style={[styles.inputBar, compact && styles.inputBarCompact, { paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom), marginBottom: composerKeyboardLift }]}
+      >
+        <View style={styles.composerCard}>
           <TextInput
             style={styles.input}
             value={input}
@@ -805,33 +928,47 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             placeholder={busy ? '실행 중인 작업에 추가 명령…' : 'PC에 시킬 일을 입력하세요…'}
             placeholderTextColor={colors.faint}
             multiline
+            scrollEnabled
+            disableFullscreenUI
             textAlignVertical="top"
             accessibilityLabel="PC 에이전트에게 보낼 명령"
+            onFocus={() => scheduleComposerKeyboardSync([0, 90, 240])}
+            onContentSizeChange={() => scheduleComposerKeyboardSync([0, 80])}
           />
-          {!busy && (
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
-              <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
+          <View style={styles.composerToolbar}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel={`대화 액세스 실제 적용 ${permissionLabel}${permissionCappedByDevice ? ', 기기 상한으로 제한됨' : ''}`}
+              accessibilityHint="이 대화의 작업 승인 방식을 선택합니다"
+              accessibilityState={{ expanded: showAccess, disabled: configurationLocked }}
+              style={[styles.composerSelectBtn, configurationLocked && styles.disabledBtn]}
+              onPress={() => { setPermissionNotice(''); setShowAccess(true); }}
+              disabled={configurationLocked}
+            >
+              <Text style={styles.composerSelectText}>🔐 {permissionLabel}{permissionCappedByDevice ? '·상한' : ''}⌄</Text>
             </TouchableOpacity>
-          )}
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel={`추론 강도 ${selectedReasoningEffort}`}
+              accessibilityHint="이 대화에서 사용할 추론 강도를 선택합니다"
+              accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}
+              style={[styles.composerSelectBtn, (reasoningSaveFailed || configurationSaveFailed) && styles.composerSelectError, reasoningLocked && styles.disabledBtn]}
+              onPress={() => setShowReasoning(true)}
+              disabled={reasoningLocked}
+            >
+              <Text style={styles.composerSelectText}>{savingReasoning ? '추론 저장 중…' : `추론 ${selectedReasoningEffort}⌄`}</Text>
+            </TouchableOpacity>
+            <View style={styles.composerToolbarSpacer} />
+            {!busy && (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
+                <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
         {busy && <View style={styles.busyActions}><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>추가 명령 끼워넣기</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text></TouchableOpacity></View>}
-        {!keyboardVisible && <View style={[styles.reasoningBar, compact && styles.reasoningBarCompact]}>
-          <Text style={[styles.reasoningLabel, (reasoningSaveFailed || configurationSaveFailed) && styles.reasoningLabelError]}>{configurationSaveFailed ? '설정 · 저장 실패' : savingReasoning ? '추론 · 저장 중' : savingConfiguration ? '설정 저장 중' : busy ? '추론 · 실행 중 잠김' : '추론'}</Text>
-          <ScrollView horizontal style={styles.reasoningScroll} contentContainerStyle={styles.reasoningChoices} showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always">
-            {reasoningEfforts.map((effort) => {
-              const selected = selectedReasoningEffort === effort;
-              return <TouchableOpacity
-                key={effort}
-                accessibilityRole="button"
-                accessibilityLabel={`추론 강도 ${effort}`}
-                accessibilityState={{ selected, disabled: reasoningLocked }}
-                style={[styles.reasoningChip, selected && styles.reasoningChipOn, reasoningLocked && styles.reasoningChipDisabled]}
-                disabled={reasoningLocked}
-                onPress={() => void selectReasoningEffort(effort)}
-              ><Text style={[styles.reasoningChipText, selected && styles.reasoningChipTextOn]}>{effort}</Text></TouchableOpacity>;
-            })}
-          </ScrollView>
-        </View>}
+        {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
 
       <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)} accessibilityViewIsModal>
@@ -889,15 +1026,58 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>이 대화의 액세스</Text>
             <Text style={styles.modalText}>Codex처럼 대화마다 저장됩니다. PC에 등록된 이 기기의 권한 상한은 넘을 수 없습니다.</Text>
+            <Text style={styles.accessCapText}>이 기기 상한 · {client.isAdmin ? 'PC 관리자 (전체)' : client.permissionCap}</Text>
+            {permissionCappedByDevice ? <Text style={styles.accessNotice} accessibilityLiveRegion="polite">대화에는 {requestedPermissionMode}가 저장되어 있지만, 이 휴대폰에서는 실제로 {effectiveDevicePermissionMode}까지만 적용됩니다. PC 앱의 원격 PC 관리에서 이 기기 권한을 높여 주세요.</Text> : null}
+            {permissionNotice ? <Text style={styles.accessNotice} accessibilityLiveRegion="assertive">{permissionNotice}</Text> : null}
             <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
               {([
                 ['read-only', '읽기 전용', '파일과 상태만 읽고 변경은 모두 차단'],
                 ['ask', '변경 전 확인', '파일·명령 변경 직전에 모바일에서 승인'],
                 ['workspace', '작업 폴더 자동', '선택한 작업 폴더 안 변경만 자동 실행'],
                 ['full', '전체 허용', '이 기기 권한 상한 안에서 확인 없이 실행'],
-              ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectAccess(value)}><Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
+              ] as Array<[PermissionMode, string, string]>).map(([value, label, description]) => {
+                const blockedByDevice = !permissionWithinCap(value, client.permissionCap);
+                return <TouchableOpacity
+                  key={value}
+                  style={[styles.modelChoice, blockedByDevice && styles.accessChoiceBlocked, savingConfiguration && styles.disabledBtn]}
+                  disabled={savingConfiguration || blockedByDevice}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${label}${blockedByDevice ? ', PC에서 기기 권한 상향 필요' : ''}`}
+                  accessibilityState={{ selected: conversation?.permissionMode === value, disabled: savingConfiguration || blockedByDevice }}
+                  onPress={() => void selectAccess(value)}
+                >
+                  <Text style={styles.modelProvider}>{conversation?.permissionMode === value ? '✓ ' : ''}{label}{blockedByDevice ? ' · 잠김' : ''}</Text>
+                  <Text style={styles.faintChoice}>{description}{blockedByDevice ? '\nPC 앱의 원격 PC 관리에서 이 기기 상한을 먼저 높여야 합니다.' : ''}</Text>
+                </TouchableOpacity>;
+              })}
             </ScrollView>
             <TouchableOpacity style={styles.bigBtn} onPress={() => setShowAccess(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showReasoning} transparent animationType="fade" onRequestClose={() => setShowReasoning(false)} accessibilityViewIsModal>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
+          <View style={styles.dropdownModal}>
+            <Text style={styles.modalTitle}>추론 강도</Text>
+            <Text style={styles.modalText}>이 대화에 저장되며, 선택한 모델이 지원하는 단계만 표시됩니다.</Text>
+            <ScrollView style={styles.dropdownList} keyboardShouldPersistTaps="handled">
+              {reasoningEfforts.map((effort) => {
+                const selected = selectedReasoningEffort === effort;
+                return <TouchableOpacity
+                  key={effort}
+                  accessibilityRole="button"
+                  accessibilityLabel={`추론 강도 ${effort}`}
+                  accessibilityState={{ selected, disabled: savingConfiguration }}
+                  style={[styles.dropdownChoice, selected && styles.dropdownChoiceOn, savingConfiguration && styles.disabledBtn]}
+                  disabled={savingConfiguration}
+                  onPress={() => selected ? setShowReasoning(false) : void selectReasoningEffort(effort)}
+                >
+                  <Text style={[styles.dropdownChoiceText, selected && styles.dropdownChoiceTextOn]}>{selected ? '✓ ' : ''}{effort}</Text>
+                </TouchableOpacity>;
+              })}
+            </ScrollView>
+            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowReasoning(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -995,24 +1175,29 @@ const styles = StyleSheet.create({
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
   inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
   inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
-  inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  composerCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.inputBg, padding: 7, gap: 5 },
+  composerToolbar: { minHeight: 40, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+  composerToolbarSpacer: { flex: 1, minWidth: 2 },
+  composerIconBtn: { width: 40, height: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.025)' },
+  composerSelectBtn: { minHeight: 40, maxWidth: 150, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, backgroundColor: 'rgba(255,255,255,.025)', paddingHorizontal: 9 },
+  composerSelectError: { borderColor: 'rgba(248,113,113,.6)', backgroundColor: 'rgba(248,113,113,.08)' },
+  composerSelectText: { color: colors.dim, fontSize: 10.5, fontWeight: '800' },
+  composerSettingError: { color: colors.err, fontSize: 10.5, lineHeight: 15, paddingHorizontal: 3 },
   toolBtn: { width: 44, minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
   toolBtnCancel: { borderColor: 'rgba(248,113,113,.5)', backgroundColor: 'rgba(248,113,113,.16)' },
   toolBtnText: { color: colors.text, fontSize: 17, fontWeight: '800' },
   input: {
-    flex: 1,
-    backgroundColor: colors.inputBg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
+    width: '100%',
+    backgroundColor: 'transparent',
     color: colors.text,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 6,
     fontSize: 14.5,
-    minHeight: 44,
-    maxHeight: 110,
+    minHeight: 52,
+    maxHeight: 140,
   },
-  sendBtn: { minHeight: 44, backgroundColor: colors.accent, borderRadius: radius.md, paddingHorizontal: 16, justifyContent: 'center', alignItems: 'center' },
+  sendBtn: { minHeight: 40, backgroundColor: colors.accent, borderRadius: radius.sm, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
   cancelBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },
   busyActions: { flexDirection: 'row', gap: 7 },
   busyActionBtn: { flex: 1 },
@@ -1031,11 +1216,20 @@ const styles = StyleSheet.create({
   modalKeyboardAvoiding: { flex: 1 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,6,12,0.7)', justifyContent: 'center', paddingHorizontal: 12 },
   modal: { width: '100%', maxWidth: 560, maxHeight: '92%', alignSelf: 'center', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 18, gap: 12 },
+  dropdownModal: { width: '100%', maxWidth: 420, maxHeight: '82%', alignSelf: 'center', backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 10 },
+  dropdownList: { maxHeight: 360, flexShrink: 1 },
+  dropdownChoice: { minHeight: 44, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, backgroundColor: colors.inputBg, paddingHorizontal: 12, paddingVertical: 9, marginBottom: 6 },
+  dropdownChoiceOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.18)' },
+  dropdownChoiceText: { color: colors.dim, fontSize: 13, fontWeight: '700' },
+  dropdownChoiceTextOn: { color: colors.text },
   modalTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
   modalText: { color: colors.dim, fontSize: 14 },
   modelList: { maxHeight: 420, flexShrink: 1, minHeight: 0 },
   modelChoice: { backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, marginBottom: 8 },
   modelChoiceOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.16)' },
+  accessChoiceBlocked: { opacity: 0.48, borderStyle: 'dashed' },
+  accessCapText: { alignSelf: 'flex-start', color: colors.accent2, fontSize: 11.5, fontWeight: '800', borderWidth: 1, borderColor: 'rgba(34,211,238,.28)', borderRadius: 999, backgroundColor: 'rgba(34,211,238,.08)', paddingHorizontal: 10, paddingVertical: 5 },
+  accessNotice: { color: colors.warn, fontSize: 11.5, lineHeight: 17, borderWidth: 1, borderColor: 'rgba(251,191,36,.35)', borderRadius: radius.sm, backgroundColor: 'rgba(251,191,36,.08)', padding: 9 },
   modelProvider: { color: colors.text, fontWeight: '700', fontSize: 13 },
   modelName: { color: colors.accent2, fontSize: 12.5, marginTop: 3 },
   faintChoice: { color: colors.faint, fontSize: 12, marginTop: 3 },

@@ -992,13 +992,9 @@ select.input option {
 .context-workspace > div { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; }
 .context-workspace .btn { padding: 7px 10px; font-size: 11px; }
 .access-field { grid-column: 1 / -1; }
-.access-options { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 7px; }
-.access-options button { min-width: 0; padding: 9px 10px; display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--border); border-radius: 11px; color: var(--text-dim); background: rgba(255,255,255,.02); text-align: left; cursor: pointer; }
-.access-options button:hover, .access-options button.active { color: #fff; border-color: rgba(139,116,255,.52); background: rgba(124,92,255,.11); }
-.access-options button:disabled { opacity: .5; cursor: not-allowed; }
-.access-options b { font-size: 11px; }
-.access-options small { color: var(--text-faint); font-size: 9.5px; line-height: 1.35; }
+.access-field .input { max-width: 380px; }
 .context-help { color: var(--text-faint); font-size: 9.5px; }
+.context-help b { color: var(--text-dim); font-weight: 600; }
 .context-panel-actions { display: flex; align-items: center; gap: 7px; padding-top: 11px; border-top: 1px solid var(--border); }
 .context-panel-actions > span { min-width: 0; flex: 1; overflow: hidden; color: var(--text-faint); font-family: var(--mono); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .context-panel-actions .btn { padding: 7px 10px; font-size: 10.5px; }
@@ -1303,14 +1299,15 @@ select.input option {
   gap: 8px;
 }
 .chat-actions .btn { padding: 8px 12px; border-radius: 11px; }
-.composer-options { min-width: 0; flex: 1 1 250px; display: flex; align-items: center; gap: 8px; }
-.composer-reasoning { min-width: 0; max-width: 100%; min-height: 36px; flex: 0 0 auto; display: inline-grid; grid-template-columns: auto auto minmax(78px, auto); align-items: center; gap: 6px; padding: 3px 3px 3px 8px; border: 1px solid var(--border); border-radius: 11px; color: var(--text-dim); background: rgba(8,12,23,.68); transition: border-color .15s, background .15s; }
-.composer-reasoning:focus-within { border-color: rgba(139,116,255,.62); background: rgba(124,92,255,.1); }
-.composer-reasoning-icon { color: #a995ff; font-size: 11px; line-height: 1; }
-.composer-reasoning-label { font-size: 10.5px; font-weight: 700; white-space: nowrap; }
-.composer-reasoning .composer-reasoning-select { width: auto; min-width: 78px; max-width: 116px; height: 28px; padding: 4px 24px 4px 8px; border-color: transparent; border-radius: 8px; background: rgba(255,255,255,.045); font-size: 11px; }
-.composer-reasoning .composer-reasoning-select:focus { border-color: transparent; box-shadow: none; }
-.composer-reasoning .composer-reasoning-select:disabled { opacity: .52; cursor: not-allowed; }
+.composer-options { min-width: 0; flex: 1 1 360px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.composer-select-control { min-width: 0; min-height: 36px; flex: 0 1 auto; display: inline-grid; grid-template-columns: auto auto minmax(82px, auto); align-items: center; gap: 6px; padding: 3px 3px 3px 8px; border: 1px solid var(--border); border-radius: 11px; color: var(--text-dim); background: rgba(8,12,23,.68); transition: border-color .15s, background .15s; }
+.composer-select-control:focus-within { border-color: rgba(139,116,255,.62); background: rgba(124,92,255,.1); }
+.composer-control-icon { color: #a995ff; font-size: 11px; line-height: 1; }
+.composer-control-label { font-size: 10.5px; font-weight: 700; white-space: nowrap; }
+.composer-select-control .composer-control-select { width: auto; min-width: 82px; max-width: 136px; height: 28px; padding: 4px 24px 4px 8px; border-color: transparent; border-radius: 8px; background: rgba(255,255,255,.045); font-size: 11px; }
+.composer-select-control .composer-control-select:focus { border-color: transparent; box-shadow: none; }
+.composer-select-control .composer-control-select:disabled { opacity: .52; cursor: not-allowed; }
+.composer-access .composer-control-select { min-width: 104px; max-width: 148px; }
 .composer-options .compaction-note { min-width: 0; margin-right: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-dialog { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 14px; }
 .workspace-dialog-icon { width: 50px; height: 50px; display: grid; place-items: center; border: 1px solid rgba(139,116,255,.35); border-radius: 16px; color: #c4b5fd; background: rgba(124,92,255,.12); font-size: 22px; }
@@ -2097,7 +2094,6 @@ body::before {
   .context-trigger { min-width: 132px; }
   .context-settings-grid { grid-template-columns: 1fr; }
   .access-field { grid-column: auto; }
-  .access-options { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .preset-browser { height: min(680px, calc(100dvh - 128px)); grid-template-columns: 1fr; grid-template-rows: 112px minmax(0,1fr); }
   .preset-browser-list { flex-direction: row; overflow: auto hidden; padding: 0 0 6px; }
   .preset-browser-list button { min-width: 164px; padding: 8px 10px; }
@@ -2164,7 +2160,7 @@ body::before {
   .chat-commandbar { grid-template-columns: minmax(0,1fr) 40px; }
   .context-trigger { grid-column: 1 / -1; grid-row: 3; width: 100%; }
   .chat-quick-controls { grid-template-columns: 1fr; }
-  .access-options, .prompt-suggestions { grid-template-columns: 1fr; }
+  .prompt-suggestions { grid-template-columns: 1fr; }
   .prompt-suggestions { width: min(100%, 420px); }
   .context-panel-actions { align-items: stretch; flex-wrap: wrap; }
   .context-panel-actions > span { flex-basis: 100%; }
@@ -2398,8 +2394,10 @@ body::before {
 }
 @media (max-width: 430px) {
   .prompt-suggestions { grid-template-columns: 1fr; }
-  .composer-reasoning { grid-template-columns: auto minmax(74px, auto); }
-  .composer-reasoning-label { display: none; }
+  .composer-options { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .composer-select-control { width: 100%; grid-template-columns: auto auto minmax(0,1fr); }
+  .composer-select-control .composer-control-select { width: 100%; min-width: 0; max-width: none; }
+  .composer-options .compaction-note { grid-column: 1 / -1; }
 }
 
 /* ---------- responsive resilience ----------
@@ -3004,7 +3002,7 @@ body::before {
   .chat-inputbar { gap: 5px; padding: 7px; }
   .chat-input { min-height: 40px; padding-block: 8px; }
   .chat-actions .btn { min-height: 34px; padding-block: 6px; }
-  .composer-reasoning { min-height: 34px; }
+  .composer-select-control { min-height: 34px; }
 }
 
 @media (max-width: 900px) and (max-height: 680px) {

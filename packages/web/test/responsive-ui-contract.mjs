@@ -70,6 +70,27 @@ requireAll(chat, [
   'queueMicrotask(() => conversationMenuTriggerRef.current?.focus());',
 ], 'composer resizing does not preserve visible chat content');
 
+requireAll(chat, [
+  'className="composer-select-control composer-access"',
+  'aria-label="입력창 액세스 권한"',
+  'permissionMode: event.target.value as PermissionMode',
+  'permissionWithinCap(access.value, client.permissionCap)',
+  "detail.permissionMode !== patch.permissionMode",
+  "PC 앱의 설정 → 권한 및 안전/모바일 연결",
+  'className="composer-select-control composer-reasoning"',
+  'aria-label="입력창 추론 강도"',
+  'aria-label="컨텍스트 액세스 권한"',
+], 'conversation access and reasoning are not compact composer dropdowns');
+
+requireAll(css, [
+  '.composer-options { min-width: 0;',
+  'flex-wrap: wrap;',
+  '.composer-select-control {',
+  '.composer-select-control .composer-control-select {',
+  '.composer-access .composer-control-select {',
+  'grid-template-columns: repeat(2, minmax(0,1fr));',
+], 'composer dropdown controls can overflow a narrow chat window');
+
 requireAll(css, [
   '.profile-menu.embedded {\n    display: grid;',
   '.profile-menu.embedded .profile-trigger {',

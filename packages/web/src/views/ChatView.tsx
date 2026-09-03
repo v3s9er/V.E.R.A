@@ -86,6 +86,10 @@ const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detai
   { value: 'workspace', label: '작업 폴더 허용', short: '폴더', detail: '선택한 작업 폴더 안에서는 묻지 않고 작업합니다.' },
   { value: 'full', label: '전체 허용', short: '전체', detail: '기기 권한 상한 안에서 PC 전체 작업을 허용합니다.' },
 ];
+const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
+const permissionWithinCap = (mode: PermissionMode, cap: PermissionMode): boolean => (
+  PERMISSION_ORDER.indexOf(mode) <= PERMISSION_ORDER.indexOf(cap)
+);
 
 export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc, onExecutionBusyChange }: {
   profile?: ReactNode;
@@ -516,7 +520,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const created = await client.call('conversations.create', {}) as ConversationDetail;
     setConversations((list) => [created, ...list]); selectedId.current = created.id; selectedRef.current = created; setSelected(created); setMessages([]); setShowArchived(false);
   };
-  const updateConversation = (patch: Record<string, unknown>, onError?: () => void): Promise<void> => {
+  const updateConversation = (patch: Record<string, unknown>, onError?: () => void, onSuccess?: (detail: ConversationDetail) => void): Promise<void> => {
     const target = selectedRef.current;
     if (!target) return Promise.resolve();
     const task = conversationUpdateQueue.current
@@ -528,6 +532,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           setSelected(detail);
         }
         setConversations((list) => list.map((conversation) => conversation.id === detail.id ? detail : conversation));
+        onSuccess?.(detail);
       });
     const safeTask = task.catch((error) => {
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -581,6 +586,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       // Roll back only fields that still hold this failed optimistic value.
       // The sidebar is repaired even if the user switched conversations.
       setConversations((list) => list.map(rollbackMatchingFields));
+    }, (detail) => {
+      if (patch.permissionMode && detail.permissionMode !== patch.permissionMode) {
+        setComposerError(`요청한 권한은 이 PC의 전체 액세스 정책 또는 연결 기기 상한을 넘습니다. 실제 적용 권한은 '${ACCESS.find((item) => item.value === detail.permissionMode)?.label ?? detail.permissionMode}'입니다. PC 앱의 설정 → 권한 및 안전/모바일 연결에서 상한을 한 번 조정하세요.`);
+      }
     }).finally(() => {
       executionConfigSavingRef.current = false;
       if (mountedRef.current) setExecutionConfigSaving(false);
@@ -775,7 +784,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider);
   const displayedReasoningEffort = availableReasoningEfforts.some(({ value }) => value === selected?.reasoningEffort) ? selected?.reasoningEffort ?? 'auto' : 'auto';
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selected?.workspaceId) ?? workspaces.find((workspace) => workspace.isDefault);
-  const selectedAccess = ACCESS.find((access) => access.value === selected?.permissionMode) ?? ACCESS[1];
+  const requestedPermissionMode = selected?.permissionMode ?? 'ask';
+  const effectivePermissionMode = permissionWithinCap(requestedPermissionMode, client.permissionCap) ? requestedPermissionMode : client.permissionCap;
+  const selectedAccess = ACCESS.find((access) => access.value === effectivePermissionMode) ?? ACCESS[0];
+  const permissionLimitedByDevice = effectivePermissionMode !== requestedPermissionMode;
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
   const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
@@ -893,7 +905,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             <div className="context-settings-grid">
               <label className="context-field"><span>추론 강도</span><Select aria-label="컨텍스트 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>{availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}</Select></label>
               <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
-              <div className="context-field access-field"><span>액세스 권한</span><div className="access-options">{ACCESS.map((access) => <button type="button" key={access.value} className={selected.permissionMode === access.value ? 'active' : ''} onClick={() => void updateExecutionConfig({ permissionMode: access.value })} disabled={executionControlsDisabled}><b>{access.label}</b><small>{access.detail}</small></button>)}</div><small className="context-help">연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></div>
+              <label className="context-field access-field"><span>액세스 권한</span><Select aria-label="컨텍스트 액세스 권한" value={selectedAccess.value} onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })} disabled={executionControlsDisabled}>{ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · PC에서 기기 상향 필요' : ''}</option>; })}</Select><small className="context-help"><b>{selectedAccess.detail}</b> {permissionLimitedByDevice ? `이 대화의 저장값은 ${requestedPermissionMode}이지만 현재 기기에서는 ${selectedAccess.label}까지만 적용됩니다. ` : ''}연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></label>
             </div>
             <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
           </section>}
@@ -911,11 +923,18 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
-            <div className="composer-options">
-              <label className="composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '이 대화에 사용할 추론 강도'}>
-                <span className="composer-reasoning-icon" aria-hidden="true">✦</span>
-                <span className="composer-reasoning-label">추론</span>
-                <Select className="composer-reasoning-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>
+            <div className="composer-options" aria-label="대화 실행 설정">
+              <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
+                <span className="composer-control-icon" aria-hidden="true">◇</span>
+                <span className="composer-control-label">권한</span>
+                <Select className="composer-control-select" aria-label="입력창 액세스 권한" value={selectedAccess.value} onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })} disabled={executionControlsDisabled}>
+                  {ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · 잠김' : ''}</option>; })}
+                </Select>
+              </label>
+              <label className="composer-select-control composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '이 대화에 사용할 추론 강도'}>
+                <span className="composer-control-icon" aria-hidden="true">✦</span>
+                <span className="composer-control-label">추론</span>
+                <Select className="composer-control-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>
                   {availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}
                 </Select>
               </label>

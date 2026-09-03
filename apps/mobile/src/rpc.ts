@@ -1,6 +1,6 @@
 export { pairingOrigins, pairingPayloadExpired, parsePairingPayload } from './pairing';
 import { cloudflareAccessHeaders, explainCredentialFetchFailure } from './pcs';
-import type { CloudflareAccessCredentials } from './types';
+import type { CloudflareAccessCredentials, PermissionMode } from './types';
 
 export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | 'online';
 
@@ -10,6 +10,9 @@ export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | '
 const WS_RPC_PROTOCOL = 'mr-robot-rpc-v1';
 const WS_UPGRADE_TICKET_PROTOCOL_PREFIX = 'mr-robot-ticket.';
 interface WsUpgradeTicketInfo { protocol: string; expiresAt: number }
+interface AuthResult { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode }
+const PERMISSION_MODES: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
+const isPermissionMode = (value: unknown): value is PermissionMode => PERMISSION_MODES.includes(value as PermissionMode);
 type ReactNativeWebSocketConstructor = new (
   url: string,
   protocols?: string | string[],
@@ -66,6 +69,8 @@ export class MrRobotClient {
 
   connected = false;
   authed = false;
+  isAdmin = false;
+  permissionCap: PermissionMode = 'read-only';
   state: RpcConnectionState = 'offline';
   onClose: (() => void) | null = null;
   onStateChange: ((state: RpcConnectionState) => void) | null = null;
@@ -96,6 +101,8 @@ export class MrRobotClient {
         if (error) {
           this.connected = false;
           this.authed = false;
+          this.isAdmin = false;
+          this.permissionCap = 'read-only';
           if (ws !== null && this.ws === ws) this.ws = null;
           this.setState('offline');
           try { ws?.close(); } catch { /* 이미 닫힌 소켓 */ }
@@ -133,7 +140,12 @@ export class MrRobotClient {
           const authTimeout = Math.max(1000, timeoutMs - 250);
           void this.call('auth', { secret }, authTimeout)
             .then((result) => {
-              this.authed = Boolean((result as { ok?: boolean })?.ok);
+              const auth = result as AuthResult;
+              this.authed = Boolean(auth?.ok);
+              this.isAdmin = this.authed && auth?.isAdmin === true;
+              this.permissionCap = this.authed && isPermissionMode(auth?.permissionCap)
+                ? auth.permissionCap
+                : 'read-only';
               if (!this.authed) throw new Error('인증 실패: 시크릿이 일치하지 않습니다.');
               finish();
             })
@@ -150,6 +162,8 @@ export class MrRobotClient {
           if (settled) {
             this.connected = false;
             this.authed = false;
+            this.isAdmin = false;
+            this.permissionCap = 'read-only';
             this.ws = null;
             this.setState('offline');
           } else {
@@ -217,6 +231,8 @@ export class MrRobotClient {
     cancelConnect?.(new Error('연결 시도가 취소되었습니다.'));
     this.connected = false;
     this.authed = false;
+    this.isAdmin = false;
+    this.permissionCap = 'read-only';
     this.settlePending(new Error('연결 종료'));
     const ws = this.ws;
     this.ws = null;
