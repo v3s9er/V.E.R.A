@@ -72,6 +72,15 @@ if (!settings.includes('Number(telemetry.cachedPromptTokens ?? 0)') || !settings
 if (!chat.includes('aria-label={`${c.title} 메뉴`}') || !chat.includes('setConversationMenu({ conversation: c')) throw new Error('conversation ellipsis is not an actual menu trigger');
 if (!app.includes("client.on('voice.command'") || !app.includes("setView('chat')") || !chat.includes('executeCommand(voiceCommand.text)')) throw new Error('recognized wake commands are not globally queued and connected to chat execution');
 if (!chat.includes('finally {') || !chat.includes('busyRef.current = false')) throw new Error('chat busy state has no request-completion fallback');
+if (!chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] =>')
+  || !chat.includes("assistant?.role === 'assistant'")
+  || !chat.includes('Boolean(assistant.error)')
+  || !chat.includes("user?.role === 'user'")
+  || !chat.includes('user.content === text')
+  || !chat.includes('const base = retryingFailedTail ? items.slice(0, -2) : items;')
+  || !chat.includes('setMessages((items) => appendPendingAttempt(items, text))')) {
+  throw new Error('desktop chat can accumulate a duplicate tail when the exact failed request is retried');
+}
 if (!chat.includes('signal: uploadController.signal') || !chat.includes("uploadAbortReason.current = 'timeout'") || !chat.includes('업로드 취소')) throw new Error('chat drag-and-drop uploads lack cancellation and timeout UX');
 if (!chat.includes('routingPresetId: null,') || !chat.includes('providerId,') || !chat.includes('providerModel,')) throw new Error('model picker cannot switch directly from a routing preset to single-model mode');
 if (!chat.includes("const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])")

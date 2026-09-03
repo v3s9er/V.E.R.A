@@ -52,6 +52,20 @@ interface SpeechRecognitionLike {
 
 let uid = 1;
 const nextId = (): string => `m${uid++}`;
+const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
+  const assistant = items[items.length - 1];
+  const user = items[items.length - 2];
+  const retryingFailedTail = assistant?.role === 'assistant'
+    && Boolean(assistant.error)
+    && user?.role === 'user'
+    && user.content === text;
+  const base = retryingFailedTail ? items.slice(0, -2) : items;
+  return [
+    ...base,
+    { id: nextId(), role: 'user', content: text, tools: [], done: true },
+    { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
+  ];
+};
 const modelChoiceValue = (providerId: string, model: string): string => JSON.stringify([providerId, model]);
 const describe = (input: unknown): string => { try { const s = JSON.stringify(input); return s.length > 90 ? `${s.slice(0, 90)}…` : s; } catch { return ''; } };
 const fromDetail = (detail: ConversationDetail): UiMsg[] => detail.messages
@@ -244,7 +258,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setStatus('모델 선택 중…');
     setRoute(null);
     stickToBottomRef.current = true;
-    setMessages((items) => [...items, { id: nextId(), role: 'user', content: text, tools: [], done: true }, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }]);
+    setMessages((items) => appendPendingAttempt(items, text));
     try {
       const result = await client.call('chat.start', {
         conversationId: conversation.id,

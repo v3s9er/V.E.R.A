@@ -40,6 +40,20 @@ interface UiMsg {
 
 let uid = 1;
 const nextId = (): string => `m${uid++}`;
+const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
+  const assistant = items[items.length - 1];
+  const user = items[items.length - 2];
+  const retryingFailedTail = assistant?.role === 'assistant'
+    && Boolean(assistant.error)
+    && user?.role === 'user'
+    && user.content === text;
+  const base = retryingFailedTail ? items.slice(0, -2) : items;
+  return [
+    ...base,
+    { id: nextId(), role: 'user', content: text, tools: [], done: true },
+    { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
+  ];
+};
 
 const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
 const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -98,6 +112,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const pendingDelta = useRef('');
   const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const startingConversationRef = useRef<string | null>(null);
   const stickToBottom = useRef(true);
   const [unseenMessages, setUnseenMessages] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -316,6 +331,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       client.on('chat.status', (data) => {
         const event = data as { conversationId?: string; status?: string };
         if (!event.conversationId) return;
+        if (startingConversationRef.current === event.conversationId) startingConversationRef.current = null;
         setRuns((current) => ({
           ...current,
           [event.conversationId!]: { ...(current[event.conversationId!] ?? { conversationId: event.conversationId!, steeringQueued: 0 }), running: true, status: event.status ?? '' },
@@ -323,6 +339,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       }),
       client.on('chat.done', (data) => {
         const d = data as { conversationId?: string; text: string; conversation?: ConversationDetail };
+        if (startingConversationRef.current === d.conversationId) startingConversationRef.current = null;
         if (d.conversationId) setRunFinished(d.conversationId);
         if (d.conversationId !== activeId.current) { void refreshConversations(); return; }
         flushDelta();
@@ -342,6 +359,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       }),
       client.on('chat.error', (data) => {
         const d = data as { conversationId?: string; message: string };
+        if (startingConversationRef.current === d.conversationId) startingConversationRef.current = null;
         if (d.conversationId) setRunFinished(d.conversationId);
         if (d.conversationId !== activeId.current) return;
         flushDelta();
@@ -368,6 +386,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     const text = input.trim();
     const currentConversation = conversationRef.current;
     if (!text || !currentConversation || configurationSaveInFlightRef.current) return;
+    if (startingConversationRef.current === currentConversation.id) return;
     if (busy) {
       try {
         const result = await client.call('chat.steer', { conversationId: currentConversation.id, text }) as { queued?: number };
@@ -378,15 +397,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       }
       return;
     }
+    startingConversationRef.current = currentConversation.id;
     setInput('');
     setRuns((current) => ({ ...current, [currentConversation.id]: { conversationId: currentConversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
     stickToBottom.current = true;
     setUnseenMessages(false);
-    setMessages((msgs) => [
-      ...msgs,
-      { id: nextId(), role: 'user', content: text, tools: [], done: true },
-      { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
-    ]);
+    setMessages((items) => appendPendingAttempt(items, text));
     try {
       await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode }, 10 * 60_000);
     } catch (err) {
@@ -399,6 +415,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       });
       setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, cancelling: false, steeringQueued: 0, status: '' } }));
     } finally {
+      if (startingConversationRef.current === currentConversation.id) startingConversationRef.current = null;
       void refreshRuns();
     }
   };

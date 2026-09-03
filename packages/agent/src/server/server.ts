@@ -75,7 +75,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.2';
+export const VERSION = '0.4.3';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -220,7 +220,9 @@ export interface ChatModelCallLease {
   /**
    * Settle one provider invocation. Missing/zero usage is treated as unknown
    * and keeps the conservative pre-call reservation as token debt.
-   * Returns false only when a provider reported more than its safe estimate.
+   * Returns false only when settled and still-pending calls exceed the whole
+   * run allowance. A provider may legitimately report more than our pre-call
+   * estimate because subscription CLIs add their own hidden prompt context.
    */
   finish(usage?: Pick<ChatUsage, 'promptTokens' | 'completionTokens'>): boolean;
 }
@@ -392,7 +394,14 @@ export class ChatRunAdmissionPolicy {
               Number.MAX_SAFE_INTEGER,
               callSpent + (reported > 0 ? reported : reservation),
             );
-            return callSpent <= tokenBudget && reported <= reservation;
+            // `reservation` is an admission estimate, not a provider quota.
+            // The complete tokenBudget is already held atomically against the
+            // principal and global limits, so an honest CLI's hidden system
+            // prompt may exceed this one estimate without making the run
+            // unsafe. Include concurrent pending calls when enforcing the
+            // actual ceiling; a true runaway report still fails closed and is
+            // retained as debt by finish().
+            return callSpent <= tokenBudget - callPending;
           },
         };
       },

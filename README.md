@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.4.2**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.2.md](docs/RELEASE_NOTES_0.4.2.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.2.md](docs/PLUGIN_COMPARISON_0.4.2.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.4.3**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.3.md](docs/RELEASE_NOTES_0.4.3.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.2.md](docs/PLUGIN_COMPARISON_0.4.2.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -81,7 +81,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.4.2-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.4.3-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 

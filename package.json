@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",

@@ -54,6 +54,6 @@ const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.4.2', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
+  name: 'mr-robot-desktop', version: '0.4.3', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);
