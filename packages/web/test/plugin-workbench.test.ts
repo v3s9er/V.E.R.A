@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [view, workbench, styles] = await Promise.all([
+const [view, workbench, styles, runtime, runtimeStyles] = await Promise.all([
   readFile(new URL('../src/views/PluginsView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/PluginWorkbench.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/PluginWorkbench.css', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/RuntimeHookPanel.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/RuntimeHookPanel.css', import.meta.url), 'utf8'),
 ]);
 
 assert.match(view, /<PluginWorkbench/);
@@ -12,6 +14,10 @@ assert.match(view, /plugin-workbench-trigger-/);
 assert.match(view, /onClose=\{closeWorkbench\}/);
 assert.match(workbench, /id === 'resource-archiver'/);
 assert.match(workbench, /id === 'sslscan-auditor'/);
+assert.match(workbench, /id === 'webcrypto-observer'/);
+assert.match(workbench, /webcrypto-observer\.\$\{action\}/);
+assert.doesNotMatch(workbench, /webcrypto-observer\.event/);
+assert.match(workbench, /<RuntimeHookPanel/);
 assert.match(workbench, /'har-only' \| 'direct-bounded'/);
 assert.match(workbench, /maxCipherTests: mode === 'quick' \? 0 : 12/);
 assert.match(workbench, /retries: 0/);
@@ -57,6 +63,42 @@ assert.match(workbench, /BUILTIN_READ_COMMANDS/);
 assert.match(workbench, /plugin\.builtin/);
 assert.doesNotMatch(workbench, /filter\(\(command\) => \/\(\?:\^\|\\\.\)\(\?:status/);
 assert.match(styles, /\.plugin-workbench-layout/);
+assert.match(runtimeStyles, /\.runtime-safe-recommendations/);
+assert.match(runtimeStyles, /@media \(max-width: 520px\)/);
 assert.match(styles, /@media \(max-width: 520px\)/);
+
+assert.match(runtime, /SOURCE_MAX_BYTES = 256 \* 1024/);
+assert.match(runtime, /EVENT_RING_SIZE = 64/);
+assert.match(runtime, /MUTATION_LITERAL_MAX_BYTES = 64/);
+assert.match(runtime, /url\.protocol !== 'https:' /);
+assert.match(runtime, /url\.port !== ''/);
+assert.match(runtime, /durationMs: 10_000/);
+assert.match(runtime, /maxRequests: 20/);
+assert.match(runtime, /maxResponseBytes: 4 \* 1024 \* 1024/);
+assert.match(runtime, /maxConcurrentRequests: 4/);
+assert.match(runtime, /maxRingEvents: 64/);
+assert.match(runtime, /maxRequestBodyBytes: 64 \* 1024/);
+assert.match(runtime, /maxUploadBytes: 128 \* 1024/);
+assert.match(runtime, /authorizationConfirmed: true, sourceText/);
+assert.match(runtime, /allowStateChangingRequests: stateChangingEnabled/);
+assert.match(runtime, /stateChangingRequestsConfirmed: stateChangingEnabled && stateChangingConfirmed/);
+assert.match(runtime, /DELETE는 항상 차단/);
+assert.match(runtime, /'events'/);
+assert.match(runtime, /'limit-reached'/);
+assert.match(runtime, /'failed'/);
+assert.doesNotMatch(runtime, /setInterval/);
+assert.match(runtime, /'stop'/);
+assert.match(runtime, /'mutation\.set'/);
+assert.match(runtime, /matchLiteral: selectedEvent\.preview/);
+assert.match(runtime, /mutationConfirmed: true/);
+assert.match(runtime, /mutationSourceBlocked/);
+assert.match(runtime, /다음 literal 일치 1회/);
+assert.match(runtime, /event\.elapsedMs/);
+assert.match(runtime, /event\.byteLength/);
+assert.match(runtime, /event\.mutationApplied/);
+assert.match(runtime, /crypto\.subtle\.encrypt/);
+assert.match(runtime, /crypto\.subtle\.decrypt/);
+assert.match(runtime, /TextEncoder \/ TextDecoder/);
+assert.match(runtime, /임의 라이브러리, DOM, 키보드 훅/);
 
 console.log('PLUGIN WORKBENCH TEST PASSED · embedded panels, traffic budgets, approval, progress and fail-closed generic actions verified');

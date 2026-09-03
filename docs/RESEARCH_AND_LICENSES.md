@@ -46,6 +46,16 @@
 - 캘린더는 로컬/ICS를 완성 경계로 두었습니다. Google 연결은
   [Calendar events.insert](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert)와
   OAuth consent를 따를 adapter 자리만 유지하며 공용 client secret을 내장하지 않습니다.
+- 허가된 웹 클라이언트 진단은 [Chrome DevTools Protocol의 초기 문서 스크립트](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-addScriptToEvaluateOnNewDocument),
+  [런타임 binding](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-addBinding),
+  [child target 자동 연결](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-setAutoAttach)과
+  [MDN SubtleCrypto](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto)의 공개 계약을 기준으로 독립 구현했습니다.
+  Chrome/Edge나 자동화 도구의 소스를 포함하지 않고 설치된 시스템 브라우저를 격리된 임시 프로필로 실행합니다.
+- 독립 도구 포털의 비밀번호·세션 경계는 [OWASP Authentication](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html),
+  [Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),
+  [Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) 지침과
+  [Node.js `crypto.scrypt`](https://nodejs.org/api/crypto.html#cryptoscryptpassword-salt-keylen-options-callback)의 공개 API를 적용했습니다.
+  비밀번호 원문이나 장기 browser bearer를 파일에 저장하지 않으며 포털 세션은 서버 메모리에만 유지합니다.
 
 ## 뒤탈 방지 원칙
 

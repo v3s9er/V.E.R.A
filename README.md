@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.4.1**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.1.md](docs/RELEASE_NOTES_0.4.1.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.1.md](docs/PLUGIN_COMPARISON_0.4.1.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.4.2**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.2.md](docs/RELEASE_NOTES_0.4.2.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.2.md](docs/PLUGIN_COMPARISON_0.4.2.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -81,7 +81,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/Mr.Robot-Setup-0.4.1-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
+결과는 `release/Mr.Robot-Setup-0.4.2-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 공개 배포본에는 코드 서명 인증서를 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Orca, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -146,12 +146,15 @@ Mr.Robot에는 `Orca 코딩 실행기`가 기본 플러그인으로 포함되지
 
 플러그인 탭은 플러그인을 **시스템·연결 / 생산성 / 개발 / 모의해킹 / 기타**로 묶어 표시합니다. 관리자는 각 플러그인의 카테고리를 바꿀 수 있고 선택은 호스트 설정에 유지됩니다. `작업 화면` 버튼을 누르면 목록을 떠나지 않고 해당 플러그인의 입력, 안전 한도, 실행 전 확인, 진행률과 결과를 한 화면에서 다룰 수 있습니다. 검토된 기본 플러그인만 직접 실행 UI를 제공하며, 외부 플러그인의 임의 명령은 자동 실행하지 않습니다.
 
-0.4.1에 포함된 모의해킹 카테고리의 기본 플러그인:
+0.4.2에 포함된 모의해킹 카테고리의 기본 플러그인:
 
-- **Authorized Web Resource Archiver** — HAR/브라우저 캡처 응답은 네트워크 요청 0회로 보존할 수 있습니다. 직접 수집은 명시적으로 켜야 하며 UI 기본값은 재시도 0회, 동시 요청 2개, 1단계 의존성, 리디렉션을 포함한 물리 GET 최대 40회입니다. 엔진은 전체 작업도 기본 60초로 중단합니다.
-- **SSL/TLS Inspector** — URL·CIDR·목록이 아닌 허가된 공개 호스트 하나만 받습니다. 기본 `quick`은 TLS 1.0~1.3 핸드셰이크 4회와 인증서만 확인하며 개별 암호군 탐색은 하지 않습니다. 같은 조건의 결과는 기본 5분 캐시됩니다.
+- **Authorized Web Resource Archiver** — HAR/브라우저 캡처 응답은 네트워크 요청 0회로 보존할 수 있습니다. 직접 수집은 명시적으로 켜야 하며 네이티브 작업 화면의 기본값은 재시도 0회, 동시 요청 2개, 1단계 의존성, 리디렉션을 포함한 물리 GET 최대 40회, 전체 60초입니다. 독립 포털은 더 좁게 동시 요청 1개·물리 GET 최대 20회·전체 30초로 고정합니다.
+- **SSL/TLS Inspector** — URL·CIDR·목록이 아닌 허가된 공개 호스트 하나만 받습니다. 기본 `quick`은 TLS 1.0~1.3 핸드셰이크 4회와 인증서만 확인하며 개별 암호군 탐색은 하지 않습니다. `standard`도 대표 암호군을 최대 12개만 추가 확인하므로 프로토콜 점검을 합쳐 TLS 연결은 최대 16회입니다. 같은 조건의 결과는 기본 5분 캐시됩니다.
+- **WebCrypto Runtime Observer** — 붙여넣은 JavaScript를 실행 없이 분석하거나, 허가목록의 HTTPS 443 URL 하나를 별도 임시 Chrome/Edge 프로필에서 기본 10초·20요청으로 관찰합니다. 기본은 메타데이터 전용입니다. 일회성 변경은 평문 미리보기를 켠 같은 세션에서 실제 관찰된, 잘리지 않은 동일 단계의 UTF-8 literal(1~64바이트)과 정확히 일치할 때만 별도 승인 후 등록할 수 있습니다.
 
-두 플러그인 모두 대상 소유 또는 명시적 허가 확인과 실행별 승인을 요구합니다. Resource Archiver는 같은 호스트와 정확히 허용한 공개 DNS 호스트만 GET하며, SSL/TLS Inspector는 허용 포트의 직접 TLS만 점검합니다. 사설·loopback·link-local·예약 주소와 DNS rebinding 경로는 기본 차단됩니다. 기능 범위와 비교 근거는 [플러그인 비교 문서](docs/PLUGIN_COMPARISON_0.4.1.md)에 정리했습니다.
+세 플러그인 모두 대상 소유 또는 명시적 허가 확인과 실행별 승인을 요구합니다. Resource Archiver는 같은 호스트와 정확히 허용한 공개 DNS 호스트만 GET하며, SSL/TLS Inspector는 허용 포트의 직접 TLS만 점검합니다. Runtime Observer는 기존 브라우저 쿠키를 사용하지 않고 다른 origin과 보조 트래픽 채널을 차단합니다. 사설·loopback·link-local·예약 주소와 DNS rebinding 경로는 기본 차단됩니다. 세 엔진은 외부 확장 프로그램이나 공식 `sslscan`의 소스·바이너리를 복사·변형·번들하지 않은 독립 구현입니다. 기능 범위와 비교 근거는 [플러그인 비교 문서](docs/PLUGIN_COMPARISON_0.4.2.md)에 정리했습니다.
+
+세 도구는 네이티브 앱의 `설정 → 도구 포털`에서 전용 비밀번호를 설정한 뒤 `/tools/resource-archiver`, `/tools/sslscan`, `/tools/runtime-hook`에서 각각 열 수 있습니다. 능동 접속 전에는 와일드카드·접미사 매칭·포트·경로가 없는 정확한 대상 DNS 이름을 허용목록에 넣어야 하며, 작업 폴더는 ZIP 보관에만 필요하고 상태 변경·literal 변경 opt-in은 선택 사항입니다. 포털은 기본 OFF이며 외부 주소에서는 검증된 Cloudflare Named Tunnel + Access 경계와 포털 비밀번호를 함께 요구합니다. 로그인 권한은 HttpOnly 쿠키와 포트별 탭 저장소의 별도 요청 증명을 모두 제시해야 하므로 같은 loopback 호스트의 다른 포트에 쿠키가 전달돼도 단독 재사용할 수 없습니다.
 
 외부 플러그인은 경로로 불러오거나 제거할 수 있습니다. 예제:
 

@@ -12,6 +12,8 @@ export interface PluginExecutionContext {
   readonly isAdmin?: boolean;
   /** Independently revocable data capabilities granted to the calling device. */
   readonly deviceCapabilities?: readonly string[];
+  /** Host-created capability for the password portal's one explicitly mapped plugin. */
+  readonly portalCapability?: 'webcrypto-observer';
   readonly workspaceRoot?: string;
   readonly destructiveApproved: boolean;
   readonly approvalSource: 'not-required' | 'policy' | 'prompt' | 'run-capability';

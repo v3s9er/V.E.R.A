@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
@@ -29,6 +29,14 @@ import {
   cloudflareAccessBootstrapChallenge,
   isCloudflareAccessPairProbe,
 } from '../access-probe.js';
+import {
+  TOOL_PORTAL_REQUEST_PROOF_HEADER,
+  ToolPortalError,
+  type ToolPortalAction,
+  type ToolPortalArtifactFile,
+  type ToolPortalSession,
+  type ToolPortalToolId,
+} from '../tool-portal.js';
 
 export { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress } from './transport.js';
 
@@ -591,6 +599,12 @@ export interface HttpApiHost {
   workspacesList(): WorkspaceInfo[];
   fileAccess(secret: string, write: boolean): boolean;
   sharedFileAccess(secret: string, write: boolean): boolean;
+  toolPortalSession(token: unknown, requestProof: unknown): { enabled: boolean; authenticated: boolean; expiresAt?: number; hookMutationEnabled?: boolean };
+  toolPortalLogin(password: unknown, clientKey: string): Promise<{ token: string; requestProof: string; session: ToolPortalSession }>;
+  toolPortalLogout(token: unknown, requestProof: unknown): Promise<boolean>;
+  toolPortalCall(token: unknown, requestProof: unknown, tool: ToolPortalToolId, action: ToolPortalAction, params: unknown, signal?: AbortSignal): Promise<unknown>;
+  toolPortalArtifact(token: unknown, requestProof: unknown, capability: unknown): ToolPortalArtifactFile;
+  toolPortalOriginAllowed(origin: URL): boolean;
 }
 
 /**
@@ -610,6 +624,125 @@ function remoteOf(req: Request): string {
 
 function localOf(req: Request): string {
   return String(req.socket.localAddress ?? '').replace(/^::ffff:/, '');
+}
+
+const TOOL_PORTAL_SECURE_COOKIE = '__Host-mr-robot-tool-portal';
+const TOOL_PORTAL_LOOPBACK_COOKIE = 'mr-robot-tool-portal-local';
+// Public wire marker shared with plugins/remote-link.ts. It grants no access;
+// the integration test pins both copies so a protocol drift fails closed.
+const TOOL_PORTAL_ACCESS_PROBE_HEADER = 'x-mr-robot-tool-portal-probe';
+const TOOL_PORTAL_ACCESS_PROBE_CODE = 'MR_ROBOT_TOOL_PORTAL_ORIGIN_V1';
+
+interface ToolPortalTransport {
+  origin: string;
+  secure: boolean;
+  clientKey: string;
+  cookieName: string;
+}
+
+function isToolPortalSurface(pathname: string): boolean {
+  return pathname === '/api/tool-portal' || pathname.startsWith('/api/tool-portal/')
+    || /^\/tools\/(?:resource-archiver|sslscan|runtime-hook)\/?$/.test(pathname);
+}
+
+function hasCloudflarePortalMarker(req: Request): boolean {
+  return ['cf-ray', 'cf-connecting-ip', 'cf-access-jwt-assertion', 'x-forwarded-proto']
+    .some((header) => Boolean(req.header(header)));
+}
+
+function isCloudflareToolPortalAccessProbe(req: Request): boolean {
+  return req.method === 'GET'
+    && req.path === '/api/tool-portal/session'
+    && req.header(TOOL_PORTAL_ACCESS_PROBE_HEADER) === TOOL_PORTAL_ACCESS_PROBE_CODE
+    && hasCloudflarePortalMarker(req);
+}
+
+function isFreshCloudflareAccessAssertion(value: string, now = Date.now()): boolean {
+  if (value.length < 64 || value.length > 16_384 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) return false;
+  try {
+    const payloadBytes = Buffer.from(value.split('.')[1]!, 'base64url');
+    if (!payloadBytes.length || payloadBytes.length > 8 * 1024) return false;
+    const payload = JSON.parse(payloadBytes.toString('utf8')) as Record<string, unknown>;
+    const issuer = new URL(String(payload.iss ?? ''));
+    const expiresAt = Number(payload.exp) * 1_000;
+    const audience = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    return Number.isSafeInteger(expiresAt) && expiresAt > now + 5_000 && expiresAt <= now + 7 * 24 * 60 * 60_000
+      && issuer.protocol === 'https:' && !issuer.username && !issuer.password && !issuer.port
+      && issuer.hostname.toLowerCase().endsWith('.cloudflareaccess.com')
+      && audience.length > 0 && audience.every((item) => typeof item === 'string' && item.length >= 8 && item.length <= 512);
+  } catch {
+    return false;
+  }
+}
+
+function parsePortalHost(req: Request, protocol: 'http:' | 'https:'): URL | undefined {
+  const raw = String(req.header('host') ?? '').trim();
+  if (!raw || raw.length > 300 || /[\s/@\\]/.test(raw)) return undefined;
+  try {
+    const url = new URL(`${protocol}//${raw}`);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveToolPortalTransport(req: Request, host: HttpApiHost): ToolPortalTransport | undefined {
+  const direct = remoteOf(req);
+  if (!isLoopback(direct)) return undefined;
+  if (hasCloudflarePortalMarker(req)) {
+    const forwarded = String(req.header('cf-connecting-ip') ?? '').trim();
+    const ray = String(req.header('cf-ray') ?? '').trim();
+    const assertion = String(req.header('cf-access-jwt-assertion') ?? '').trim();
+    if (isIP(forwarded) === 0 || !/^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray)
+      || req.header('x-forwarded-proto')?.toLowerCase() !== 'https'
+      || !isFreshCloudflareAccessAssertion(assertion)) return undefined;
+    const origin = parsePortalHost(req, 'https:');
+    if (!origin || (origin.port && origin.port !== '443') || !host.toolPortalOriginAllowed(origin)) return undefined;
+    return { origin: origin.origin, secure: true, clientKey: `cloudflare:${forwarded}`, cookieName: TOOL_PORTAL_SECURE_COOKIE };
+  }
+  const encrypted = (req.socket as Socket & { encrypted?: boolean }).encrypted === true;
+  const origin = parsePortalHost(req, encrypted ? 'https:' : 'http:');
+  if (!origin || !isLoopback(stripIpv6Brackets(origin.hostname))) return undefined;
+  const expectedPort = Number(origin.port || (encrypted ? 443 : 80));
+  if (!Number.isInteger(expectedPort) || expectedPort !== req.socket.localPort) return undefined;
+  return {
+    origin: origin.origin,
+    secure: encrypted,
+    clientKey: `loopback:${direct}`,
+    cookieName: encrypted ? TOOL_PORTAL_SECURE_COOKIE : TOOL_PORTAL_LOOPBACK_COOKIE,
+  };
+}
+
+function portalCookie(req: Request, name: string): string | undefined {
+  const raw = req.header('cookie');
+  if (!raw || raw.length > 8_192) return undefined;
+  const values = raw.split(';').map((item) => item.trim()).filter((item) => item.startsWith(`${name}=`));
+  if (values.length !== 1) return undefined;
+  const value = values[0].slice(name.length + 1);
+  return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined;
+}
+
+function portalRequestProof(req: Request): string | undefined {
+  const value = String(req.header(TOOL_PORTAL_REQUEST_PROOF_HEADER) ?? '').trim();
+  return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined;
+}
+
+function portalSetCookie(name: string, token: string, secure: boolean, maxAgeSeconds: number): string {
+  return `${name}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}${secure ? '; Secure' : ''}`;
+}
+
+function portalSameOriginPost(req: Request, transport: ToolPortalTransport): boolean {
+  const origin = String(req.header('origin') ?? '');
+  const fetchSite = req.header('sec-fetch-site');
+  const contentType = String(req.header('content-type') ?? '').toLowerCase();
+  if (!origin || origin === 'null' || (fetchSite && fetchSite !== 'same-origin') || !contentType.startsWith('application/json')) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.origin === transport.origin && parsed.pathname === '/' && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
 }
 
 export function createHttpApi(
@@ -759,6 +892,50 @@ export function createHttpApi(
       error: '보안 전송이 필요합니다. Cloudflare HTTPS 원격 링크 또는 Tailscale 연결을 사용하세요.',
     });
   });
+  app.use((req, res, next) => {
+    if (!isToolPortalSurface(req.path)) { next(); return; }
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+    ].join('; '));
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=(), usb=(), microphone=()');
+    // Remote-link must prove this exact path is Access-protected before the
+    // regular transport can trust the origin. A deterministic, non-sensitive
+    // marker breaks that circular dependency and remains usable for periodic
+    // reverification after the origin has been admitted. The probe never
+    // creates a session or touches login/rate-limit state.
+    if (isCloudflareToolPortalAccessProbe(req)) {
+      res.status(503).json({
+        app: 'mr-robot',
+        code: TOOL_PORTAL_ACCESS_PROBE_CODE,
+        error: 'tool portal Access verification marker',
+      });
+      return;
+    }
+    const transport = resolveToolPortalTransport(req, host);
+    if (!transport) {
+      const remoteRequest = hasCloudflarePortalMarker(req);
+      res.status(remoteRequest ? 503 : 421).json({
+        error: remoteRequest
+          ? '검증된 Cloudflare Access 원격 링크가 아닙니다. 네이티브 앱에서 원격 링크를 다시 검증하세요.'
+          : '도구 포털은 이 PC의 loopback 주소 또는 검증된 HTTPS 원격 링크에서만 열 수 있습니다.',
+      });
+      return;
+    }
+    res.locals.mrRobotToolPortalTransport = transport;
+    next();
+  });
   app.use(express.json({ limit: MAX_JSON_BYTES, strict: true }));
   app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
     const detail = error as { type?: string; status?: number; message?: string };
@@ -771,6 +948,120 @@ export function createHttpApi(
       return;
     }
     next(error);
+  });
+
+  const portalTransport = (res: Response): ToolPortalTransport => res.locals.mrRobotToolPortalTransport as ToolPortalTransport;
+  const portalToken = (req: Request, res: Response): string | undefined => {
+    const transport = portalTransport(res);
+    return portalCookie(req, transport.cookieName);
+  };
+  const requirePortalOrigin = (req: Request, res: Response, next: NextFunction): void => {
+    if (portalSameOriginPost(req, portalTransport(res))) { next(); return; }
+    res.status(403).json({ error: '같은 출처의 JSON POST 요청만 허용됩니다.' });
+  };
+  const portalError = (res: Response, error: unknown): void => {
+    if (res.headersSent || res.destroyed) return;
+    if (error instanceof ToolPortalError) {
+      if (error.retryAfterSeconds) res.setHeader('Retry-After', String(error.retryAfterSeconds));
+      res.status(error.status).json({ error: error.message, code: error.code });
+      return;
+    }
+    const aborted = error instanceof Error && (error.name === 'AbortError' || /aborted|취소|연결이 끊어/i.test(error.message));
+    res.status(aborted ? 408 : 400).json({
+      error: aborted ? '요청이 취소되었거나 제한 시간을 초과했습니다.' : '도구 요청을 완료하지 못했습니다.',
+      code: aborted ? 'PORTAL_REQUEST_ABORTED' : 'PORTAL_TOOL_FAILED',
+    });
+  };
+
+  app.get('/api/tool-portal/session', (req, res) => {
+    const token = portalToken(req, res);
+    const status = host.toolPortalSession(token, portalRequestProof(req));
+    res.json(status);
+  });
+
+  app.post('/api/tool-portal/session', requirePortalOrigin, async (req, res) => {
+    try {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)
+        || Object.keys(req.body).some((key) => key !== 'password')) {
+        throw new ToolPortalError('로그인 요청 형식이 올바르지 않습니다.', 400, 'INVALID_REQUEST');
+      }
+      const transport = portalTransport(res);
+      const loggedIn = await host.toolPortalLogin(req.body.password, transport.clientKey);
+      res.setHeader('Set-Cookie', portalSetCookie(
+        transport.cookieName,
+        loggedIn.token,
+        transport.secure,
+        Math.ceil((loggedIn.session.expiresAt - Date.now()) / 1_000),
+      ));
+      const status = host.toolPortalSession(loggedIn.token, loggedIn.requestProof);
+      res.json({ ...status, requestProof: loggedIn.requestProof });
+    } catch (error) {
+      portalError(res, error);
+    }
+  });
+
+  app.post('/api/tool-portal/logout', requirePortalOrigin, async (req, res) => {
+    try {
+      const transport = portalTransport(res);
+      await host.toolPortalLogout(portalToken(req, res), portalRequestProof(req));
+      res.setHeader('Set-Cookie', portalSetCookie(transport.cookieName, '', transport.secure, 0));
+      res.json({ ok: true });
+    } catch (error) {
+      portalError(res, error);
+    }
+  });
+
+  app.post('/api/tool-portal/tools/:tool/:action', requirePortalOrigin, async (req, res) => {
+    const transfer = transferAbort(req, res, activeTransfers);
+    try {
+      const tool = String(req.params.tool) as ToolPortalToolId;
+      const action = String(req.params.action) as ToolPortalAction;
+      if (!['resource-archiver', 'sslscan', 'runtime-hook'].includes(tool)) {
+        throw new ToolPortalError('지원하지 않는 포털 도구입니다.', 404, 'TOOL_NOT_FOUND');
+      }
+      res.json(await host.toolPortalCall(
+        portalToken(req, res),
+        portalRequestProof(req),
+        tool,
+        action,
+        req.body,
+        transfer.signal,
+      ));
+    } catch (error) {
+      portalError(res, error);
+    } finally {
+      transfer.cleanup();
+    }
+  });
+
+  app.get('/api/tool-portal/artifacts/:artifactToken', async (req, res) => {
+    const fetchSite = req.header('sec-fetch-site');
+    if (fetchSite && fetchSite !== 'same-origin') {
+      res.status(403).json({ error: '교차 출처 다운로드는 허용되지 않습니다.' });
+      return;
+    }
+    let file: ToolPortalArtifactFile | undefined;
+    let descriptorOwned = false;
+    const transfer = transferAbort(req, res, activeTransfers);
+    try {
+      file = host.toolPortalArtifact(portalToken(req, res), portalRequestProof(req), req.params.artifactToken);
+      descriptorOwned = true;
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Length', String(file.size));
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`);
+      res.setHeader('Accept-Ranges', 'none');
+      // Keep ownership explicit. Node may emit the stream close after pipeline
+      // resolves, which can transiently leak descriptors under download bursts.
+      const stream = createReadStream(file.path, { fd: file.fd, autoClose: false });
+      await pipeline(stream, res, { signal: transfer.signal });
+    } catch (error) {
+      portalError(res, error);
+    } finally {
+      if (descriptorOwned && file) {
+        try { closeSync(file.fd); } catch { /* best effort */ }
+      }
+      transfer.cleanup();
+    }
   });
 
   const requireAuth = (req: Request, res: Response, next: NextFunction): void => {

@@ -29,7 +29,7 @@ import type {
   SyncMergeResult,
 } from '@mr-robot/shared';
 import { hashToken, safeEqual, maskSecret, pairingPayload } from '../auth.js';
-import { ConfigStore } from '../config.js';
+import { ConfigStore, type ToolPortalConfigureInput } from '../config.js';
 import { EventBus } from '../eventbus.js';
 import { Logger } from '../logger.js';
 import { ProviderRegistry } from '../ai/registry.js';
@@ -50,6 +50,7 @@ import { createVoicePlugin } from '../plugins/voice.js';
 import { createRemoteLinkPlugin } from '../plugins/remote-link.js';
 import { createResourceArchiverPlugin } from '../plugins/resource-archiver/index.js';
 import { createSslScanPlugin } from '../plugins/sslscan/index.js';
+import { createWebCryptoObserverPlugin } from '../plugins/webcrypto-observer/index.js';
 import { computer } from '../computer/index.js';
 import { Scheduler, SchedulerStore } from '../scheduler.js';
 import { DependencyManager } from '../dependencies.js';
@@ -59,8 +60,22 @@ import { WsHub, WsClient, WsUpgradeTickets, type AuthContext, type RpcHandler } 
 import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
+import {
+  ToolPortalArtifactStore,
+  ToolPortalError,
+  ToolPortalSessionManager,
+  normalizeToolPortalMaxCipherTests,
+  normalizeToolPortalResourceLimits,
+  normalizeToolPortalSslScanMode,
+  normalizeToolPortalTargetHost,
+  toolPortalResourceFetchMissing,
+  type ToolPortalAction,
+  type ToolPortalArtifactFile,
+  type ToolPortalSession,
+  type ToolPortalToolId,
+} from '../tool-portal.js';
 
-export const VERSION = '0.4.1';
+export const VERSION = '0.4.2';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -83,6 +98,7 @@ const ADMIN_EVENT_ALLOWLIST = new Set([
   'voice.status', 'pairing.changed', 'remote-link.changed',
   'resource-archiver.progress', 'sslscan-auditor.progress',
   'sslscan-auditor.completed',
+  'webcrypto-observer.changed',
 ]);
 
 export function serverEventAudience(event: string): ServerEventAudience {
@@ -90,6 +106,28 @@ export function serverEventAudience(event: string): ServerEventAudience {
   if (PRIVATE_CALENDAR_EVENT_ALLOWLIST.has(event)) return 'private-calendar';
   if (ADMIN_EVENT_ALLOWLIST.has(event)) return 'admin';
   return 'none';
+}
+
+function portalObject(value: unknown, label = '도구 요청'): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ToolPortalError(`${label} 형식이 올바르지 않습니다.`, 400, 'INVALID_REQUEST');
+  return value as Record<string, unknown>;
+}
+
+function portalInteger(value: unknown, fallback: number, minimum: number, maximum: number, label: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || Number(value) < minimum) throw new ToolPortalError(`${label} 값이 올바르지 않습니다.`, 400, 'INVALID_REQUEST');
+  return Math.min(Number(value), maximum);
+}
+
+function portalTargetFromUrl(value: unknown): { url: string; host: string } {
+  let parsed: URL;
+  try { parsed = new URL(String(value ?? '')); }
+  catch { throw new ToolPortalError('대상 URL이 올바르지 않습니다.', 400, 'INVALID_TARGET'); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new ToolPortalError('자격증명이 없는 HTTP(S) 대상 URL만 허용됩니다.', 400, 'INVALID_TARGET');
+  }
+  const host = normalizeToolPortalTargetHost(parsed.hostname.replace(/^\[/, '').replace(/\]$/, ''));
+  return { url: parsed.href, host };
 }
 
 /** Rate limit for the PIN -> secret exchange (brute-force protection). */
@@ -444,6 +482,13 @@ export class AgentServer {
   readonly bus = new EventBus();
   readonly logger = new Logger(this.bus, 'mr-robot');
   readonly config = new ConfigStore();
+  readonly toolPortalSessions = new ToolPortalSessionManager(
+    () => this.config.toolPortalStatus(),
+    (password) => this.config.verifyToolPortalPassword(password),
+  );
+  private readonly toolPortalArtifacts = new ToolPortalArtifactStore();
+  private readonly activeToolPortalRuns = new Map<AbortController, string>();
+  private readonly toolPortalObserverSessions = new Map<string, { owner: string; timer: NodeJS.Timeout }>();
   readonly registry = new ProviderRegistry(this.config);
   readonly plugins: PluginManager;
   readonly executor: ToolExecutor;
@@ -457,6 +502,17 @@ export class AgentServer {
   readonly contextBroker: ContextBroker;
   readonly chatRunAdmission = new ChatRunAdmissionPolicy();
   private readonly remoteLinkPlugin = createRemoteLinkPlugin();
+  private readonly webCryptoObserverPlugin = createWebCryptoObserverPlugin({
+    policyProvider: {
+      getPolicy: () => {
+        const status = this.config.toolPortalStatus();
+        return {
+          enabled: status.allowedTargetHosts.length > 0,
+          allowedDomains: status.allowedTargetHosts,
+        };
+      },
+    },
+  });
 
   private httpServer: HttpServer | null = null;
   private readonly activeHttpTransfers = new Set<AbortController>();
@@ -1052,6 +1108,364 @@ export class AgentServer {
     });
   }
 
+  toolPortalSession(token: unknown, requestProof: unknown): { enabled: boolean; authenticated: boolean; expiresAt?: number; hookMutationEnabled?: boolean } {
+    const status = this.config.toolPortalStatus();
+    const session = this.toolPortalSessions.authenticate(token, requestProof);
+    return {
+      enabled: status.enabled,
+      authenticated: Boolean(session),
+      ...(session ? { expiresAt: session.expiresAt, hookMutationEnabled: status.hookMutationEnabled } : {}),
+    };
+  }
+
+  async toolPortalLogin(password: unknown, clientKey: string): Promise<{ token: string; requestProof: string; session: ToolPortalSession }> {
+    return this.toolPortalSessions.login(password, clientKey);
+  }
+
+  async toolPortalLogout(token: unknown, requestProof: unknown): Promise<boolean> {
+    const session = this.toolPortalSessions.authenticate(token, requestProof);
+    const loggedOut = this.toolPortalSessions.logout(token, requestProof);
+    if (!session) return loggedOut;
+    for (const [controller, owner] of this.activeToolPortalRuns) {
+      if (owner === session.key && !controller.signal.aborted) controller.abort(new Error('도구 포털에서 로그아웃했습니다.'));
+    }
+    this.toolPortalArtifacts.clearSession(session.key);
+    await this.stopToolPortalObservers(session.key);
+    return loggedOut;
+  }
+
+  toolPortalAdminStatus(): {
+    enabled: boolean;
+    passwordConfigured: boolean;
+    allowedDomains: string[];
+    workspaceId: string | null;
+    workspaceName?: string;
+    hookMutationEnabled: boolean;
+  } {
+    const status = this.config.toolPortalStatus();
+    const workspace = this.config.toolPortalWorkspace();
+    return {
+      enabled: status.enabled,
+      passwordConfigured: status.enabled,
+      allowedDomains: status.allowedTargetHosts,
+      workspaceId: status.portalWorkspaceId ?? null,
+      ...(workspace ? { workspaceName: workspace.name } : {}),
+      hookMutationEnabled: status.hookMutationEnabled,
+    };
+  }
+
+  async configureToolPortal(input: ToolPortalConfigureInput): Promise<ReturnType<AgentServer['toolPortalAdminStatus']>> {
+    await this.config.configureToolPortal(input);
+    await this.revokeToolPortalAuthority('도구 포털 설정이 변경되었습니다.');
+    return this.toolPortalAdminStatus();
+  }
+
+  async disableToolPortal(): Promise<ReturnType<AgentServer['toolPortalAdminStatus']>> {
+    await this.config.disableToolPortal();
+    await this.revokeToolPortalAuthority('도구 포털이 비활성화되었습니다.');
+    return this.toolPortalAdminStatus();
+  }
+
+  /** Only the exact currently verified named Remote Link origin may expose the portal publicly. */
+  toolPortalOriginAllowed(origin: URL): boolean {
+    return this.remoteLinkPlugin.portalOriginAllowed(origin);
+  }
+
+  async toolPortalCall(
+    token: unknown,
+    requestProof: unknown,
+    tool: ToolPortalToolId,
+    action: ToolPortalAction,
+    raw: unknown,
+    requestSignal?: AbortSignal,
+  ): Promise<unknown> {
+    const session = this.toolPortalSessions.authenticate(token, requestProof);
+    if (!session) throw new ToolPortalError('도구 포털 로그인이 필요합니다.', 401, 'PORTAL_UNAUTHORIZED');
+    if (this.activeToolPortalRuns.size >= 8
+      || [...this.activeToolPortalRuns.values()].filter((owner) => owner === session.key).length >= 2) {
+      throw new ToolPortalError('동시에 실행 중인 포털 작업이 너무 많습니다.', 429, 'PORTAL_RUN_LIMIT_REACHED', 5);
+    }
+    const controller = new AbortController();
+    const actionTimeout = tool === 'resource-archiver' && action === 'archive' ? 70_000
+      : tool === 'runtime-hook' && action === 'observe' ? 15_000
+        : 65_000;
+    const signals = [controller.signal, AbortSignal.timeout(actionTimeout), ...(requestSignal ? [requestSignal] : [])];
+    const signal = AbortSignal.any(signals);
+    this.activeToolPortalRuns.set(controller, session.key);
+    try {
+      if (tool === 'resource-archiver') return await this.callPortalResource(session, action, raw, signal);
+      if (tool === 'sslscan') return await this.callPortalSsl(session, action, raw, signal);
+      if (tool === 'runtime-hook') return await this.callPortalRuntime(session, action, raw, signal);
+      throw new ToolPortalError('지원하지 않는 포털 도구입니다.', 404, 'TOOL_NOT_FOUND');
+    } finally {
+      this.activeToolPortalRuns.delete(controller);
+    }
+  }
+
+  toolPortalArtifact(token: unknown, requestProof: unknown, capability: unknown): ToolPortalArtifactFile {
+    const session = this.toolPortalSessions.authenticate(token, requestProof);
+    if (!session) throw new ToolPortalError('도구 포털 로그인이 필요합니다.', 401, 'PORTAL_UNAUTHORIZED');
+    const workspace = this.config.toolPortalWorkspace();
+    if (!workspace) throw new ToolPortalError('포털 작업 폴더가 설정되지 않았습니다.', 409, 'PORTAL_WORKSPACE_REQUIRED');
+    return this.toolPortalArtifacts.consume(capability, session.key, workspace.path);
+  }
+
+  private assertPortalTargetAllowed(host: string, status = this.config.toolPortalStatus()): void {
+    if (!status.allowedTargetHosts.includes(normalizeToolPortalTargetHost(host))) {
+      throw new ToolPortalError('이 대상은 네이티브 앱의 정확한 허가 도메인 목록에 없습니다.', 403, 'TARGET_NOT_ALLOWED');
+    }
+  }
+
+  private portalExecution(signal: AbortSignal, destructive: boolean, workspaceRoot?: string) {
+    return {
+      signal,
+      permissionMode: workspaceRoot ? 'workspace' as const : 'ask' as const,
+      isAdmin: false,
+      deviceCapabilities: [] as const,
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+      destructiveApproved: destructive,
+      approvalSource: destructive ? 'prompt' as const : 'not-required' as const,
+    };
+  }
+
+  private portalRuntimeExecution(signal: AbortSignal, destructive: boolean) {
+    return { ...this.portalExecution(signal, destructive), portalCapability: 'webcrypto-observer' as const };
+  }
+
+  private async callPortalResource(session: ToolPortalSession, action: ToolPortalAction, raw: unknown, signal: AbortSignal): Promise<unknown> {
+    if (action !== 'validate' && action !== 'preview' && action !== 'archive') {
+      throw new ToolPortalError('지원하지 않는 Resource Archiver 작업입니다.', 404, 'ACTION_NOT_FOUND');
+    }
+    const body = portalObject(raw);
+    if (body.authorizationConfirmed !== true) throw new ToolPortalError('대상 보존 권한을 실행마다 확인해야 합니다.', 400, 'AUTHORIZATION_REQUIRED');
+    const target = portalTargetFromUrl(body.pageUrl);
+    const status = this.config.toolPortalStatus();
+    this.assertPortalTargetAllowed(target.host, status);
+    const rawCrossOrigins = body.allowedCrossOriginHosts ?? [];
+    if (!Array.isArray(rawCrossOrigins) || rawCrossOrigins.length > 32) throw new ToolPortalError('교차 출처 허가 목록이 올바르지 않습니다.', 400, 'INVALID_REQUEST');
+    const allowedCrossOriginHosts = [...new Set(rawCrossOrigins.map(normalizeToolPortalTargetHost))];
+    for (const host of allowedCrossOriginHosts) this.assertPortalTargetAllowed(host, status);
+    const fetchMissing = toolPortalResourceFetchMissing(action, body.fetchMissing);
+    const limits = normalizeToolPortalResourceLimits(body.limits, fetchMissing);
+    const archiveHost = target.host.replace(/[^a-z0-9.-]/gi, '-').slice(0, 80) || 'site';
+    const outputPath = action === 'archive'
+      ? `resource-archives/portal-${archiveHost}-${Date.now()}-${randomUUID().slice(0, 8)}.zip`
+      : 'resource-archives/portal-preview.zip';
+    const request = {
+      authorizationConfirmed: true,
+      pageUrl: target.url,
+      outputPath,
+      ...(body.capturedResources !== undefined ? { capturedResources: body.capturedResources } : {}),
+      ...(body.har !== undefined ? { har: body.har } : {}),
+      fetchMissing,
+      discoverDependencies: body.discoverDependencies !== false,
+      rewriteOfflineLinks: body.rewriteOfflineLinks !== false,
+      allowedCrossOriginHosts,
+      limits,
+    };
+    const command = `resource-archiver.${action}`;
+    if (action !== 'archive') {
+      const result = await this.plugins.call(command, request, this.portalExecution(signal, false));
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+      const { outputPath: _outputPath, ...safeResult } = result as Record<string, unknown>;
+      return safeResult;
+    }
+    const workspace = this.config.toolPortalWorkspace();
+    if (!workspace || !status.workspaceConfigured) throw new ToolPortalError('네이티브 앱에서 포털 작업 폴더를 먼저 선택하세요.', 409, 'PORTAL_WORKSPACE_REQUIRED');
+    const result = await this.plugins.call(command, request, this.portalExecution(signal, true, workspace.path));
+    if (!result || typeof result !== 'object' || Array.isArray(result) || typeof (result as { outputPath?: unknown }).outputPath !== 'string') {
+      throw new ToolPortalError('아카이브 결과 파일을 확인할 수 없습니다.', 500, 'INVALID_PLUGIN_RESULT');
+    }
+    const { outputPath: absoluteOutputPath, ...summary } = result as Record<string, unknown> & { outputPath: string };
+    const artifact = this.toolPortalArtifacts.issue(session.key, absoluteOutputPath, workspace.path);
+    return { artifactToken: artifact.capability, fileName: artifact.name, summary };
+  }
+
+  private async callPortalSsl(_session: ToolPortalSession, action: ToolPortalAction, raw: unknown, signal: AbortSignal): Promise<unknown> {
+    if (action === 'status') return this.plugins.call('sslscan.status', {}, this.portalExecution(signal, false));
+    if (action !== 'scan') throw new ToolPortalError('지원하지 않는 TLS 점검 작업입니다.', 404, 'ACTION_NOT_FOUND');
+    const body = portalObject(raw);
+    if (body.authorizationConfirmed !== true) throw new ToolPortalError('TLS 점검 권한을 실행마다 확인해야 합니다.', 400, 'AUTHORIZATION_REQUIRED');
+    const host = normalizeToolPortalTargetHost(body.host);
+    const status = this.config.toolPortalStatus();
+    this.assertPortalTargetAllowed(host, status);
+    const scanMode = normalizeToolPortalSslScanMode(body.scanMode);
+    let sni: string | undefined;
+    if (body.sni !== undefined) {
+      sni = normalizeToolPortalTargetHost(body.sni);
+      this.assertPortalTargetAllowed(sni, status);
+    }
+    const maxCipherTests = normalizeToolPortalMaxCipherTests(scanMode, body.maxCipherTests);
+    const request = {
+      host,
+      ...(body.port !== undefined ? { port: body.port } : {}),
+      ...(sni ? { sni } : {}),
+      authorizationConfirmed: true,
+      scanMode,
+      timeoutMs: portalInteger(body.timeoutMs, 2_500, 500, 4_000, 'timeoutMs'),
+      overallTimeoutMs: portalInteger(body.overallTimeoutMs, 30_000, 3_000, 50_000, 'overallTimeoutMs'),
+      maxCipherTests,
+      forceRefresh: body.forceRefresh === true,
+    };
+    return this.plugins.call('sslscan.scan', request, this.portalExecution(signal, true));
+  }
+
+  private portalObserverOwner(sessionId: unknown, session: ToolPortalSession): string {
+    if (typeof sessionId !== 'string' || sessionId.length < 8 || sessionId.length > 160) {
+      throw new ToolPortalError('관찰 세션 ID가 올바르지 않습니다.', 400, 'INVALID_REQUEST');
+    }
+    if (this.toolPortalObserverSessions.get(sessionId)?.owner !== session.key) {
+      throw new ToolPortalError('이 포털 로그인에서 시작한 관찰 세션이 아닙니다.', 404, 'SESSION_NOT_FOUND');
+    }
+    return sessionId;
+  }
+
+  private async callPortalRuntime(session: ToolPortalSession, action: ToolPortalAction, raw: unknown, signal: AbortSignal): Promise<unknown> {
+    const body = portalObject(raw);
+    if (action === 'analyze') {
+      if (body.authorizationConfirmed !== true || typeof body.sourceText !== 'string'
+        || Buffer.byteLength(body.sourceText, 'utf8') > 256 * 1024) {
+        throw new ToolPortalError('오프라인 분석 권한 또는 256KiB 이하 소스를 확인하세요.', 400, 'INVALID_REQUEST');
+      }
+      return this.plugins.call('webcrypto-observer.analyze', {
+        authorizationConfirmed: true,
+        sourceText: body.sourceText,
+      }, this.portalRuntimeExecution(signal, false));
+    }
+    if (action === 'observe') {
+      if (body.authorizationConfirmed !== true || body.sessionEnabled !== true) {
+        throw new ToolPortalError('관찰 권한과 세션 시작을 실행마다 확인해야 합니다.', 400, 'AUTHORIZATION_REQUIRED');
+      }
+      const target = portalTargetFromUrl(body.targetUrl);
+      const targetUrl = new URL(target.url);
+      if (targetUrl.protocol !== 'https:' || (targetUrl.port && targetUrl.port !== '443')) {
+        throw new ToolPortalError('Runtime Hook 대상은 표준 443 포트의 HTTPS URL이어야 합니다.', 400, 'INVALID_TARGET');
+      }
+      const status = this.config.toolPortalStatus();
+      this.assertPortalTargetAllowed(target.host, status);
+      const plaintext = body.plaintextPreview === undefined ? undefined : portalObject(body.plaintextPreview, '평문 미리보기');
+      if (plaintext && (plaintext.enabled !== true || plaintext.previewConfirmed !== true)) {
+        throw new ToolPortalError('평문 미리보기 위험을 명시적으로 확인해야 합니다.', 400, 'PLAINTEXT_CONFIRMATION_REQUIRED');
+      }
+      const stateChanging = body.allowStateChangingRequests === true;
+      if (stateChanging && (body.stateChangingRequestsConfirmed !== true || !status.hookMutationEnabled)) {
+        throw new ToolPortalError('상태 변경 요청은 네이티브 opt-in과 실행별 확인이 모두 필요합니다.', 403, 'HOOK_MUTATION_DISABLED');
+      }
+      const rawLimits = body.limits === undefined ? {} : portalObject(body.limits, '관찰 한도');
+      const request = {
+        authorizationConfirmed: true,
+        sessionEnabled: true,
+        targetUrl: target.url,
+        ...(plaintext ? { plaintextPreview: {
+          enabled: true,
+          previewConfirmed: true,
+          maxBytes: portalInteger(plaintext.maxBytes, 64, 1, 128, 'plaintext maxBytes'),
+        } } : {}),
+        allowStateChangingRequests: stateChanging,
+        stateChangingRequestsConfirmed: stateChanging,
+        limits: {
+          durationMs: portalInteger(rawLimits.durationMs, 10_000, 1_000, 30_000, 'durationMs'),
+          maxRequests: portalInteger(rawLimits.maxRequests, 20, 1, 40, 'maxRequests'),
+          maxResponseBytes: portalInteger(rawLimits.maxResponseBytes, 4 * 1024 * 1024, 1_024, 8 * 1024 * 1024, 'maxResponseBytes'),
+          maxConcurrentRequests: portalInteger(rawLimits.maxConcurrentRequests, 4, 1, 8, 'maxConcurrentRequests'),
+          maxRingEvents: portalInteger(rawLimits.maxRingEvents, 64, 1, 128, 'maxRingEvents'),
+          maxRequestBodyBytes: portalInteger(rawLimits.maxRequestBodyBytes, 64 * 1024, 0, 256 * 1024, 'maxRequestBodyBytes'),
+          maxUploadBytes: portalInteger(rawLimits.maxUploadBytes, 128 * 1024, 0, 512 * 1024, 'maxUploadBytes'),
+        },
+      };
+      const result = await this.plugins.call('webcrypto-observer.observe', request, this.portalRuntimeExecution(signal, true));
+      const record = portalObject(result, '관찰 시작 결과');
+      if (typeof record.sessionId !== 'string' || record.sessionId.length < 8 || record.sessionId.length > 160) {
+        throw new ToolPortalError('관찰 세션 ID를 확인할 수 없습니다.', 500, 'INVALID_PLUGIN_RESULT');
+      }
+      if (this.toolPortalObserverSessions.size >= 32) {
+        await this.plugins.call('webcrypto-observer.stop', { sessionId: record.sessionId }, this.portalRuntimeExecution(AbortSignal.timeout(10_000), true)).catch(() => undefined);
+        throw new ToolPortalError('활성 포털 관찰 세션 한도에 도달했습니다.', 429, 'SESSION_LIMIT_REACHED', 60);
+      }
+      const expiresAt = typeof record.expiresAt === 'string' ? Date.parse(record.expiresAt) : NaN;
+      const stopAt = Math.min(session.expiresAt, Number.isFinite(expiresAt) ? expiresAt : Date.now() + 60_000);
+      const timer = setTimeout(() => {
+        // A timeout/failure intentionally retains ownership for a later retry;
+        // do not turn that bounded background failure into an unhandled rejection.
+        void this.stopToolPortalObserver(String(record.sessionId)).catch(() => undefined);
+      }, Math.max(1, stopAt - Date.now()));
+      timer.unref?.();
+      this.toolPortalObserverSessions.set(record.sessionId, { owner: session.key, timer });
+      return result;
+    }
+    if (action === 'status') {
+      const ownedSessionId = body.sessionId === undefined
+        ? [...this.toolPortalObserverSessions].reverse().find(([, record]) => record.owner === session.key)?.[0]
+        : this.portalObserverOwner(body.sessionId, session);
+      // The plugin's unscoped status includes its global active-session
+      // summary. Never let one portal login discover or adopt a native-admin or
+      // another login's observer session.
+      if (!ownedSessionId) return { ok: true, activeSessions: 0 };
+      const sessionId = this.portalObserverOwner(ownedSessionId, session);
+      return this.plugins.call('webcrypto-observer.status', { sessionId }, this.portalRuntimeExecution(signal, false));
+    }
+    if (action === 'events') {
+      const sessionId = this.portalObserverOwner(body.sessionId, session);
+      const afterSequence = portalInteger(body.afterSequence, 0, 0, Number.MAX_SAFE_INTEGER, 'afterSequence');
+      return this.plugins.call('webcrypto-observer.events', { sessionId, afterSequence }, this.portalRuntimeExecution(signal, false));
+    }
+    if (action === 'mutation.set') {
+      const status = this.config.toolPortalStatus();
+      if (!status.hookMutationEnabled || body.mutationConfirmed !== true) {
+        throw new ToolPortalError('일회성 Hook 변경은 네이티브 opt-in과 실행별 확인이 모두 필요합니다.', 403, 'HOOK_MUTATION_DISABLED');
+      }
+      const sessionId = this.portalObserverOwner(body.sessionId, session);
+      return this.plugins.call('webcrypto-observer.mutation.set', {
+        sessionId,
+        phase: body.phase,
+        matchLiteral: body.matchLiteral,
+        replacementLiteral: body.replacementLiteral,
+        mutationConfirmed: true,
+      }, this.portalRuntimeExecution(signal, true));
+    }
+    if (action === 'stop') {
+      const sessionId = this.portalObserverOwner(body.sessionId, session);
+      // Once an authenticated owner asks to stop, finish that bounded cleanup
+      // independently of the HTTP connection. A dropped response must not
+      // strand a still-running observer or erase its retry authority.
+      return this.stopToolPortalObserver(sessionId);
+    }
+    throw new ToolPortalError('지원하지 않는 Runtime Hook 작업입니다.', 404, 'ACTION_NOT_FOUND');
+  }
+
+  private async stopToolPortalObserver(sessionId: string): Promise<unknown> {
+    const tracked = this.toolPortalObserverSessions.get(sessionId);
+    const result = await this.plugins.call(
+      'webcrypto-observer.stop',
+      { sessionId },
+      this.portalRuntimeExecution(AbortSignal.timeout(10_000), true),
+    );
+    const record = result && typeof result === 'object' && !Array.isArray(result)
+      ? result as Record<string, unknown>
+      : {};
+    const terminal = record.stopped === true
+      || ['completed', 'stopped', 'limit-reached', 'failed'].includes(String(record.status ?? ''));
+    if (terminal && tracked && this.toolPortalObserverSessions.get(sessionId) === tracked) {
+      clearTimeout(tracked.timer);
+      this.toolPortalObserverSessions.delete(sessionId);
+    }
+    return result;
+  }
+
+  private async stopToolPortalObservers(owner?: string): Promise<void> {
+    const ids = [...this.toolPortalObserverSessions]
+      .filter(([, record]) => owner === undefined || record.owner === owner)
+      .map(([id]) => id);
+    await Promise.allSettled(ids.map((id) => this.stopToolPortalObserver(id)));
+  }
+
+  private async revokeToolPortalAuthority(reason: string): Promise<void> {
+    this.toolPortalSessions.clear();
+    this.toolPortalArtifacts.clear();
+    for (const controller of this.activeToolPortalRuns.keys()) if (!controller.signal.aborted) controller.abort(new Error(reason));
+    await this.stopToolPortalObservers();
+  }
+
   /**
    * Internal-only bridge used by the HTTP peer client. The remote-link plugin
    * enforces exact HTTPS hostname matching before decrypting or returning its
@@ -1129,6 +1543,7 @@ export class AgentServer {
     await this.plugins.loadBuiltin(createVoicePlugin());
     await this.plugins.loadBuiltin(createResourceArchiverPlugin());
     await this.plugins.loadBuiltin(createSslScanPlugin());
+    await this.plugins.loadBuiltin(this.webCryptoObserverPlugin);
     const settings = this.config.settings.network;
     // A persisted 0.0.0.0 value never opens the LAN unless the separate
     // externalAccess consent is also enabled. Explicit StartOptions remain
@@ -1182,6 +1597,7 @@ export class AgentServer {
       'calendar.changed', 'calendar.work.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
       'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed',
       'resource-archiver.progress', 'sslscan-auditor.progress', 'sslscan-auditor.completed',
+      'webcrypto-observer.changed',
     ].forEach(forward);
     this.busSubscriptions.push(this.bus.on('remote-link.changed', (data) => {
       const status = data as { running?: unknown };
@@ -1204,6 +1620,7 @@ export class AgentServer {
   async stop(): Promise<void> {
     this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
+    await this.revokeToolPortalAuthority('Mr.Robot Agent가 종료되었습니다.');
     for (const run of this.activeRuns.values()) run.session.cancel();
     for (const transfer of this.activeHttpTransfers) {
       if (!transfer.signal.aborted) transfer.abort(new Error('Mr.Robot Agent가 종료되어 전송을 중단했습니다.'));
@@ -1390,6 +1807,25 @@ export class AgentServer {
 
     h.set('settings.get', () => this.getSettings());
     h.set('settings.set', (params, client) => { assertAdmin(client); return this.updateSettings(p(params) as Partial<AppSettings>); });
+    h.set('toolPortal.status', (_params, client) => {
+      assertAdmin(client);
+      return this.toolPortalAdminStatus();
+    });
+    h.set('toolPortal.configure', async (params, client) => {
+      assertAdmin(client);
+      const body = p(params);
+      const input: ToolPortalConfigureInput = {
+        ...(Object.prototype.hasOwnProperty.call(body, 'password') ? { password: body.password } : {}),
+        ...(Object.prototype.hasOwnProperty.call(body, 'workspaceId') ? { portalWorkspaceId: body.workspaceId } : {}),
+        ...(Object.prototype.hasOwnProperty.call(body, 'allowedDomains') ? { allowedTargetHosts: body.allowedDomains } : {}),
+        ...(Object.prototype.hasOwnProperty.call(body, 'hookMutationEnabled') ? { hookMutationEnabled: body.hookMutationEnabled } : {}),
+      };
+      return this.configureToolPortal(input);
+    });
+    h.set('toolPortal.disable', async (_params, client) => {
+      assertAdmin(client);
+      return this.disableToolPortal();
+    });
     h.set('workspaces.list', () => this.workspacesList());
     h.set('workspaces.add', (params, client) => {
       assertAdmin(client);

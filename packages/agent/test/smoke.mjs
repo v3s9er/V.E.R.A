@@ -22,7 +22,18 @@ const dist = resolve(here, '..', 'dist');
 const { AgentServer } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
 const { CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE, CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR } = await import(pathToFileURL(join(dist, 'access-probe.js')).href);
 const { browserOriginAllowed, createByteLimitStream, isSecurePlainPeerTransport, isTailnetAddress, normalizePeerBase, resolveConfinedPath } = await import(pathToFileURL(join(dist, 'server', 'http.js')).href);
-const { createRemoteLinkPlugin, localTunnelCredentialsFromToken, localTunnelIngressConfig, namedTunnelReady, normalizeNamedTunnelHostname, normalizeRemoteLinkLocalUrl, parseQuickTunnelUrl, redactRemoteLinkDiagnostics } = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
+const {
+  TOOL_PORTAL_ACCESS_PROBE_CODE,
+  TOOL_PORTAL_ACCESS_PROBE_HEADER,
+  createRemoteLinkPlugin,
+  localTunnelCredentialsFromToken,
+  localTunnelIngressConfig,
+  namedTunnelReady,
+  normalizeNamedTunnelHostname,
+  normalizeRemoteLinkLocalUrl,
+  parseQuickTunnelUrl,
+  redactRemoteLinkDiagnostics,
+} = await import(pathToFileURL(join(dist, 'plugins', 'remote-link.js')).href);
 const { SecretVault, unprotectRemoteLinkWithLegacyProviderFallback } = await import(pathToFileURL(join(dist, 'secrets.js')).href);
 const { EventBus } = await import(pathToFileURL(join(dist, 'eventbus.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
@@ -39,6 +50,17 @@ function check(name, cond, detail = '') {
     failures++;
     console.error(`FAIL  ${name} ${detail}`);
   }
+}
+
+function toolPortalAccessProbeResponse() {
+  return new Response(JSON.stringify({
+    app: 'mr-robot',
+    code: TOOL_PORTAL_ACCESS_PROBE_CODE,
+    error: 'tool portal Access verification marker',
+  }), {
+    status: 503,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store, max-age=0' },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +281,10 @@ const trustCachePlugin = createRemoteLinkPlugin({
     if (!headers['CF-Access-Client-Id'] || !headers['CF-Access-Client-Secret']) {
       return new Response('Access denied', { status: 403 });
     }
+    if (url.pathname === '/api/tool-portal/session'
+      && headers[TOOL_PORTAL_ACCESS_PROBE_HEADER] === TOOL_PORTAL_ACCESS_PROBE_CODE) {
+      return toolPortalAccessProbeResponse();
+    }
     if (url.pathname === '/api/pair') {
       return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
     }
@@ -343,6 +369,15 @@ const namedPlugin = createRemoteLinkPlugin({
     const headers = options?.headers ?? {};
     const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
     const hasBootstrapToken = headers['cf-access-token'] === fakeAccessAssertion;
+    if (url.pathname === '/api/tool-portal/session'
+      && headers[TOOL_PORTAL_ACCESS_PROBE_HEADER] === TOOL_PORTAL_ACCESS_PROBE_CODE) {
+      if (!hasAccess) {
+        anonymousProbeCount += 1;
+        return new Response('Access denied', { status: 403 });
+      }
+      verifyRequestHeaders = headers;
+      return toolPortalAccessProbeResponse();
+    }
     if (url.pathname === '/api/pair' && JSON.parse(String(options?.body ?? '{}')).probe === CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE) {
       if (!hasAccess && !hasBootstrapToken) return new Response('Access denied', { status: 403 });
       const request = JSON.parse(String(options?.body ?? '{}'));
@@ -585,6 +620,11 @@ const pairLeakPlugin = createRemoteLinkPlugin({
   fetchUrl: async (url, options) => {
     const headers = options?.headers ?? {};
     const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
+    if (url.pathname === '/api/tool-portal/session'
+      && headers[TOOL_PORTAL_ACCESS_PROBE_HEADER] === TOOL_PORTAL_ACCESS_PROBE_CODE) {
+      if (!hasAccess) return new Response('Access denied', { status: 403 });
+      return toolPortalAccessProbeResponse();
+    }
     if (url.pathname === '/api/ws-ticket') {
       if (!hasAccess) return new Response('Access denied', { status: 403 });
       return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
@@ -641,6 +681,10 @@ const transientPlugin = createRemoteLinkPlugin({
     const headers = options?.headers ?? {};
     const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
     if (!hasAccess && !exposeRestoredNamedWithoutAccess) return new Response('Access denied', { status: 403 });
+    if (url.pathname === '/api/tool-portal/session'
+      && headers[TOOL_PORTAL_ACCESS_PROBE_HEADER] === TOOL_PORTAL_ACCESS_PROBE_CODE) {
+      return toolPortalAccessProbeResponse();
+    }
     if (url.pathname === '/api/pair') {
       return new Response(JSON.stringify({ error: CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR, app: 'mr-robot' }), { status: 400, headers: { 'content-type': 'application/json' } });
     }

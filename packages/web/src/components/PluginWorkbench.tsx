@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { PluginInfo, WorkspaceInfo } from '@mr-robot/shared';
 import type { MrRobotClient } from '../rpc';
+import type { RuntimeHookAction } from '../tool-portal-contract';
 import { Badge, Button, Input, Select } from './ui';
+import { RuntimeHookPanel, type RuntimeHookTransport } from './RuntimeHookPanel';
 import './PluginWorkbench.css';
 
 type WorkbenchResult = { label: string; value: unknown; completedAt: number };
@@ -96,6 +98,7 @@ function formatBytes(value: unknown): string {
 function pluginGlyph(id: string): string {
   if (id === 'resource-archiver') return '⇩';
   if (id === 'sslscan-auditor') return '⌾';
+  if (id === 'webcrypto-observer') return '⌁';
   if (id === 'remote-link') return '☁';
   if (id === 'orca') return '⌘';
   return '◇';
@@ -492,6 +495,9 @@ export function PluginWorkbench({ plugin, client, initialResult, onClose, onResu
   const [error, setError] = useState('');
   const [result, setResult] = useState<WorkbenchResult | null>(initialResult === undefined ? null : { label: '최근 결과', value: initialResult, completedAt: Date.now() });
   const [progress, setProgress] = useState<WorkbenchProgress | null>(null);
+  const runtimeTransport = useMemo<RuntimeHookTransport>(() => ({
+    call<T>(action: RuntimeHookAction, params: Record<string, unknown>, timeoutMs?: number) { return client.call('plugins.call', { name: `webcrypto-observer.${action}`, params }, timeoutMs) as Promise<T>; },
+  }), [client]);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -541,6 +547,8 @@ export function PluginWorkbench({ plugin, client, initialResult, onClose, onResu
             ? <ResourceArchiverPanel client={client} plugin={plugin} onCompleted={completed} setGlobalError={setError} />
             : plugin.id === 'sslscan-auditor'
               ? <SslScannerPanel client={client} onCompleted={completed} setGlobalError={setError} />
+              : plugin.id === 'webcrypto-observer'
+                ? <RuntimeHookPanel transport={runtimeTransport} onCompleted={completed} onError={setError} />
               : <GenericPluginPanel plugin={plugin} client={client} onCompleted={completed} setGlobalError={setError} />}
           {error && <div className="gate-error workbench-error" role="alert">{error}</div>}
         </div>

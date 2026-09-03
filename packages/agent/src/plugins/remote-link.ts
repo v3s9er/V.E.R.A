@@ -23,9 +23,18 @@ const MAX_DIAGNOSTIC_CHARS = 12_000;
 const START_TIMEOUT_MS = 35_000;
 const VERIFY_TIMEOUT_MS = 12_000;
 const ACCESS_BOOTSTRAP_TTL_MS = 5 * 60_000;
+const PORTAL_ACCESS_VERIFICATION_TTL_MS = 10 * 60_000;
+const ACCESS_REVERIFY_INTERVAL_MS = 5 * 60_000;
 const AUTHENTICODE_TIMEOUT_MS = 10_000;
 const CLOUDFLARE_PUBLISHER = 'Cloudflare, Inc.';
 const REMOTE_LINK_SECRET_PURPOSE = 'remote-link-v1' as const;
+/**
+ * Public, non-secret request/response marker for the exact portal Access probe.
+ * Keep these values synchronized with server/http.ts; the HTTP integration test
+ * exercises the shared wire contract without coupling the server to this plugin.
+ */
+export const TOOL_PORTAL_ACCESS_PROBE_HEADER = 'x-mr-robot-tool-portal-probe';
+export const TOOL_PORTAL_ACCESS_PROBE_CODE = 'MR_ROBOT_TOOL_PORTAL_ORIGIN_V1';
 const AUTHENTICODE_SCRIPT = [
   '$ErrorActionPreference="Stop"',
   'Import-Module (Join-Path $PSHOME "Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1") -Force -ErrorAction Stop',
@@ -68,6 +77,18 @@ export interface RemoteLinkPlugin extends MrRobotPlugin {
    * tool. Headers are returned only for the exact saved named-Tunnel host.
    */
   peerRequestHeaders(url: URL): Record<string, string>;
+  /**
+   * Host-only portal boundary. A public origin is admitted only while the
+   * exact saved named tunnel is live and its Cloudflare Access policy has
+   * passed the plugin's anonymous/bypass verification.
+   */
+  portalOriginAllowed(url: URL): boolean;
+}
+
+export function remoteLinkPortalVerificationFresh(verifiedAt: unknown, now = Date.now()): boolean {
+  return typeof verifiedAt === 'number' && Number.isSafeInteger(verifiedAt)
+    && verifiedAt <= now + 60_000
+    && now - verifiedAt <= PORTAL_ACCESS_VERIFICATION_TTL_MS;
 }
 
 function boundedAppend(current: string, chunk: Buffer | string): string {
@@ -138,6 +159,7 @@ type SmallJson = {
   ok?: unknown;
   app?: unknown;
   error?: unknown;
+  code?: unknown;
   probe?: unknown;
   challenge?: unknown;
   assertion?: unknown;
@@ -165,7 +187,7 @@ async function readSmallJson(response: Response): Promise<SmallJson> {
   let offset = 0;
   for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
   try {
-    return JSON.parse(new TextDecoder().decode(body)) as { ok?: unknown; app?: unknown; error?: unknown };
+    return JSON.parse(new TextDecoder().decode(body)) as SmallJson;
   } catch {
     throw new Error('외부 주소가 올바른 Mr.Robot JSON 응답을 반환하지 않았습니다.');
   }
@@ -503,6 +525,8 @@ export interface RemoteLinkRuntime {
   unprotectLegacySecret?: (value: string) => string;
   fetchUrl?: typeof fetch;
   runtimeDirectory?: string;
+  /** Test seam only; production always uses the conservative five-minute cadence. */
+  accessReverifyIntervalMs?: number;
 }
 
 function providerInventory(cloudflaredPath?: string, trustDiagnostic?: string): RemoteTransportProviderInfo[] {
@@ -585,6 +609,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
     ?? (runtime.unprotectSecret ? runtime.unprotectSecret : (value: string) => legacyProviderVault.unprotect(value));
   const fetchUrl = runtime.fetchUrl ?? fetch;
   const runtimeDirectory = runtime.runtimeDirectory ?? join(mrRobotHome(), 'runtime');
+  const accessReverifyIntervalMs = Math.max(1_000, Math.floor(runtime.accessReverifyIntervalMs ?? ACCESS_REVERIFY_INTERVAL_MS));
   let processHandle: ChildProcess | null = null;
   const liveChildren = new Set<ChildProcess>();
   let operationGeneration = 0;
@@ -593,6 +618,11 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
   let pendingStartKey: string | null = null;
   let pendingConfiguredStartPromise: Promise<RemoteLinkStatus> | null = null;
   let scheduledAutoStart: NodeJS.Timeout | null = null;
+  let scheduledAccessReverify: NodeJS.Timeout | null = null;
+  let pendingAccessVerification: {
+    generation: number;
+    promise: Promise<{ ok: boolean; url: string; checkedAt: number; message: string }>;
+  } | null = null;
   let publicUrl: string | undefined;
   let startedAt: number | undefined;
   let lastError: string | undefined;
@@ -687,6 +717,18 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
   };
 
   return {
+    portalOriginAllowed(url): boolean {
+      const running = Boolean(processHandle && processHandle.exitCode === null && !processHandle.killed);
+      if (!activeContext || !running || activeConfig?.provider !== 'cloudflare-named'
+        || !publicUrl || reachable !== true || accessProtected !== true
+        || !remoteLinkPortalVerificationFresh(verifiedAt)) return false;
+      if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')
+        || url.pathname !== '/' || url.search || url.hash) return false;
+      const config = storedConfig(activeContext);
+      return config.provider === 'cloudflare-named'
+        && config.hostname === url.hostname.toLowerCase()
+        && publicUrl === url.origin;
+    },
     peerRequestHeaders(url): Record<string, string> {
       const ctx = activeContext;
       if (!ctx || url.protocol !== 'https:' || (url.port && url.port !== '443') || url.username || url.password) return {};
@@ -785,7 +827,28 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         ctx.emit(`${PLUGIN_ID}.changed`, next);
       };
 
+      const clearAccessReverify = (): void => {
+        if (scheduledAccessReverify) ctx.clearTimeout(scheduledAccessReverify);
+        scheduledAccessReverify = null;
+      };
+
+      const scheduleAccessReverify = (expectedGeneration: number): void => {
+        clearAccessReverify();
+        const current = status();
+        if (expectedGeneration !== operationGeneration || !current.running || current.provider !== 'cloudflare-named') return;
+        scheduledAccessReverify = ctx.setTimeout(() => {
+          scheduledAccessReverify = null;
+          const latest = status();
+          if (expectedGeneration !== operationGeneration || !latest.running || latest.provider !== 'cloudflare-named') return;
+          // verifyFailClosed deduplicates manual and scheduled checks. Any
+          // failure stops the named tunnel and leaves the reason in status.
+          void verifyFailClosed().catch(() => undefined);
+        }, accessReverifyIntervalMs);
+        scheduledAccessReverify.unref?.();
+      };
+
       const stop = async (restoreSavedNamedTunnel = false): Promise<RemoteLinkStatus> => {
+        clearAccessReverify();
         const operation = ++operationGeneration;
         const active = processHandle;
         const pending = pendingStart;
@@ -866,6 +929,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         const executable = trust.executable!;
 
         const operation = ++operationGeneration;
+        clearAccessReverify();
         diagnostics = '';
         lastError = undefined;
         publicUrl = undefined;
@@ -1014,6 +1078,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           child.once('close', (code, signal) => {
             cleanupChildConfig();
             if (!ownsCurrentProcess()) return;
+            clearAccessReverify();
             diagnostics = redactRemoteLinkDiagnostics(childDiagnostics);
             if (!settled) {
               fail(childDiagnostics || `cloudflared가 링크를 만들기 전에 종료되었습니다. (code=${String(code)}, signal=${String(signal)})`);
@@ -1089,6 +1154,55 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             }
             if (anonymousReachedAgent) {
               throw new Error('외부 주소가 Cloudflare Access 없이 공개되어 있습니다. Access 앱과 정책을 먼저 적용하세요.');
+            }
+
+            // Verify the portal path separately. The origin deliberately
+            // returns this fixed, non-secret 503 marker for the exact probe
+            // even before portalOriginAllowed() can become true (and during
+            // later reverification). Reaching it anonymously proves that a
+            // path-scoped Access policy left the portal exposed; the Service
+            // Token must reach the same marker to prove the path is admitted.
+            const portalUrl = new URL('/api/tool-portal/session', current.publicUrl);
+            const portalProbeHeaders = {
+              accept: 'application/json',
+              [TOOL_PORTAL_ACCESS_PROBE_HEADER]: TOOL_PORTAL_ACCESS_PROBE_CODE,
+            };
+            const anonymousPortal = await fetchUrl(portalUrl, {
+              redirect: 'manual',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: portalProbeHeaders,
+            });
+            let anonymousReachedPortal = false;
+            if (anonymousPortal.status === 503) {
+              try {
+                const anonymousPortalBody = await readSmallJson(anonymousPortal);
+                anonymousReachedPortal = anonymousPortalBody.app === 'mr-robot'
+                  && anonymousPortalBody.code === TOOL_PORTAL_ACCESS_PROBE_CODE;
+              } catch {
+                // Access's own error response is not the exact Agent marker.
+              }
+            } else {
+              try { await anonymousPortal.body?.cancel(); } catch { /* best-effort cleanup */ }
+            }
+            if (anonymousReachedPortal) {
+              throw new Error('Cloudflare Access가 /api/tool-portal/session 경로를 보호하지 않습니다. 호스트 전체를 보호하는 앱으로 수정하세요.');
+            }
+
+            const authenticatedPortal = await fetchUrl(portalUrl, {
+              redirect: 'error',
+              signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+              headers: {
+                ...portalProbeHeaders,
+                'CF-Access-Client-Id': access.clientId,
+                'CF-Access-Client-Secret': access.clientSecret,
+              },
+            });
+            const authenticatedPortalBody = await readSmallJson(authenticatedPortal);
+            if (authenticatedPortal.status !== 503
+              || authenticatedPortalBody.app !== 'mr-robot'
+              || authenticatedPortalBody.code !== TOOL_PORTAL_ACCESS_PROBE_CODE
+              || !/(?:^|,)\s*no-store(?:\s*(?:,|$))/i.test(authenticatedPortal.headers.get('cache-control') ?? '')) {
+              throw new Error(`Access 인증 후 도구 포털 세션 경로가 정확한 Mr.Robot Agent marker를 반환하지 않았습니다. (HTTP ${authenticatedPortal.status})`);
             }
 
             // Hostname-level Access should cover every path, but a mistaken
@@ -1224,21 +1338,35 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         }
       };
 
-      const verifyFailClosed = async (): ReturnType<typeof verify> => {
+      const verifyFailClosed = (): ReturnType<typeof verify> => {
         const verificationGeneration = operationGeneration;
-        try {
-          return await verify();
-        } catch (error) {
-          const current = status();
-          if (verificationGeneration === operationGeneration && current.running && current.provider === 'cloudflare-named') {
-            await stop();
-            // stop() resets volatile verification state but deliberately keeps
-            // the reason visible for the administrator.
-            lastError = error instanceof Error ? error.message : String(error);
-            emitStatus();
-          }
-          throw error;
+        if (pendingAccessVerification?.generation === verificationGeneration) {
+          return pendingAccessVerification.promise;
         }
+        clearAccessReverify();
+        const attempt = (async (): ReturnType<typeof verify> => {
+          try {
+            const result = await verify();
+            if (verificationGeneration === operationGeneration) scheduleAccessReverify(verificationGeneration);
+            return result;
+          } catch (error) {
+            const current = status();
+            if (verificationGeneration === operationGeneration && current.running && current.provider === 'cloudflare-named') {
+              await stop();
+              // stop() resets volatile verification state but deliberately keeps
+              // the reason visible for the administrator.
+              lastError = error instanceof Error ? error.message : String(error);
+              emitStatus();
+            }
+            throw error;
+          }
+        })();
+        pendingAccessVerification = { generation: verificationGeneration, promise: attempt };
+        void attempt.then(
+          () => { if (pendingAccessVerification?.promise === attempt) pendingAccessVerification = null; },
+          () => { if (pendingAccessVerification?.promise === attempt) pendingAccessVerification = null; },
+        );
+        return attempt;
       };
 
       const startConfigured = (): Promise<RemoteLinkStatus> => {
@@ -1393,6 +1521,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         reachable = undefined;
         accessProtected = undefined;
         verifiedAt = undefined;
+        clearAccessReverify();
         // Drop any plaintext credential reference immediately on replace or
         // clear. The next exact-host request may repopulate it from DPAPI.
         accessCredentialCache = undefined;
@@ -1486,6 +1615,8 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
       if (activeContext === ctx) activeContext = undefined;
       if (scheduledAutoStart) ctx.clearTimeout(scheduledAutoStart);
       scheduledAutoStart = null;
+      if (scheduledAccessReverify) ctx.clearTimeout(scheduledAccessReverify);
+      scheduledAccessReverify = null;
       accessCredentialCache = undefined;
       executableTrustCache = undefined;
       ++operationGeneration;

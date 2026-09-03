@@ -5,6 +5,7 @@ import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
 import { DependencySetup } from '../components/DependencySetup';
+import { ToolPortalSettings } from '../components/ToolPortalSettings';
 
 interface PairingInfo {
   deviceName: string;
@@ -108,7 +109,8 @@ const ACCESS_QR_REVEAL_MS = 60_000;
 export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const { client } = useMrRobot();
   const canManage = client.isAdmin;
-  const [section, setSection] = useState<'models' | 'routing' | 'dependencies' | 'voice' | 'safety' | 'memory' | 'network' | 'pairing'>('models');
+  const nativePortalAdmin = canManage && Boolean(window.mrRobotDesktop);
+  const [section, setSection] = useState<'models' | 'routing' | 'dependencies' | 'voice' | 'safety' | 'memory' | 'network' | 'portal' | 'pairing'>('models');
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
@@ -331,10 +333,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   }, [canManage, client, providers, section]);
 
   useEffect(() => {
-    if (!canManage && (section === 'voice' || section === 'safety' || section === 'network' || section === 'pairing')) {
+    if ((!canManage && (section === 'voice' || section === 'safety' || section === 'network' || section === 'pairing')) || (section === 'portal' && !nativePortalAdmin)) {
       setSection('models');
     }
-  }, [canManage, section]);
+  }, [canManage, nativePortalAdmin, section]);
 
   useEffect(() => {
     let alive = true;
@@ -828,6 +830,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     { id: 'safety', title: '권한 및 안전', adminOnly: true },
     { id: 'memory', title: '기억', adminOnly: false },
     { id: 'network', title: '네트워크', adminOnly: true },
+    ...(nativePortalAdmin ? [{ id: 'portal', title: '도구 포털', adminOnly: true } as const] : []),
     { id: 'pairing', title: '모바일 연결', adminOnly: true },
   ] as const;
 
@@ -1207,6 +1210,12 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         </div>
         <div className="dependency-warning">Google 계정 Relay는 로그인만 붙인다고 완성되지 않습니다. Firebase 기기 directory, 공개키 기반 1회 승인, signaling, 종단간 암호화 relay가 배포된 뒤에만 활성화됩니다.</div>
       </Card></div>
+
+      {nativePortalAdmin && section === 'portal' && <div>
+      <Card className="panel">
+        <div className="panel-head"><div><h3>도구 포털</h3><p className="panel-hint">도구별 독립 페이지를 포털 전용 비밀번호, 허가 도메인과 작업 폴더 경계 안에서 엽니다.</p></div><Badge tone="accent">네이티브 관리자 전용</Badge></div>
+        <ToolPortalSettings client={client} />
+      </Card></div>}
 
       <div className={section === 'pairing' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
