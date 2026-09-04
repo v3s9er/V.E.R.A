@@ -68,7 +68,10 @@ if (!settings.includes('size="wide"')) throw new Error('preset browser does not 
 if (!css.includes('.modal-wide') || !css.includes('.preset-browser { width: 100%')) throw new Error('preset modal overflow safeguards are missing');
 if (!css.includes('.preset-browser-preview .graph-editor { flex: 0 0 auto; }')) throw new Error('compact preset preview can still crush and clip its graph');
 if (!css.includes('.chat-context-panel { flex: 0 1 auto; max-height: min(44dvh, 420px); overflow-y: auto;')) throw new Error('compact chat context panel can overflow behind the bottom navigation');
-if (!settings.includes('Number(telemetry.cachedPromptTokens ?? 0)') || !settings.includes('Number(telemetry.cacheHitRate ?? 0)')) throw new Error('settings telemetry is not backward-compatible with older agent summaries');
+if (!settings.includes('Number(telemetry.cachedPromptTokens ?? 0)')
+  || !settings.includes('Number(telemetry.cacheHitRate ?? 0)')
+  || !settings.includes('Number(telemetry.accountedTokens ?? (Number(telemetry.promptTokens ?? 0) + Number(telemetry.completionTokens ?? 0)))')
+  || !settings.includes('<span>감사 토큰</span>')) throw new Error('settings telemetry is not backward-compatible or missing host-accounted audit tokens');
 if (!chat.includes('aria-label={`${c.title} 메뉴`}') || !chat.includes('setConversationMenu({ conversation: c')) throw new Error('conversation ellipsis is not an actual menu trigger');
 if (!app.includes("client.on('voice.command'") || !app.includes("setView('chat')") || !chat.includes('executeCommand(voiceCommand.text)')) throw new Error('recognized wake commands are not globally queued and connected to chat execution');
 if (!chat.includes('finally {') || !chat.includes('busyRef.current = false')) throw new Error('chat busy state has no request-completion fallback');
@@ -97,6 +100,21 @@ if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g
   || !chat.includes('rollbackMatchingFields')
   || !chat.includes('Object.is(currentRecord[key], patchRecord[key])')
   || !chat.includes('if (executionConfigSavingRef.current)')) throw new Error('desktop execution settings do not share rollback-safe persistence and a synchronous send lock');
+const desktopPermissionSelect = chat.indexOf('aria-label="대화 권한"');
+const desktopTokenPolicySelect = chat.indexOf('aria-label="대화 토큰 정책"');
+if (desktopPermissionSelect < 0 || desktopTokenPolicySelect < desktopPermissionSelect
+  || !chat.includes('className="chat-policy-controls"')
+  || !css.includes('.chat-policy-controls { grid-column: 1 / -1; min-width: 0; display: grid;')
+  || !chat.includes("tokenPolicy?: ConversationTokenPolicy;")
+  || !chat.includes("tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive'")
+  || !chat.includes("value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}")
+  || !chat.includes('disabled={executionControlsDisabled || !client.canUseAuditOnly}')
+  || !chat.includes("TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value === 'adaptive')")
+  || !chat.includes('적응형 · 품질 우선')
+  || !chat.includes('무제한 · 감사만')
+  || !chat.includes('대화 기록과 설정의 텔레메트리에서 확인')) {
+  throw new Error('desktop per-conversation token policy is not adjacent to permission, rollback-safe, run-locked, or administrator-gated');
+}
 if (!chat.includes('updateExecutionConfig({ workspaceId:')
   || !chat.includes('updateExecutionConfig({ permissionMode:')
   || !chat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')) throw new Error('desktop workspace, access, or default-provider settings can race command execution');

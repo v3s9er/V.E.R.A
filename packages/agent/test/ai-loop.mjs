@@ -113,7 +113,7 @@ await new Promise((r) => mock.listen(9999, '127.0.0.1', r));
 
 // ---- run the loop --------------------------------------------------------
 const { AgentServer } = await import(pathToFileURL('./packages/agent/dist/server/server.js').href);
-const { AgentLoop } = await import(pathToFileURL('./packages/agent/dist/ai/loop.js').href);
+const { AgentLoop, ModelBudgetExceededError } = await import(pathToFileURL('./packages/agent/dist/ai/loop.js').href);
 const server = new AgentServer();
 const provider = server.providersAdd({
   label: 'mock',
@@ -124,10 +124,12 @@ const provider = server.providersAdd({
 });
 
 const events = { texts: [], tools: [] };
+const progressKinds = [];
 const result = await server.loop.run([], '명령 실행해줘', {
   confirm: async () => true, // approve destructive shell_exec
   onText: (t) => events.texts.push(t),
   onTool: (i) => events.tools.push(i),
+  noteModelProgress: (kind) => progressKinds.push(kind),
 });
 
 let failures = 0;
@@ -144,13 +146,18 @@ check('final text from mock', result.text.includes('AI-완료'), result.text);
 check('tool call executed (real shell)', events.tools.some((t) => t.name === 'shell_exec' && t.status === 'done'));
 check('tool result contained stdout', result.turns.some((t) => t.role === 'tool' && JSON.stringify(t.toolResults).includes('ai-tool-ok')));
 check('loop turns well-formed', result.turns.filter((t) => t.role === 'assistant').length === 2);
+check('one completed tool round emits one adaptive progress signal', progressKinds.length === 1 && progressKinds[0] === 'tool');
 
 // Safety: destructive tool must be cancelled when the user denies.
 const denied = await server.loop.run([], '위험한거 해줘', { confirm: async () => false });
 check('deny -> destructive tool cancelled', denied.turns.some((t) => t.role === 'tool' && JSON.stringify(t.toolResults).includes('cancelled')));
 
 const node = (id, role, x) => ({ id, kind: 'model', label: id, role, providerId: provider.id, providerModel: 'mock-model', x, y: 20 });
-const pipeline = await server.loop.run([], '파이프라인 테스트', { confirm: async () => true }, [], {
+let pipelineBudgetProfile;
+const pipeline = await server.loop.run([], '파이프라인 테스트', {
+  confirm: async () => true,
+  configureModelBudget: (profile) => { pipelineBudgetProfile = profile; },
+}, [], {
   routing: {
     mode: 'balanced', executionMode: 'pipeline', roles: {}, maxPremiumCalls: 3, escalationEnabled: true,
     graph: { nodes: [node('stage-1', 'router', 10), node('stage-2', 'reasoning', 200), node('stage-3', 'summarizer', 400)], edges: [{ id: 'p1', from: 'stage-1', to: 'stage-2' }, { id: 'p2', from: 'stage-2', to: 'stage-3' }] },
@@ -158,6 +165,7 @@ const pipeline = await server.loop.run([], '파이프라인 테스트', { confir
 });
 check('three-node pipeline called both handoff stages', pipelineStageCalls === 2, String(pipelineStageCalls));
 check('pipeline route reports three stages', pipeline.route?.reason.includes('3단계'), pipeline.route?.reason);
+check('pipeline budget profile accounts for every configured model stage', pipelineBudgetProfile?.executionMode === 'pipeline' && pipelineBudgetProfile?.plannedModelCalls === 3);
 
 const vote = await server.loop.run([], '회의 테스트', { confirm: async () => true }, [], {
   routing: {
@@ -180,7 +188,11 @@ const crossGroupVote = await server.loop.run([], '그룹 간 회의 테스트', 
 });
 check('group representatives exchange final positions', crossGroupCalls === 2 && crossGroupVote.route?.reason.includes('그룹 간 1라운드'), `${crossGroupCalls} / ${crossGroupVote.route?.reason}`);
 
-const swarm = await server.loop.run([], '허가된 CTF 테스트', { confirm: async () => true }, [], {
+let swarmBudgetProfile;
+const swarm = await server.loop.run([], '허가된 CTF 테스트', {
+  confirm: async () => true,
+  configureModelBudget: (profile) => { swarmBudgetProfile = profile; },
+}, [], {
   routing: {
     mode: 'quality', executionMode: 'swarm', meetingRounds: 2, maxIterations: 3, roles: {}, maxPremiumCalls: 8, escalationEnabled: true,
     graph: {
@@ -192,6 +204,7 @@ const swarm = await server.loop.run([], '허가된 CTF 테스트', { confirm: as
 });
 check('CTF swarm runs every solver concurrently before verification', swarmSolverCalls === 3, String(swarmSolverCalls));
 check('CTF swarm stops after verifier accepts a reproduced flag', swarmVerifierCalls === 1 && swarm.route?.reason.includes('플래그 검증 성공'), swarm.route?.reason);
+check('swarm budget profile includes bounded configured iterations', swarmBudgetProfile?.executionMode === 'swarm' && swarmBudgetProfile?.plannedModelCalls === 16);
 
 // A premium ceiling is a count of real provider invocations, not a count of
 // provider selections. Three tool rounds plus the final response must spend
@@ -243,6 +256,7 @@ check('single-mode cascade invokes only one selected model', singleCascadeCalls 
 let settledSuccessUsage;
 let boundedOutputTokens = 0;
 let reservedMaximum = 0;
+let configuredTokenPolicy = '';
 const accountedProvider = {
   ...singleCascadeProvider, id: 'accounted-provider', label: 'Accounted Provider', model: 'accounted-provider',
   async chat(req) {
@@ -251,19 +265,41 @@ const accountedProvider = {
   },
 };
 const accountedLoop = new AgentLoop({ default: () => accountedProvider }, { execute: async () => '{}' });
-await accountedLoop.run([], '예산 정산 테스트', {
+const accountedResult = await accountedLoop.run([], '예산 정산 테스트', {
+  configureModelBudget: (profile) => { configuredTokenPolicy = profile.tokenPolicy; },
   reserveModelCall: (kind, maximumTokens) => {
     reservedMaximum = maximumTokens;
-    return { finish: (usage) => { settledSuccessUsage = usage; return true; } };
+    return { accountedTokens: maximumTokens, finish: (usage) => { settledSuccessUsage = usage; return true; } };
   },
-});
+}, [], { tokenPolicy: 'audit-only' });
 check('API calls reserve a conservative maximum before provider execution and cap output',
   reservedMaximum > 8 + 3 && boundedOutputTokens === 4096, `${reservedMaximum} / ${boundedOutputTokens}`);
-check('successful provider usage settles the exact call reservation',
+check('successful provider usage is passed intact to admission settlement',
   settledSuccessUsage?.promptTokens === 8 && settledSuccessUsage?.completionTokens === 3);
+check('conversation telemetry keeps the normalized provider report rather than the admission reservation',
+  accountedResult.usage.promptTokens === 8
+    && accountedResult.usage.completionTokens === 3
+    && accountedResult.usage.accountedTokens === reservedMaximum);
+check('conversation token policy reaches backend budget configuration', configuredTokenPolicy === 'audit-only');
+
+const malformedUsageProvider = {
+  ...singleCascadeProvider, id: 'malformed-usage', label: 'Malformed Usage', model: 'malformed-usage',
+  async chat() {
+    return { text: 'normalized', toolCalls: [], usage: { promptTokens: Number.POSITIVE_INFINITY, completionTokens: -4, cachedPromptTokens: 1e30 } };
+  },
+};
+const malformedUsageLoop = new AgentLoop({ default: () => malformedUsageProvider }, { execute: async () => '{}' });
+const normalizedUsage = await malformedUsageLoop.run([], '사용량 정규화', {
+  reserveModelCall: () => ({ finish: () => true }),
+});
+check('loop normalizes malformed provider counters before telemetry persistence',
+  normalizedUsage.usage.promptTokens === 0
+    && normalizedUsage.usage.completionTokens === 0
+    && normalizedUsage.usage.cachedPromptTokens === 1_000_000_000_000);
 
 let failureProviderCalls = 0;
 let failureSettlement = 'not-settled';
+let failureRecordedUsage;
 const failingProvider = {
   ...singleCascadeProvider, id: 'failing-provider', label: 'Failing Provider', model: 'failing-provider',
   async chat() { failureProviderCalls++; throw new Error('synthetic provider failure'); },
@@ -273,12 +309,19 @@ let providerFailureSurfaced = false;
 try {
   await failingLoop.run([], '실패 정산 테스트', {
     reserveModelCall: () => ({
+      accountedTokens: 777,
       finish: (usage) => { failureSettlement = usage === undefined ? 'fallback' : 'exact'; return true; },
     }),
+    onModelUsage: (delta) => { failureRecordedUsage = delta; },
   });
 } catch { providerFailureSurfaced = true; }
 check('provider exceptions retain the pre-call reservation as fallback debt',
-  providerFailureSurfaced && failureProviderCalls === 1 && failureSettlement === 'fallback');
+  providerFailureSurfaced
+    && failureProviderCalls === 1
+    && failureSettlement === 'fallback'
+    && failureRecordedUsage?.promptTokens === 0
+    && failureRecordedUsage?.completionTokens === 0
+    && failureRecordedUsage?.accountedTokens === 777);
 
 let rejectedProviderCalls = 0;
 const rejectedProvider = {
@@ -294,6 +337,118 @@ try {
 } catch { reservationFailureSurfaced = true; }
 check('an exhausted reservation rejects before any provider token can be spent',
   reservationFailureSurfaced && rejectedProviderCalls === 0);
+
+let fatalStageProviderCalls = 0;
+const fatalStageProvider = {
+  ...singleCascadeProvider, id: 'fatal-stage', label: 'Fatal Stage', model: 'fatal-stage',
+  async chat() {
+    fatalStageProviderCalls++;
+    return { text: 'must not become a fallback stage result', toolCalls: [], usage: { promptTokens: 1, completionTokens: 1 } };
+  },
+};
+const fatalStageRegistry = {
+  default: () => fatalStageProvider,
+  resolve: () => fatalStageProvider,
+  costTier: () => 0,
+};
+const fatalStageLoop = new AgentLoop(fatalStageRegistry, { execute: async () => '{}' });
+const fatalNode = (id, role, x) => ({ id, kind: 'model', label: id, role, providerId: fatalStageProvider.id, providerModel: fatalStageProvider.model, x, y: 0 });
+let pipelineAdmissionError;
+try {
+  await fatalStageLoop.run([], 'fatal pipeline', {
+    reserveModelCall: () => { throw new ModelBudgetExceededError('provider concurrency exhausted'); },
+  }, [], {
+    routing: {
+      mode: 'quality', executionMode: 'pipeline', roles: {}, maxPremiumCalls: 4, escalationEnabled: true,
+      graph: { nodes: [fatalNode('fatal-router', 'router', 0), fatalNode('fatal-judge', 'critic', 100)], edges: [{ id: 'fatal-edge', from: 'fatal-router', to: 'fatal-judge' }] },
+    },
+  });
+} catch (error) { pipelineAdmissionError = error; }
+check('stageCall rethrows typed admission failures before provider use instead of converting them to stage text',
+  pipelineAdmissionError instanceof ModelBudgetExceededError && fatalStageProviderCalls === 0);
+
+let fatalRaceProviderCalls = 0;
+let siblingAbortObserved = false;
+let siblingProviderSettled = false;
+let fatalRaceLeaseFinishes = 0;
+let resolveSiblingAbort;
+const siblingAbortPromise = new Promise((resolveAbort) => { resolveSiblingAbort = resolveAbort; });
+const fatalRaceProvider = {
+  ...fatalStageProvider, id: 'fatal-race', label: 'Fatal Race', model: 'fatal-race',
+  async chat(req) {
+    fatalRaceProviderCalls++;
+    if (fatalRaceProviderCalls === 1) {
+      return { text: 'first branch completes over budget', toolCalls: [], usage: { promptTokens: 3, completionTokens: 2 } };
+    }
+    return await new Promise((_resolve, reject) => {
+      const abort = () => {
+        siblingAbortObserved = true;
+        resolveSiblingAbort();
+        setTimeout(() => {
+          siblingProviderSettled = true;
+          reject(req.signal?.reason ?? new Error('fatal sibling abort'));
+        }, 40);
+      };
+      if (req.signal?.aborted) abort();
+      else req.signal?.addEventListener('abort', abort, { once: true });
+    });
+  },
+};
+const fatalRaceLoop = new AgentLoop({
+  default: () => fatalRaceProvider,
+  resolve: () => fatalRaceProvider,
+  costTier: () => 0,
+}, { execute: async () => '{}' });
+let fatalRaceReservation = 0;
+let swarmAdmissionError;
+let fatalRaceRunSettled = false;
+let fatalRaceActualPrompt = 0;
+let fatalRaceAccounted = 0;
+const fatalRacePromise = fatalRaceLoop.run([], 'fatal swarm', {
+  reserveModelCall: () => {
+    fatalRaceReservation++;
+    const reservation = fatalRaceReservation;
+    return {
+      accountedTokens: 50,
+      finish: () => {
+        fatalRaceLeaseFinishes++;
+        return reservation !== 1;
+      },
+    };
+  },
+  onModelUsage: (delta) => {
+    fatalRaceActualPrompt += delta.promptTokens + delta.completionTokens;
+    fatalRaceAccounted += delta.accountedTokens ?? 0;
+  },
+}, [], {
+  routing: {
+    mode: 'quality', executionMode: 'swarm', maxIterations: 1, roles: {}, maxPremiumCalls: 4, escalationEnabled: true,
+    graph: {
+      nodes: [fatalNode('fatal-solver-a', 'coding', 0), fatalNode('fatal-solver-b', 'reasoning', 10), fatalNode('fatal-verifier', 'critic', 100)],
+      edges: [{ id: 'fatal-a', from: 'fatal-solver-a', to: 'fatal-verifier' }, { id: 'fatal-b', from: 'fatal-solver-b', to: 'fatal-verifier' }],
+    },
+  },
+}).catch((error) => { swarmAdmissionError = error; }).finally(() => { fatalRaceRunSettled = true; });
+await Promise.race([
+  siblingAbortPromise,
+  new Promise((resolveDelay) => setTimeout(resolveDelay, 250)),
+]);
+const drainedBeforeReject = siblingAbortObserved
+  && siblingProviderSettled === false
+  && fatalRaceRunSettled === false
+  && fatalRaceLeaseFinishes === 1;
+await fatalRacePromise;
+check('fatal parallel admission aborts siblings, drains actual provider settlement, and prevents follow-up stages',
+  drainedBeforeReject
+    && siblingProviderSettled
+    && fatalRaceRunSettled
+    && swarmAdmissionError instanceof ModelBudgetExceededError
+    && fatalRaceProviderCalls === 2
+    && fatalRaceLeaseFinishes === 2,
+  `${fatalRaceProviderCalls} / ${fatalRaceLeaseFinishes}`);
+check('failed parallel run reports actual and reservation-floor usage exactly once',
+  fatalRaceActualPrompt === 5 && fatalRaceAccounted === 100,
+  `${fatalRaceActualPrompt} / ${fatalRaceAccounted}`);
 
 // Equivalent JSON arguments must share one repeat signature even when a model
 // changes object key order. Two consecutive blocked rounds end the paid loop.

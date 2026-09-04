@@ -66,6 +66,8 @@ export class MrRobotClient {
 
   connected = false;
   authed = false;
+  isAdmin = false;
+  canUseAuditOnly = false;
   state: RpcConnectionState = 'offline';
   onClose: (() => void) | null = null;
   onStateChange: ((state: RpcConnectionState) => void) | null = null;
@@ -96,6 +98,8 @@ export class MrRobotClient {
         if (error) {
           this.connected = false;
           this.authed = false;
+          this.isAdmin = false;
+          this.canUseAuditOnly = false;
           if (ws !== null && this.ws === ws) this.ws = null;
           this.setState('offline');
           try { ws?.close(); } catch { /* 이미 닫힌 소켓 */ }
@@ -133,7 +137,10 @@ export class MrRobotClient {
           const authTimeout = Math.max(1000, timeoutMs - 250);
           void this.call('auth', { secret }, authTimeout)
             .then((result) => {
-              this.authed = Boolean((result as { ok?: boolean })?.ok);
+              const auth = result as { ok?: boolean; isAdmin?: boolean; canUseAuditOnly?: boolean };
+              this.authed = Boolean(auth?.ok);
+              this.isAdmin = auth?.isAdmin === true;
+              this.canUseAuditOnly = auth?.canUseAuditOnly === true;
               if (!this.authed) throw new Error('인증 실패: 시크릿이 일치하지 않습니다.');
               finish();
             })
@@ -150,6 +157,8 @@ export class MrRobotClient {
           if (settled) {
             this.connected = false;
             this.authed = false;
+            this.isAdmin = false;
+            this.canUseAuditOnly = false;
             this.ws = null;
             this.setState('offline');
           } else {
@@ -217,6 +226,8 @@ export class MrRobotClient {
     cancelConnect?.(new Error('연결 시도가 취소되었습니다.'));
     this.connected = false;
     this.authed = false;
+    this.isAdmin = false;
+    this.canUseAuditOnly = false;
     this.settlePending(new Error('연결 종료'));
     const ws = this.ws;
     this.ws = null;

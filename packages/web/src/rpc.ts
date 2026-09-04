@@ -61,6 +61,7 @@ export class MrRobotClient {
   connected = false;
   authed = false;
   isAdmin = false;
+  canUseAuditOnly = false;
   permissionCap: PermissionMode = 'read-only';
   onClose: (() => void) | null = null;
   onAuthFail: (() => void) | null = null;
@@ -106,9 +107,10 @@ export class MrRobotClient {
           this.connected = true;
           void this.call('auth', { secret })
             .then((r) => {
-              const auth = r as { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode };
+              const auth = r as { ok?: boolean; isAdmin?: boolean; canUseAuditOnly?: boolean; permissionCap?: PermissionMode };
               this.authed = Boolean(auth?.ok);
               this.isAdmin = auth?.isAdmin === true;
+              this.canUseAuditOnly = auth?.canUseAuditOnly === true;
               this.permissionCap = auth?.permissionCap ?? 'read-only';
               if (this.authed) finish();
               else {
@@ -127,6 +129,7 @@ export class MrRobotClient {
           this.connected = false;
           this.authed = false;
           this.isAdmin = false;
+          this.canUseAuditOnly = false;
           this.permissionCap = 'read-only';
           this.settlePending(new Error('연결이 끊어졌습니다'));
           this.ws = null;
@@ -216,6 +219,7 @@ export class MrRobotClient {
     this.connected = false;
     this.authed = false;
     this.isAdmin = false;
+    this.canUseAuditOnly = false;
     this.permissionCap = 'read-only';
   }
 
@@ -265,6 +269,7 @@ export class MrRobotClient {
       this.connected = false;
       this.authed = false;
       this.isAdmin = false;
+      this.canUseAuditOnly = false;
       this.permissionCap = 'read-only';
       this.settlePending(new Error('연결이 끊어졌습니다'));
       if (!this.closedByUser) this.onClose?.();
@@ -276,6 +281,7 @@ export class MrRobotClient {
       this.connected = true;
       this.authed = auth?.ok === true;
       this.isAdmin = auth?.isAdmin === true;
+      this.canUseAuditOnly = auth?.canUseAuditOnly === true;
       this.permissionCap = auth?.permissionCap ?? 'read-only';
       if (!this.authed || (credentialRef === DESKTOP_LOCAL_AUTH_TOKEN && !this.isAdmin)) throw new Error('PC 인증에 실패했습니다.');
     } catch (error) {

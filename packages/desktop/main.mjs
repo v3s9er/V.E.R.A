@@ -407,14 +407,26 @@ async function connectLocalRpc(input) {
     throw error;
   }
   if (generation !== localRpcGeneration || socket !== localRpcSocket) throw new Error('로컬 에이전트 연결이 취소되었습니다.');
-  const auth = await callLocalRpc('auth', { secret: credential }, 8_000, true);
   const localCredential = credentialReference === DESKTOP_LOCAL_AUTH_TOKEN;
-  if (!auth?.ok || (localCredential && auth.isAdmin !== true)) {
+  // The unbounded audit capability is minted only through this in-process
+  // main-owned path after the exact loopback credential scope was verified.
+  // It never crosses preload/renderer IPC and is consumed by this auth frame.
+  const desktopAuditProof = localCredential ? server.issueDesktopAuditProof() : undefined;
+  const auth = await callLocalRpc('auth', {
+    secret: credential,
+    ...(desktopAuditProof ? { desktopAuditProof } : {}),
+  }, 8_000, true);
+  if (!auth?.ok || (localCredential && (auth.isAdmin !== true || auth.canUseAuditOnly !== true))) {
     closeLocalRpc(false, 'PC 인증에 실패했습니다.');
     throw new Error('PC 인증에 실패했습니다.');
   }
   localRpcAuthenticated = true;
-  return { ok: true, isAdmin: auth.isAdmin === true, permissionCap: auth.permissionCap ?? 'read-only' };
+  return {
+    ok: true,
+    isAdmin: auth.isAdmin === true,
+    canUseAuditOnly: auth.canUseAuditOnly === true,
+    permissionCap: auth.permissionCap ?? 'read-only',
+  };
 }
 
 function createDownloadLimitStream(maxBytes) {

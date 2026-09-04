@@ -1,5 +1,14 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
-import type { ChatUsage, ModelRole, PermissionMode, ReasoningEffort, RoutingNode, RoutingPresetSettings } from '@mr-robot/shared';
+import type {
+  ChatUsage,
+  ConversationTokenPolicy,
+  ModelRole,
+  PermissionMode,
+  ReasoningEffort,
+  RoutingExecutionMode,
+  RoutingNode,
+  RoutingPresetSettings,
+} from '@mr-robot/shared';
 import type { ProviderRegistry } from './registry.js';
 import { ToolExecutor, type ConfirmFn } from './executor.js';
 import { neutralTool } from './tools.js';
@@ -13,7 +22,7 @@ import {
   type ProviderUsage,
   type Turn,
 } from './provider.js';
-import type { ModelRouter } from './router.js';
+import { taskComplexityScore, type ModelRouter } from './router.js';
 import type { ContextBroker } from '../context-broker.js';
 
 export const SYSTEM_PROMPT = `You are Mr.Robot, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
@@ -36,12 +45,59 @@ const NATIVE_AGENT_PROMPT = `Operate as Mr.Robot's native coding agent. Work aut
 - Do not stop at a plan or tutorial when you can perform the work.
 - Do not claim success without evidence. In the final response lead with the outcome and mention only material checks or blockers.`;
 
-function addUsage(total: ChatUsage, next: ProviderUsage): void {
-  total.promptTokens += next.promptTokens;
-  total.completionTokens += next.completionTokens;
-  total.cachedPromptTokens = (total.cachedPromptTokens ?? 0) + (next.cachedPromptTokens ?? 0);
-  total.cacheWritePromptTokens = (total.cacheWritePromptTokens ?? 0) + (next.cacheWritePromptTokens ?? 0);
-  total.reasoningTokens = (total.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0);
+const MAX_RECORDED_TOKEN_COUNT = 1_000_000_000_000;
+
+function recordedTokens(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.min(MAX_RECORDED_TOKEN_COUNT, Math.floor(value))
+    : 0;
+}
+
+function addRecordedTokens(current: unknown, next: unknown): number {
+  return Math.min(MAX_RECORDED_TOKEN_COUNT, recordedTokens(current) + recordedTokens(next));
+}
+
+function addUsage(total: ChatUsage, next: ProviderUsage): ProviderUsage {
+  // Provider-compatible endpoints are untrusted input. Never allow NaN,
+  // Infinity, negatives or enormous counters to poison persisted telemetry.
+  const recorded: ProviderUsage = {
+    promptTokens: recordedTokens(next?.promptTokens),
+    completionTokens: recordedTokens(next?.completionTokens),
+    accountedTokens: recordedTokens(next?.accountedTokens),
+    cachedPromptTokens: recordedTokens(next?.cachedPromptTokens),
+    cacheWritePromptTokens: recordedTokens(next?.cacheWritePromptTokens),
+    reasoningTokens: recordedTokens(next?.reasoningTokens),
+    ...(next?.reportStatus ? { reportStatus: next.reportStatus } : {}),
+  };
+  total.promptTokens = addRecordedTokens(total.promptTokens, recorded.promptTokens);
+  total.completionTokens = addRecordedTokens(total.completionTokens, recorded.completionTokens);
+  total.accountedTokens = addRecordedTokens(total.accountedTokens, recorded.accountedTokens);
+  total.cachedPromptTokens = addRecordedTokens(total.cachedPromptTokens, recorded.cachedPromptTokens);
+  total.cacheWritePromptTokens = addRecordedTokens(total.cacheWritePromptTokens, recorded.cacheWritePromptTokens);
+  total.reasoningTokens = addRecordedTokens(total.reasoningTokens, recorded.reasoningTokens);
+  return recorded;
+}
+
+export interface ModelBudgetProfile {
+  tokenPolicy: ConversationTokenPolicy;
+  complexity: number;
+  executionMode: RoutingExecutionMode;
+  reasoningEffort: ReasoningEffort;
+  plannedModelCalls: number;
+  hasTools: boolean;
+  inputBytes: number;
+}
+
+export type ModelProgressKind = 'tool' | 'steering';
+
+/** Admission failures are fatal to the whole model workflow, not stage-local errors. */
+export class ModelBudgetExceededError extends Error {
+  readonly code = 'MODEL_BUDGET_EXCEEDED';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelBudgetExceededError';
+  }
 }
 
 export interface LoopCallbacks {
@@ -56,12 +112,25 @@ export interface LoopCallbacks {
   takeSteering?: () => string[];
   /**
    * Atomically reserve one real provider invocation inside the already
-   * admitted user run. A missing usage report keeps the reservation as debt.
+   * admitted user run. Settlement keeps at least this host-owned reservation.
    */
   reserveModelCall?: (
     kind: 'api' | 'native',
     maximumTokens: number,
-  ) => { finish(usage?: Pick<ChatUsage, 'promptTokens' | 'completionTokens'>): boolean };
+  ) => {
+    readonly accountedTokens?: number;
+    finish(usage?: Pick<ProviderUsage, 'promptTokens' | 'completionTokens' | 'reportStatus'>): boolean;
+  };
+  /** One normalized delta for each provider call that produced billable usage. */
+  onModelUsage?(usage: ProviderUsage, source?: {
+    providerId: string;
+    providerLabel: string;
+    model: string;
+  }): void;
+  /** Configure the run-level adaptive budget before the first provider call. */
+  configureModelBudget?(profile: ModelBudgetProfile): void;
+  /** Unlock one bounded adaptive tranche after externally verifiable progress. */
+  noteModelProgress?(kind: ModelProgressKind): void;
 }
 
 export interface LoopResult {
@@ -82,6 +151,8 @@ export interface RunOptions {
   workspacePath?: string;
   /** Stable conversation-scoped provider cache namespace. */
   cacheKey?: string;
+  /** Per-conversation model usage policy; defaults to adaptive. */
+  tokenPolicy?: ConversationTokenPolicy;
 }
 
 const MAX_STEPS = 16;
@@ -89,6 +160,32 @@ const MAX_SCENARIO_NODES = 8;
 const MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS = 2;
 const MAX_PROVIDER_OUTPUT_TOKENS = 4_096;
 const PROVIDER_PROTOCOL_TOKEN_OVERHEAD = 8_192;
+
+function plannedModelCalls(
+  executionMode: RoutingExecutionMode,
+  scenario: RoutingPresetSettings | null | undefined,
+  nodes: RoutingNode[],
+): number {
+  if (!scenario || executionMode === 'single') return 1;
+  if (executionMode === 'pipeline') return Math.max(1, nodes.length);
+  if (executionMode === 'swarm') {
+    const solvers = Math.max(1, nodes.length - 1);
+    const iterations = Math.max(1, Math.min(6, scenario.maxIterations ?? 3));
+    // Initial evidence, solver+verifier iterations, then the final response.
+    return Math.min(64, solvers + iterations * (solvers + 1) + 1);
+  }
+  const finalNode = [...nodes].reverse().find((node) => node.role === 'critic')
+    ?? [...nodes].reverse().find((node) => node.role === 'summarizer')
+    ?? nodes[nodes.length - 1];
+  const agenda = executionMode === 'hybrid'
+    ? nodes.filter((node) => node.id !== finalNode?.id && node.role === 'router')
+    : [];
+  const candidates = nodes.filter((node) => node.id !== finalNode?.id && !agenda.some((item) => item.id === node.id));
+  const rounds = Math.max(1, Math.min(3, scenario.meetingRounds ?? 2));
+  const groups = new Set(candidates.map((node) => node.groupId?.trim() || 'default')).size;
+  const crossRounds = groups > 1 ? Math.max(0, Math.min(3, scenario.crossGroupRounds ?? 1)) : 0;
+  return Math.min(64, Math.max(1, agenda.length + candidates.length * rounds + groups * crossRounds + 1));
+}
 
 /**
  * Conservative upper bound for an API invocation. A tokenizer cannot emit
@@ -193,6 +290,25 @@ export class AgentLoop {
     options: RunOptions = {},
   ): Promise<LoopResult> {
     cb.signal?.throwIfAborted();
+    const fatalAbort = new AbortController();
+    const runSignal = cb.signal
+      ? AbortSignal.any([cb.signal, fatalAbort.signal])
+      : fatalAbort.signal;
+    const abortOnFatal = (error: unknown): void => {
+      if (error instanceof ModelBudgetExceededError && !fatalAbort.signal.aborted) fatalAbort.abort(error);
+    };
+    const settleParallel = async <T>(promises: Promise<T>[]): Promise<T[]> => {
+      const guarded = promises.map(async (promise) => {
+        try { return await promise; }
+        catch (error) { abortOnFatal(error); throw error; }
+      });
+      const settled = await Promise.allSettled(guarded);
+      const rejected = settled.find((item): item is PromiseRejectedResult => (
+        item.status === 'rejected' && item.reason instanceof ModelBudgetExceededError
+      )) ?? settled.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+      if (rejected) throw rejected.reason;
+      return settled.map((item) => (item as PromiseFulfilledResult<T>).value);
+    };
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
@@ -210,19 +326,41 @@ export class AgentLoop {
           Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
         )),
       };
-      const callLease = cb.reserveModelCall?.('api', providerCallMaximumTokens(boundedRequest));
+      let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
       let settled = false;
       try {
+        callLease = cb.reserveModelCall?.('api', providerCallMaximumTokens(boundedRequest));
         const result = await actualProvider.chat(boundedRequest);
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;
-        addUsage(usage, result.usage);
+        const reportedTokens = addRecordedTokens(result.usage.promptTokens, result.usage.completionTokens);
+        const recordedUsage = addUsage(usage, {
+          ...result.usage,
+          accountedTokens: callLease?.accountedTokens ?? reportedTokens,
+        });
+        cb.onModelUsage?.(recordedUsage, {
+          providerId: actualProvider.id,
+          providerLabel: actualProvider.label,
+          model: actualProvider.model,
+        });
         if (!withinReservation) {
-          throw new Error('이 작업의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
+          throw new ModelBudgetExceededError('이 작업의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
         }
         return result;
       } catch (error) {
-        if (!settled) callLease?.finish();
+        if (!settled && callLease) {
+          callLease.finish();
+          const accountedTokens = recordedTokens(callLease.accountedTokens);
+          if (accountedTokens > 0) {
+            const recordedUsage = addUsage(usage, { promptTokens: 0, completionTokens: 0, accountedTokens });
+            cb.onModelUsage?.(recordedUsage, {
+              providerId: actualProvider.id,
+              providerLabel: actualProvider.label,
+              model: actualProvider.model,
+            });
+          }
+        }
+        abortOnFatal(error);
         throw error;
       }
     };
@@ -234,19 +372,41 @@ export class AgentLoop {
       if (!actualProvider.runAgent) throw new Error('이 모델은 네이티브 에이전트 실행을 지원하지 않습니다.');
       // Native CLIs can fan out internally and often return zero usage. The
       // admission lease therefore reserves all of this run's remaining budget.
-      const callLease = cb.reserveModelCall?.('native', Number.MAX_SAFE_INTEGER);
+      let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
       let settled = false;
       try {
+        callLease = cb.reserveModelCall?.('native', Number.MAX_SAFE_INTEGER);
         const result = await actualProvider.runAgent(request);
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;
-        addUsage(usage, result.usage);
+        const reportedTokens = addRecordedTokens(result.usage.promptTokens, result.usage.completionTokens);
+        const recordedUsage = addUsage(usage, {
+          ...result.usage,
+          accountedTokens: callLease?.accountedTokens ?? reportedTokens,
+        });
+        cb.onModelUsage?.(recordedUsage, {
+          providerId: actualProvider.id,
+          providerLabel: actualProvider.label,
+          model: actualProvider.model,
+        });
         if (!withinReservation) {
-          throw new Error('네이티브 에이전트의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
+          throw new ModelBudgetExceededError('네이티브 에이전트의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
         }
         return result;
       } catch (error) {
-        if (!settled) callLease?.finish();
+        if (!settled && callLease) {
+          callLease.finish();
+          const accountedTokens = recordedTokens(callLease.accountedTokens);
+          if (accountedTokens > 0) {
+            const recordedUsage = addUsage(usage, { promptTokens: 0, completionTokens: 0, accountedTokens });
+            cb.onModelUsage?.(recordedUsage, {
+              providerId: actualProvider.id,
+              providerLabel: actualProvider.label,
+              model: actualProvider.model,
+            });
+          }
+        }
+        abortOnFatal(error);
         throw error;
       }
     };
@@ -267,6 +427,24 @@ export class AgentLoop {
     const scenario = options.routing;
     const executionMode = scenario?.executionMode ?? 'single';
     const nodes = scenario ? orderedNodes(scenario) : [];
+    const inputBytes = Buffer.byteLength(JSON.stringify({
+      history,
+      userMessage,
+      retainedContext,
+      tools,
+    }), 'utf8');
+    cb.configureModelBudget?.({
+      tokenPolicy: options.tokenPolicy ?? 'adaptive',
+      complexity: taskComplexityScore(userMessage),
+      executionMode,
+      reasoningEffort: routeEffort,
+      plannedModelCalls: Math.min(
+        64,
+        plannedModelCalls(executionMode, scenario, nodes) + (!provider.supportsTools && tools.length > 0 ? 1 : 0),
+      ),
+      hasTools: tools.length > 0,
+      inputBytes,
+    });
     const premiumLimit = scenario ? Math.max(0, Math.floor(scenario.maxPremiumCalls)) : Number.POSITIVE_INFINITY;
     let premiumCalls = 0;
     /**
@@ -308,7 +486,7 @@ export class AgentLoop {
       return this.registry.resolve(role, node.providerId, node.providerModel, scenario?.roles[role]);
     };
     const stageCall = async (node: RoutingNode, system: string, content: string, status?: string) => {
-      cb.signal?.throwIfAborted();
+      runSignal.throwIfAborted();
       const stageProvider = providerForCall(providerForNode(node), node.role ?? 'general');
       if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 의견을 내지 못했습니다.' };
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
@@ -317,12 +495,13 @@ export class AgentLoop {
           system: identifiedSystem(system, stageProvider),
           turns: [{ role: 'user', content }],
           reasoningEffort: effortFor(stageProvider),
-          signal: cb.signal,
+          signal: runSignal,
           promptCacheKey: options.cacheKey ? `${options.cacheKey}:stage:${node.id}` : undefined,
         });
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: response.text };
       } catch (error) {
-        if (cb.signal?.aborted) throw cb.signal.reason ?? error;
+        if (error instanceof ModelBudgetExceededError) throw error;
+        if (runSignal.aborted) throw runSignal.reason ?? error;
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: `단계 실패: ${error instanceof Error ? error.message : String(error)}` };
       }
     };
@@ -343,7 +522,7 @@ export class AgentLoop {
       const usedModels = new Set<string>();
       try {
         for (let step = 0; step < 4; step++) {
-          cb.signal?.throwIfAborted();
+          runSignal.throwIfAborted();
           const stageProvider = providerForCall(requestedProvider, node.role ?? 'general', allowedTools.length > 0);
           if (!stageProvider) {
             const exhausted = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료${allowedTools.length > 0 ? ' 도구' : ''} 모델이 없습니다.`;
@@ -356,7 +535,7 @@ export class AgentLoop {
             turns: localTurns,
             tools: stageProvider.supportsTools ? allowedTools : undefined,
             reasoningEffort: effortFor(stageProvider),
-            signal: cb.signal,
+            signal: runSignal,
             promptCacheKey: options.cacheKey ? `${options.cacheKey}:agent:${node.id}` : undefined,
           });
           if (response.text) collected = [collected, response.text].filter(Boolean).join('\n');
@@ -369,13 +548,13 @@ export class AgentLoop {
             let toolContent: string;
             try {
               if (!allowedTools.some((tool) => tool.name === call.name)) toolContent = JSON.stringify({ error: `${call.name} is not available inside this solver sandbox` });
-              else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, cb.signal, {
+              else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, runSignal, {
                 workspaceRoot: options.workspacePath,
                 approvedPluginTools,
               });
               cb.onTool?.({ name: call.name, input, status: 'done' });
             } catch (error) {
-              if (cb.signal?.aborted) throw cb.signal.reason ?? error;
+              if (runSignal.aborted) throw runSignal.reason ?? error;
               toolContent = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
               cb.onTool?.({ name: call.name, input, status: 'error', detail: toolContent });
             }
@@ -385,7 +564,8 @@ export class AgentLoop {
         }
         return { label: node.label, model: [...usedModels].join(' → ') || '연결 없음', text: collected || '도구 실행 결과만 생성했고 요약을 남기지 않았습니다.' };
       } catch (error) {
-        if (cb.signal?.aborted) throw cb.signal.reason ?? error;
+        if (error instanceof ModelBudgetExceededError) throw error;
+        if (runSignal.aborted) throw runSignal.reason ?? error;
         return { label: node.label, model: [...usedModels].join(' → ') || '연결 없음', text: `스웜 작업자 실패: ${error instanceof Error ? error.message : String(error)}` };
       }
     };
@@ -441,7 +621,7 @@ export class AgentLoop {
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
           reasoningEffort: actualEffort,
-          signal: cb.signal,
+          signal: runSignal,
           onStatus: cb.onStatus,
         });
         return { result, provider: actualProvider, effort: actualEffort };
@@ -543,9 +723,9 @@ export class AgentLoop {
       let completedIterations = 0;
 
       for (let iteration = 1; iteration <= maxIterations; iteration++) {
-        if (cb.signal?.aborted) throw new Error('CTF 스웜 작업이 중지되었습니다.');
+        if (runSignal.aborted) throw runSignal.reason ?? new Error('CTF 스웜 작업이 중지되었습니다.');
         completedIterations = iteration;
-        const current = await Promise.all(solvers.map((node) => stageAgentCall(
+        const current = await settleParallel(solvers.map((node) => stageAgentCall(
           node,
           `You are independent competitor "${node.label}" in a tool-backed CTF solver swarm. Solve the entire challenge yourself rather than handling only a narrow specialty. Use the Docker/CTF tools to test hypotheses and produce reproducible commands. Read the shared board, reuse verified discoveries, avoid already-recorded dead ends, and publish every new artifact, command result, failed approach and candidate flag for rival solvers. Never claim success without executable evidence.`,
           [
@@ -624,7 +804,7 @@ export class AgentLoop {
           // same-family bias. Group members run concurrently; only the final
           // compact handoff is sent to the judge.
           const sharedOpinions = previousRound.map((item, index) => `[Candidate ${index + 1}]\n${item.text}`).join('\n\n');
-          const currentRound = await Promise.all(members.map((node) => stageCall(
+          const currentRound = await settleParallel(members.map((node) => stageCall(
               node,
               firstRound
                 ? `You are an independent member of AI decision group "${group}" named "${node.label}" with role ${node.role ?? 'general'}. The configured meeting style is "${discussionMode}". Other members may use different roles or models. Analyze independently, propose the best answer or execution plan, identify one major risk, and finish with a confidence score from 0 to 100. Do not claim tools were executed.`
@@ -643,7 +823,7 @@ export class AgentLoop {
         return `[Group ${name} final positions]\n${results.map((item, index) => `[Member ${index + 1}]\n${item.text}`).join('\n\n')}`;
       }).join('\n\n');
       for (let round = 1; round <= crossGroupRounds; round++) {
-        const representatives = await Promise.all([...groups].map(([groupId, members]) => {
+        const representatives = await settleParallel([...groups].map(([groupId, members]) => {
           const name = groupDefinitions.get(groupId)?.name ?? groupId;
           return stageCall(
             members[0],
@@ -679,7 +859,7 @@ export class AgentLoop {
           system: identifiedSystem('Analyze the user request and produce a concise, concrete execution plan for another computer-use agent. Do not claim that any action has already happened.', adviceProvider),
           turns: [{ role: 'user', content: userMessage }],
           reasoningEffort: effortFor(adviceProvider),
-          signal: cb.signal,
+          signal: runSignal,
           promptCacheKey: options.cacheKey ? `${options.cacheKey}:advisor` : undefined,
         });
       }
@@ -714,7 +894,7 @@ export class AgentLoop {
     let reportedModel = '';
 
     for (let step = 0; step < MAX_STEPS; step++) {
-      cb.signal?.throwIfAborted();
+      runSignal.throwIfAborted();
       const actualProvider = providerForCall(requestedMainProvider, routeRole, tools.length > 0);
       if (!actualProvider) {
         const text = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료${tools.length > 0 ? ' 도구 실행' : ''} 모델이 없습니다.`;
@@ -741,7 +921,7 @@ export class AgentLoop {
         turns,
         tools,
         reasoningEffort: actualEffort,
-        signal: cb.signal,
+        signal: runSignal,
         promptCacheKey: options.cacheKey ? `${options.cacheKey}:main` : undefined,
         onEvent: (e) => {
           if (e.type === 'text') cb.onText?.(e.text);
@@ -761,6 +941,7 @@ export class AgentLoop {
       const roundSignatures = res.toolCalls.map((call, index) => toolSignature(call.name, roundInputs[index]));
       const roundFingerprint = roundSignatures.join('\n');
       let blockedRepeats = 0;
+      let madeToolProgress = false;
       for (const [callIndex, call] of res.toolCalls.entries()) {
         const input = roundInputs[callIndex];
         cb.onTool?.({ name: call.name, input, status: 'start' });
@@ -773,19 +954,23 @@ export class AgentLoop {
             blockedRepeats++;
             content = JSON.stringify({ error: 'same tool call repeated; change the approach or finish with the available evidence' });
           } else {
-            content = await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, cb.signal, {
+            content = await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, runSignal, {
               workspaceRoot: options.workspacePath,
             });
+            madeToolProgress = true;
           }
           cb.onTool?.({ name: call.name, input, status: 'done' });
         } catch (err) {
-          if (cb.signal?.aborted) throw cb.signal.reason ?? err;
+          if (runSignal.aborted) throw runSignal.reason ?? err;
           content = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
           cb.onTool?.({ name: call.name, input, status: 'error', detail: content });
         }
         toolResults.push({ id: call.id, name: call.name, content });
       }
       turns.push({ role: 'tool', content: '', toolResults });
+      // One tranche per productive round, not per requested tool, so a model
+      // cannot inflate its budget by batching many trivial calls.
+      if (madeToolProgress) cb.noteModelProgress?.('tool');
       const noProgress = blockedRepeats === res.toolCalls.length;
       consecutiveNoProgressRounds = noProgress && roundFingerprint === previousToolRound
         ? consecutiveNoProgressRounds + 1
@@ -793,6 +978,7 @@ export class AgentLoop {
       previousToolRound = roundFingerprint;
       const steering = cb.takeSteering?.() ?? [];
       if (steering.length) {
+        cb.noteModelProgress?.('steering');
         turns.push({ role: 'user', content: `The user added these instructions while the task was running. Apply them now without discarding verified work:\n${steering.map((item) => `- ${item}`).join('\n')}` });
         cb.onStatus?.(`추가 명령 ${steering.length}개 반영`);
         // A human correction is progress even if the immediately preceding

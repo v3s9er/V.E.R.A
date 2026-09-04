@@ -491,8 +491,8 @@ describe('shared traffic and auxiliary-target gate', () => {
 });
 
 describe('cumulative inbound CDP traffic gate', () => {
-  test('counts invalid Runtime.bindingCalled attempts and every raw frame', () => {
-    const gate = new CdpInboundTrafficGate(3, 16 * 1024, 2);
+  test('counts invalid Runtime.bindingCalled attempts independently from every raw frame', () => {
+    const gate = new CdpInboundTrafficGate(3, 16 * 1024, 10, 2);
     const invalidBinding = JSON.stringify({
       method: 'Runtime.bindingCalled',
       params: { name: '__unknown', payload: '{"token":"invalid"}' },
@@ -500,12 +500,15 @@ describe('cumulative inbound CDP traffic gate', () => {
     const bytes = Buffer.byteLength(invalidBinding, 'utf8');
     assert.deepEqual(gate.admitFrame(bytes), { allowed: true });
     assert.deepEqual(gate.admitRuntimeBindingAttempt(), { allowed: true });
+    assert.deepEqual(gate.admitInvalidRuntimeBinding(), { allowed: true });
     assert.deepEqual(gate.admitFrame(bytes), { allowed: true });
     assert.deepEqual(gate.admitRuntimeBindingAttempt(), { allowed: true });
+    assert.deepEqual(gate.admitInvalidRuntimeBinding(), { allowed: true });
     assert.deepEqual(gate.admitFrame(bytes), { allowed: true });
-    assert.deepEqual(gate.admitRuntimeBindingAttempt(), {
+    assert.deepEqual(gate.admitRuntimeBindingAttempt(), { allowed: true });
+    assert.deepEqual(gate.admitInvalidRuntimeBinding(), {
       allowed: false,
-      reasonCode: 'runtime-binding-attempt-limit',
+      reasonCode: 'invalid-runtime-binding-limit',
     });
     assert.deepEqual(gate.admitFrame(bytes), {
       allowed: false,
@@ -515,6 +518,15 @@ describe('cumulative inbound CDP traffic gate', () => {
       frames: 4,
       bytes: bytes * 3,
       runtimeBindingAttempts: 3,
+      invalidRuntimeBindings: 3,
+    });
+
+    const totalBindings = new CdpInboundTrafficGate(10, 16 * 1024, 2, 10);
+    assert.deepEqual(totalBindings.admitRuntimeBindingAttempt(), { allowed: true });
+    assert.deepEqual(totalBindings.admitRuntimeBindingAttempt(), { allowed: true });
+    assert.deepEqual(totalBindings.admitRuntimeBindingAttempt(), {
+      allowed: false,
+      reasonCode: 'runtime-binding-attempt-limit',
     });
   });
 
@@ -528,10 +540,15 @@ describe('cumulative inbound CDP traffic gate', () => {
     assert.deepEqual(gate.admitFrame(bytes), { allowed: true });
     assert.deepEqual(gate.admitFrame(bytes), { allowed: true });
     assert.deepEqual(gate.admitFrame(bytes), { allowed: false, reasonCode: 'cdp-byte-limit' });
-    assert.deepEqual(gate.snapshot(), { frames: 3, bytes: bytes * 2, runtimeBindingAttempts: 0 });
+    assert.deepEqual(gate.snapshot(), {
+      frames: 3,
+      bytes: bytes * 2,
+      runtimeBindingAttempts: 0,
+      invalidRuntimeBindings: 0,
+    });
   });
 
-  test('CdpClient terminates an invalid binding flood before dispatching the crossing frame', async () => {
+  test('CdpClient terminates an invalid binding flood as soon as validation crosses its cap', async () => {
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     await once(server, 'listening');
     const address = server.address();
@@ -541,16 +558,23 @@ describe('cumulative inbound CDP traffic gate', () => {
     let client: CdpClient | undefined;
     let peer: Awaited<ReturnType<typeof once>>[0] | undefined;
     try {
+      const gate = new CdpInboundTrafficGate(100, 1024 * 1024, 100, 2);
       client = await CdpClient.connect(
         `ws://127.0.0.1:${address.port}`,
         AbortSignal.timeout(1_000),
-        new CdpInboundTrafficGate(100, 1024 * 1024, 2),
+        gate,
       );
       [peer] = await connection;
       const peerClosed = once(peer, 'close');
       let dispatched = 0;
       let fatalCalls = 0;
-      client.setEventHandler(() => { dispatched += 1; });
+      const invalidDecisions: boolean[] = [];
+      client.setEventHandler((message) => {
+        dispatched += 1;
+        if (message.method === 'Runtime.bindingCalled' && typeof message.params?.payload !== 'string') {
+          invalidDecisions.push(client!.noteInvalidRuntimeBinding());
+        }
+      });
       const fatal = new Promise<Error>((resolve) => client!.setFatalHandler((error) => {
         fatalCalls += 1;
         resolve(error);
@@ -565,11 +589,18 @@ describe('cumulative inbound CDP traffic gate', () => {
       peer.send(invalidBinding);
 
       const error = await fatal;
-      assert.match(error.message, /runtime-binding-attempt-limit/);
+      assert.match(error.message, /invalid-runtime-binding-limit/);
       await peerClosed;
       await waitImmediate();
-      assert.equal(dispatched, 2);
+      assert.equal(dispatched, 3);
+      assert.deepEqual(invalidDecisions, [true, true, false]);
       assert.equal(fatalCalls, 1);
+      assert.deepEqual(gate.snapshot(), {
+        frames: 3,
+        bytes: Buffer.byteLength(invalidBinding) * 3,
+        runtimeBindingAttempts: 3,
+        invalidRuntimeBindings: 3,
+      });
     } finally {
       client?.close();
       try { peer?.terminate(); } catch { /* already closed by the client */ }
@@ -872,5 +903,7 @@ test('plugin manifest and safety contract expose the bounded pentest backend', (
   assert.equal(cdpSafetyContract.maxPendingCdpCommands, 64);
   assert.equal(cdpSafetyContract.maxCdpSessionFrames, 4_096);
   assert.equal(cdpSafetyContract.maxCdpSessionBytes, 8 * 1024 * 1024);
+  assert.equal(cdpSafetyContract.maxRuntimeEvents, 512);
   assert.equal(cdpSafetyContract.maxRuntimeBindingAttempts, 513);
+  assert.equal(cdpSafetyContract.maxInvalidRuntimeBindings, 16);
 });

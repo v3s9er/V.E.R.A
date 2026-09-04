@@ -71,6 +71,17 @@ requireAll(chat, [
 ], 'composer resizing does not preserve visible chat content');
 
 requireAll(css, [
+  '.chat-policy-controls { grid-column: 1 / -1; min-width: 0; display: grid;',
+  'grid-template-columns: minmax(0,.85fr) minmax(0,1.15fr);',
+  '@media (max-width: 620px) {\n  .chat-policy-controls {\n    grid-template-columns: 1fr;',
+], 'adjacent permission and token-policy selectors can overflow a compact chat header');
+requireAll(chat, [
+  'className="chat-policy-controls"',
+  'aria-label="대화 권한"',
+  'aria-label="대화 토큰 정책"',
+], 'permission and per-conversation token policy controls are not grouped together');
+
+requireAll(css, [
   '.profile-menu.embedded {\n    display: grid;',
   '.profile-menu.embedded .profile-trigger {',
   '.profile-menu.embedded .profile-popover {',

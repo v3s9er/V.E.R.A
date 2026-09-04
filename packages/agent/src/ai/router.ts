@@ -10,7 +10,8 @@ export interface RouteDecision {
   reason: string;
 }
 
-function complexity(text: string): number {
+/** Stable task-shape signal shared by routing and adaptive run budgeting. */
+export function taskComplexityScore(text: string): number {
   let score = Math.min(3, Math.floor(text.length / 1200));
   if (/분석|추론|증명|설계|아키텍처|최적화|원인|디버그|research|analy[sz]e|reason|prove|architect|debug/i.test(text)) score += 2;
   if (/비교|검증|테스트|보안|법률|의료|금융|trade-?off|verify|security/i.test(text)) score += 1;
@@ -39,7 +40,7 @@ export class ModelRouter {
     }
     const settings = routing ?? this.config.routing;
     const mode = settings.mode;
-    const score = complexity(text);
+    const score = taskComplexityScore(text);
     let role: ModelRole = 'general';
     if (/코드|구현|리팩터|버그|code|implement|refactor|repository/i.test(text)) role = 'coding';
     else if (/이미지|사진|화면|image|photo|screenshot|vision/i.test(text)) role = 'vision';

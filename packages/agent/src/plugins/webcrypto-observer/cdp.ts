@@ -27,6 +27,7 @@ const MAX_CDP_SESSION_BYTES = 8 * 1024 * 1024;
 const MAX_BINDING_PAYLOAD_BYTES = 2_048;
 const MAX_PENDING_CDP_COMMANDS = 64;
 const MAX_RUNTIME_EVENTS = 512;
+const MAX_INVALID_RUNTIME_BINDINGS = 16;
 // One additional binding is the observer's mandatory safety-ready control.
 const MAX_RUNTIME_BINDING_ATTEMPTS = MAX_RUNTIME_EVENTS + 1;
 const MAX_AUXILIARY_TARGETS = 8;
@@ -41,7 +42,8 @@ export type TrafficGateDecision =
   | { allowed: false; terminateSession: boolean; reasonCode: string };
 
 export type CdpInboundLimitReason = 'cdp-frame-count-limit' | 'cdp-byte-limit'
-  | 'runtime-binding-attempt-limit' | 'invalid-cdp-frame-size';
+  | 'runtime-binding-attempt-limit' | 'invalid-runtime-binding-limit'
+  | 'runtime-event-limit' | 'invalid-cdp-frame-size';
 export type CdpInboundDecision = { allowed: true } | { allowed: false; reasonCode: CdpInboundLimitReason };
 
 /**
@@ -54,15 +56,18 @@ export class CdpInboundTrafficGate {
   private frames = 0;
   private bytes = 0;
   private runtimeBindingAttempts = 0;
+  private invalidRuntimeBindings = 0;
 
   constructor(
     private readonly maxFrames = MAX_CDP_SESSION_FRAMES,
     private readonly maxBytes = MAX_CDP_SESSION_BYTES,
     private readonly maxRuntimeBindingAttempts = MAX_RUNTIME_BINDING_ATTEMPTS,
+    private readonly maxInvalidRuntimeBindings = MAX_INVALID_RUNTIME_BINDINGS,
   ) {
     if (!Number.isSafeInteger(maxFrames) || maxFrames < 1
       || !Number.isSafeInteger(maxBytes) || maxBytes < 1
-      || !Number.isSafeInteger(maxRuntimeBindingAttempts) || maxRuntimeBindingAttempts < 1) {
+      || !Number.isSafeInteger(maxRuntimeBindingAttempts) || maxRuntimeBindingAttempts < 1
+      || !Number.isSafeInteger(maxInvalidRuntimeBindings) || maxInvalidRuntimeBindings < 1) {
       throw new Error('CDP inbound traffic limits must be positive safe integers.');
     }
   }
@@ -85,8 +90,20 @@ export class CdpInboundTrafficGate {
       : { allowed: true };
   }
 
-  snapshot(): { frames: number; bytes: number; runtimeBindingAttempts: number } {
-    return { frames: this.frames, bytes: this.bytes, runtimeBindingAttempts: this.runtimeBindingAttempts };
+  admitInvalidRuntimeBinding(): CdpInboundDecision {
+    this.invalidRuntimeBindings += 1;
+    return this.invalidRuntimeBindings > this.maxInvalidRuntimeBindings
+      ? { allowed: false, reasonCode: 'invalid-runtime-binding-limit' }
+      : { allowed: true };
+  }
+
+  snapshot(): { frames: number; bytes: number; runtimeBindingAttempts: number; invalidRuntimeBindings: number } {
+    return {
+      frames: this.frames,
+      bytes: this.bytes,
+      runtimeBindingAttempts: this.runtimeBindingAttempts,
+      invalidRuntimeBindings: this.invalidRuntimeBindings,
+    };
   }
 }
 
@@ -269,6 +286,19 @@ export class CdpClient {
     this.onFatal = handler;
   }
 
+  noteInvalidRuntimeBinding(): boolean {
+    const decision = this.inboundTraffic.admitInvalidRuntimeBinding();
+    if (decision.allowed) return true;
+    this.terminateAtLimit(decision.reasonCode);
+    return false;
+  }
+
+  terminateAtLimit(reasonCode: CdpInboundLimitReason): void {
+    if (this.closed) return;
+    this.fail(new CdpInboundLimitError(reasonCode));
+    this.socket.terminate();
+  }
+
   async send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
     if (this.closed || this.socket.readyState !== WebSocket.OPEN) throw new Error('로컬 브라우저 CDP 연결이 열려 있지 않습니다.');
     if (this.pending.size >= MAX_PENDING_CDP_COMMANDS) {
@@ -310,8 +340,7 @@ export class CdpClient {
     const bytes = rawDataBytes(raw);
     const inbound = this.inboundTraffic.admitFrame(bytes);
     if (!inbound.allowed) {
-      this.fail(new CdpInboundLimitError(inbound.reasonCode));
-      this.socket.terminate();
+      this.terminateAtLimit(inbound.reasonCode);
       return;
     }
     if (bytes > MAX_CDP_MESSAGE_BYTES) {
@@ -333,8 +362,7 @@ export class CdpClient {
     if (message.method === 'Runtime.bindingCalled') {
       const bindingAttempt = this.inboundTraffic.admitRuntimeBindingAttempt();
       if (!bindingAttempt.allowed) {
-        this.fail(new CdpInboundLimitError(bindingAttempt.reasonCode));
-        this.socket.terminate();
+        this.terminateAtLimit(bindingAttempt.reasonCode);
         return;
       }
     }
@@ -474,6 +502,7 @@ export class SystemCdpBrowserDriver implements BrowserObservationDriver {
       let settleSafetyReady: ((ready: boolean) => void) | undefined;
       const safetyReady = new Promise<boolean>((resolveReady) => { settleSafetyReady = resolveReady; });
       const closingAuxiliaryTargets = new Set<string>();
+      let runtimeEventsObserved = 0;
 
       const handleEvent = (message: CdpMessage) => {
         if (finalized || !message.method) return;
@@ -504,17 +533,28 @@ export class SystemCdpBrowserDriver implements BrowserObservationDriver {
         if (message.sessionId !== pageSessionId) return;
         if (message.method === 'Runtime.bindingCalled') {
           const payload = message.params?.payload;
-          if (typeof payload === 'string') {
-            const readiness = validateSafetyReady(payload, eventToken);
-            if (readiness !== undefined) {
-              settleSafetyReady?.(readiness);
-              settleSafetyReady = undefined;
-              if (!readiness) void finalize('failed', 'runtime-blockers-unavailable');
-              return;
-            }
-            const event = validateBindingEvent(payload, eventToken, request.preview.enabled, request.preview.maxBytes);
-            if (event) callbacks.onCryptoEvent(event);
+          if (message.params?.name !== bindingName || typeof payload !== 'string') {
+            client!.noteInvalidRuntimeBinding();
+            return;
           }
+          const readiness = validateSafetyReady(payload, eventToken);
+          if (readiness !== undefined) {
+            settleSafetyReady?.(readiness);
+            settleSafetyReady = undefined;
+            if (!readiness) void finalize('failed', 'runtime-blockers-unavailable');
+            return;
+          }
+          const event = validateBindingEvent(payload, eventToken, request.preview.enabled, request.preview.maxBytes);
+          if (!event) {
+            client!.noteInvalidRuntimeBinding();
+            return;
+          }
+          runtimeEventsObserved += 1;
+          if (runtimeEventsObserved > MAX_RUNTIME_EVENTS) {
+            client!.terminateAtLimit('runtime-event-limit');
+            return;
+          }
+          callbacks.onCryptoEvent(event);
           return;
         }
         if (message.method === 'Fetch.requestPaused') {
@@ -982,5 +1022,6 @@ export const cdpSafetyContract = Object.freeze({
   maxPendingCdpCommands: MAX_PENDING_CDP_COMMANDS,
   maxRuntimeEvents: MAX_RUNTIME_EVENTS,
   maxRuntimeBindingAttempts: MAX_RUNTIME_BINDING_ATTEMPTS,
+  maxInvalidRuntimeBindings: MAX_INVALID_RUNTIME_BINDINGS,
   maxAuxiliaryTargetAttemptsBeforeStop: MAX_AUXILIARY_TARGETS,
 });

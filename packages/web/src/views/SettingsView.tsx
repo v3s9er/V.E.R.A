@@ -99,7 +99,7 @@ const PRESETS: Array<{
   { id: 'custom', label: '직접 입력 (기타 제공사)', type: 'openai-compatible', baseUrl: '', model: '', source: 'api', costTier: 1 },
 ];
 
-interface TelemetrySummary { turns: number; promptTokens: number; completionTokens: number; cachedPromptTokens: number; cacheWritePromptTokens: number; reasoningTokens: number; cacheHitRate: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> }
+interface TelemetrySummary { turns: number; promptTokens: number; completionTokens: number; accountedTokens: number; cachedPromptTokens: number; cacheWritePromptTokens: number; reasoningTokens: number; cacheHitRate: number; toolCalls: number; estimatedCost: number; failures: number; byModel: Array<{ model: string; turns: number }> }
 
 interface RepairOffer { target: ProviderInfo; error: string; helpers: ProviderInfo[] }
 interface DangerConfirm { title: string; message: string; confirmLabel: string; action: () => Promise<void> }
@@ -1015,6 +1015,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         {telemetry && <div className="telemetry-strip">
           <div><span>최근 실행</span><b>{Number(telemetry.turns ?? 0).toLocaleString()}회</b></div>
           <div><span>입력 토큰</span><b>{Number(telemetry.promptTokens ?? 0).toLocaleString()}</b></div>
+          <div><span>감사 토큰</span><b>{Number(telemetry.accountedTokens ?? (Number(telemetry.promptTokens ?? 0) + Number(telemetry.completionTokens ?? 0))).toLocaleString()}</b></div>
           <div><span>캐시 재사용</span><b>{Number(telemetry.cachedPromptTokens ?? 0).toLocaleString()} · {(Number(telemetry.cacheHitRate ?? 0) * 100).toFixed(1)}%</b></div>
           <div><span>출력 토큰</span><b>{Number(telemetry.completionTokens ?? 0).toLocaleString()}</b></div>
           <div><span>도구 호출</span><b>{Number(telemetry.toolCalls ?? 0).toLocaleString()}회</b></div>

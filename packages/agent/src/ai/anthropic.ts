@@ -1,10 +1,96 @@
 import type { ReasoningEffort } from '@mr-robot/shared';
-import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, ProviderUsage, Turn } from './provider.js';
+import {
+  MAX_PROVIDER_RECORDED_TOKENS,
+  normalizeProviderUsageReport,
+  type AiProvider,
+  type ChatRequest,
+  type ProviderHealth,
+  type ProviderResult,
+  type ProviderToolCall,
+  type ProviderUsage,
+  type RawProviderUsage,
+  type Turn,
+} from './provider.js';
 import { toAnthropicTools } from './tools.js';
-import { readErrorBody, readSse } from './sse.js';
+import { createProviderRequestDeadline, readErrorBody, readSse } from './sse.js';
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '');
+}
+
+interface AnthropicUsageState {
+  raw: RawProviderUsage;
+  invalid: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validUsageCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
+function updateUsageCounter(state: AnthropicUsageState, key: keyof RawProviderUsage, value: unknown): void {
+  if (!validUsageCounter(value)) {
+    state.invalid = true;
+    return;
+  }
+  const previous = state.raw[key];
+  if (previous !== undefined && (!validUsageCounter(previous) || value < previous)) {
+    state.invalid = true;
+    return;
+  }
+  state.raw[key] = value;
+}
+
+function boundedPromptTotal(values: number[]): number {
+  let total = 0;
+  for (const value of values) {
+    if (value > MAX_PROVIDER_RECORDED_TOKENS - total) return MAX_PROVIDER_RECORDED_TOKENS + 1;
+    total += value;
+  }
+  return total;
+}
+
+function updateAnthropicStartUsage(state: AnthropicUsageState, value: unknown): void {
+  if (!isRecord(value)) {
+    state.invalid = true;
+    return;
+  }
+  const input = value.input_tokens;
+  const cached = Object.prototype.hasOwnProperty.call(value, 'cache_read_input_tokens')
+    ? value.cache_read_input_tokens
+    : 0;
+  const cacheWrite = Object.prototype.hasOwnProperty.call(value, 'cache_creation_input_tokens')
+    ? value.cache_creation_input_tokens
+    : 0;
+  if (!validUsageCounter(input) || !validUsageCounter(cached) || !validUsageCounter(cacheWrite)) {
+    state.invalid = true;
+    return;
+  }
+  updateUsageCounter(state, 'promptTokens', boundedPromptTotal([input, cached, cacheWrite]));
+  if (Object.prototype.hasOwnProperty.call(value, 'cache_read_input_tokens')) {
+    updateUsageCounter(state, 'cachedPromptTokens', cached);
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'cache_creation_input_tokens')) {
+    updateUsageCounter(state, 'cacheWritePromptTokens', cacheWrite);
+  }
+}
+
+function updateAnthropicCompletionUsage(state: AnthropicUsageState, value: unknown): void {
+  if (!isRecord(value) || !Object.prototype.hasOwnProperty.call(value, 'output_tokens')) {
+    state.invalid = true;
+    return;
+  }
+  updateUsageCounter(state, 'completionTokens', value.output_tokens);
+}
+
+function usageFromAnthropic(state: AnthropicUsageState): ProviderUsage {
+  if (state.invalid) {
+    return normalizeProviderUsageReport({ promptTokens: Number.NaN, completionTokens: Number.NaN });
+  }
+  return normalizeProviderUsageReport(state.raw);
 }
 
 function toAnthropicMessages(turns: Turn[]): Array<Record<string, unknown>> {
@@ -59,6 +145,15 @@ export class AnthropicProvider implements AiProvider {
   }
 
   async chat(req: ChatRequest): Promise<ProviderResult> {
+    const deadline = createProviderRequestDeadline(req.signal);
+    try {
+      return await this.chatStream({ ...req, signal: deadline.signal });
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private async chatStream(req: ChatRequest): Promise<ProviderResult> {
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: req.maxTokens ?? 4096,
@@ -87,7 +182,8 @@ export class AnthropicProvider implements AiProvider {
     let text = '';
     const toolCalls: ProviderToolCall[] = [];
     const byIndex = new Map<number, ProviderToolCall>();
-    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
+    const usageState: AnthropicUsageState = { raw: {}, invalid: false };
+    let completed = false;
 
     for await (const { event, data } of readSse(res)) {
       let json: any;
@@ -98,15 +194,7 @@ export class AnthropicProvider implements AiProvider {
       }
       switch (event) {
         case 'message_start':
-          if (json.message?.usage) {
-            const raw = json.message.usage;
-            const uncached = Number(raw.input_tokens) || 0;
-            const cached = Number(raw.cache_read_input_tokens) || 0;
-            const cacheWrite = Number(raw.cache_creation_input_tokens) || 0;
-            usage.promptTokens = uncached + cached + cacheWrite;
-            usage.cachedPromptTokens = cached;
-            usage.cacheWritePromptTokens = cacheWrite;
-          }
+          if (json.message?.usage !== undefined) updateAnthropicStartUsage(usageState, json.message.usage);
           break;
         case 'content_block_start': {
           const block = json.content_block;
@@ -130,17 +218,23 @@ export class AnthropicProvider implements AiProvider {
           break;
         }
         case 'message_delta':
-          if (json.usage) usage.completionTokens = json.usage.output_tokens ?? 0;
+          if (json.usage !== undefined) updateAnthropicCompletionUsage(usageState, json.usage);
+          break;
+        case 'message_stop':
+          completed = true;
           break;
         default:
           break;
       }
+      if (completed) break;
     }
+
+    if (!completed) throw new Error(`[${this.label}] Messages stream ended before message_stop`);
 
     for (const c of toolCalls) {
       if (c.name) req.onEvent?.({ type: 'tool', call: c });
     }
-    return { text, toolCalls, usage };
+    return { text, toolCalls, usage: usageFromAnthropic(usageState) };
   }
 
   async ping(): Promise<ProviderHealth> {

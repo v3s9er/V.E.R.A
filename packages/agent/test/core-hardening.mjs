@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { WebSocket } from 'ws';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const dist = resolve(here, '..', 'dist');
@@ -10,10 +11,11 @@ const home = mkdtempSync(join(tmpdir(), 'mr-robot-core-hardening-'));
 process.env.MR_ROBOT_HOME = home;
 
 const { ChatSession } = await import(pathToFileURL(join(dist, 'server', 'chat.js')).href);
-const { cleanupDisconnectedClientState, WsUpgradeTickets, webSocketTicketBinding } = await import(pathToFileURL(join(dist, 'server', 'ws.js')).href);
+const { canUseAuditOnly, cleanupDisconnectedClientState, WsUpgradeTickets, webSocketTicketBinding } = await import(pathToFileURL(join(dist, 'server', 'ws.js')).href);
 const { FileTransferAdmission } = await import(pathToFileURL(join(dist, 'server', 'transfer-admission.js')).href);
 const { ContextBroker } = await import(pathToFileURL(join(dist, 'context-broker.js')).href);
 const { ToolExecutor } = await import(pathToFileURL(join(dist, 'ai', 'executor.js')).href);
+const { ModelBudgetExceededError } = await import(pathToFileURL(join(dist, 'ai', 'loop.js')).href);
 const { OpenAICompatibleProvider } = await import(pathToFileURL(join(dist, 'ai', 'openai.js')).href);
 const { runShell } = await import(pathToFileURL(join(dist, 'computer', 'shell.js')).href);
 const { AgentServer, ChatRunAdmissionPolicy, serverEventAudience } = await import(pathToFileURL(join(dist, 'server', 'server.js')).href);
@@ -28,6 +30,37 @@ function check(name, condition, detail = '') {
     failures++;
     console.error(`FAIL  ${name} ${detail}`);
   }
+}
+
+function authenticateTestSocket(url, secret, desktopAuditProof, headers = undefined) {
+  return new Promise((resolveSocket, rejectSocket) => {
+    const socket = new WebSocket(url, headers ? { headers } : undefined);
+    const timer = setTimeout(() => {
+      try { socket.terminate(); } catch { /* best effort */ }
+      rejectSocket(new Error('test WebSocket authentication timed out'));
+    }, 2_000);
+    const fail = (error) => {
+      clearTimeout(timer);
+      rejectSocket(error instanceof Error ? error : new Error(String(error)));
+    };
+    socket.once('error', fail);
+    socket.once('open', () => {
+      socket.send(JSON.stringify({
+        id: 1,
+        method: 'auth',
+        params: { secret, ...(desktopAuditProof ? { desktopAuditProof } : {}) },
+      }));
+    });
+    socket.on('message', (raw) => {
+      let message;
+      try { message = JSON.parse(String(raw)); } catch { return; }
+      if (message?.id !== 1) return;
+      clearTimeout(timer);
+      socket.removeListener('error', fail);
+      try { socket.close(); } catch { /* best effort */ }
+      resolveSocket(message.result);
+    });
+  });
 }
 
 console.log('1. cancellation settles confirmations and steering');
@@ -90,9 +123,31 @@ console.log('1bb. public WebSocket admission tickets are bound, expiring, and si
     directRemote: '127.0.0.1', directLocal: '127.0.0.1', hostHeader: 'robot.example.com',
     cloudflareConnectingIp: '203.0.113.20', cloudflareRay: '1234567890abcdef-icn',
   });
-  check('direct Electron loopback stays ticket-free', localBinding.requiresTicket === false);
+  const genericProxyBinding = webSocketTicketBinding({
+    directRemote: '127.0.0.1', directLocal: '127.0.0.1', hostHeader: 'proxy.example.com',
+  });
+  const rewrittenProxyBinding = webSocketTicketBinding({
+    directRemote: '127.0.0.1', directLocal: '127.0.0.1', hostHeader: '127.0.0.1:8787',
+  });
+  const ordinaryAdmin = (remoteAddress, directLoopback) => ({
+    remoteAddress,
+    directLoopback,
+    state: { auth: { isAdmin: true, permissionCap: 'full' } },
+  });
+  check('direct loopback stays ticket-free but network provenance alone grants no audit authority',
+    localBinding.requiresTicket === false && localBinding.directLoopback === true);
   check('Cloudflare/public loopback route requires a ticket', publicBinding.requiresTicket === true
+    && publicBinding.directLoopback === false
     && publicBinding.source === 'cloudflare:203.0.113.20' && publicBinding.audience === 'robot.example.com');
+  check('public Host, rewritten loopback Host, Cloudflare and Tailnet paths cannot infer native audit authority',
+    genericProxyBinding.requiresTicket === true
+      && genericProxyBinding.directLoopback === false
+      && rewrittenProxyBinding.directLoopback === true
+      && canUseAuditOnly(ordinaryAdmin('public:198.51.100.4', false)) === false
+      && canUseAuditOnly(ordinaryAdmin('127.0.0.1', rewrittenProxyBinding.directLoopback)) === false
+      && canUseAuditOnly(ordinaryAdmin('cloudflare:203.0.113.20', false)) === false
+      && canUseAuditOnly(ordinaryAdmin('100.90.1.2', false)) === false
+      && canUseAuditOnly({ state: { auth: { isAdmin: true, permissionCap: 'full', nativeAuditOnly: true } } }) === true);
 
   const protocols = (ticket) => `mr-robot-rpc-v1, ${ticket.protocol}`;
   const tickets = new WsUpgradeTickets(1_000);
@@ -720,7 +775,20 @@ console.log('7d. unattended remote handoff is admin-only, strong, memory-only an
   const revoked = handlers.get('pairing.revokeRemoteHandoff')({}, admin);
   check('administrator can explicitly revoke a remote handoff', revoked.ok === true && server.exchangePin(handoffBeforeRevoke.pin, 'revoked handoff', 'ask', 'revoked-handoff-client').ok === false);
 
-  await server.start({ port: 0 });
+  const localStarted = await server.start({ port: 0 });
+  const nativeProof = server.issueDesktopAuditProof();
+  const nativeAuth = await authenticateTestSocket(`ws://127.0.0.1:${localStarted.port}/ws`, server.secret, nativeProof);
+  const replayedProof = await authenticateTestSocket(`ws://127.0.0.1:${localStarted.port}/ws`, server.secret, nativeProof);
+  const rewrittenProxyAuth = await authenticateTestSocket(
+    `ws://127.0.0.1:${localStarted.port}/ws`,
+    server.secret,
+    undefined,
+    { Host: `127.0.0.1:${localStarted.port}` },
+  );
+  check('only a fresh main-process-issued proof grants local desktop audit authority and it cannot replay',
+    nativeAuth?.ok === true && nativeAuth.canUseAuditOnly === true
+      && replayedProof?.ok === true && replayedProof.canUseAuditOnly === false
+      && rewrittenProxyAuth?.ok === true && rewrittenProxyAuth.canUseAuditOnly === false);
   const handoffBeforeLinkStop = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
   server.bus.emit('remote-link.changed', { running: false });
   check('stopping the public remote link revokes its remote handoff', server.exchangePin(handoffBeforeLinkStop.pin, 'link-stop replay', 'ask', 'link-stop-client').ok === false);
@@ -742,6 +810,8 @@ console.log('8. stored conversation permissions cannot exceed the linked device 
   });
   const readOnly = client('reader', 'read-only');
   const ask = client('asker', 'ask');
+  const admin = { id: 'local-admin', remoteAddress: '127.0.0.1', directLoopback: true, state: { auth: { isAdmin: true, permissionCap: 'full', nativeAuditOnly: true }, chat: new ChatSession() } };
+  const remoteAdmin = { id: 'remote-admin', remoteAddress: 'cloudflare:203.0.113.20', directLoopback: false, state: { auth: { isAdmin: true, permissionCap: 'full' }, chat: new ChatSession() } };
   let readOnlyCreateBlocked = false;
   let readOnlyMemoryBlocked = false;
   try { handlers.get('conversations.create')({ title: 'escape', permissionMode: 'full' }, readOnly); } catch { readOnlyCreateBlocked = true; }
@@ -751,6 +821,21 @@ console.log('8. stored conversation permissions cannot exceed the linked device 
   const created = handlers.get('conversations.create')({ title: 'bounded', permissionMode: 'full' }, ask);
   const updated = handlers.get('conversations.update')({ id: created.id, permissionMode: 'full' }, ask);
   check('ask devices cannot persist a full-permission conversation', created.permissionMode === 'ask' && updated.permissionMode === 'ask');
+
+  const linkedAudit = handlers.get('conversations.create')({ title: 'linked audit attempt', tokenPolicy: 'audit-only' }, ask);
+  const adminAudit = handlers.get('conversations.create')({ title: 'local audit', tokenPolicy: 'audit-only' }, admin);
+  const remoteAdminAudit = handlers.get('conversations.create')({ title: 'remote admin audit attempt', tokenPolicy: 'audit-only' }, remoteAdmin);
+  const linkedDowngrade = handlers.get('conversations.update')({ id: adminAudit.id, tokenPolicy: 'audit-only' }, ask);
+  check('only a native-capability administrator can persist audit-only token policy',
+    linkedAudit.tokenPolicy === 'adaptive'
+      && adminAudit.tokenPolicy === 'audit-only'
+      && remoteAdminAudit.tokenPolicy === 'adaptive'
+      && linkedDowngrade.tokenPolicy === 'adaptive');
+  let invalidTokenPolicyRejected = false;
+  try { handlers.get('conversations.create')({ tokenPolicy: 'unbounded' }, admin); } catch { invalidTokenPolicyRejected = true; }
+  let invalidTokenPolicyUpdateRejected = false;
+  try { handlers.get('conversations.update')({ id: created.id, tokenPolicy: 'unbounded' }, admin); } catch { invalidTokenPolicyUpdateRejected = true; }
+  check('explicit invalid conversation token policies are rejected', invalidTokenPolicyRejected && invalidTokenPolicyUpdateRejected);
 }
 
 console.log('8b. model-run admission is shared, bounded, and failure-safe');
@@ -765,10 +850,7 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
     globalStartsPerWindow: 20,
     linkedStartsPerWindow: 10,
     adminStartsPerWindow: 20,
-    tokenWindowMs: 1_000,
-    globalTokensPerWindow: 1_000,
-    linkedTokensPerWindow: 100,
-    adminTokensPerWindow: 1_000,
+    auditWindowMs: 1_000,
     maxPrincipals: 2,
   });
   const linkedAuth = (id) => ({ isAdmin: false, linkId: id, permissionCap: 'ask' });
@@ -778,17 +860,17 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   first.finish({ promptTokens: 60, completionTokens: 50 });
   first.finish({ promptTokens: 999, completionTokens: 999 });
   const afterFirst = policy.snapshot();
-  let tokenBlocked = false;
-  try { policy.acquire(linkedAuth('one')); } catch { tokenBlocked = true; }
-  check('linked active slots release idempotently and actual completed usage creates token debt',
-    activeBlocked && tokenBlocked && afterFirst.globalActive === 0 && afterFirst.globalTokens === 110);
+  const afterHardTask = policy.acquire(linkedAuth('one'));
+  afterHardTask.finish({ promptTokens: 0, completionTokens: 0 });
+  check('linked active slots release idempotently without a fixed rolling token lockout',
+    activeBlocked && afterFirst.globalActive === 0 && afterFirst.globalTokens === 110);
   now += 1_000;
   const afterExpiry = policy.acquire(linkedAuth('one'));
-  afterExpiry.finish({ promptTokens: 0, completionTokens: 0 });
-  check('sliding start and token debt expire exactly at the configured boundary', policy.snapshot().globalActive === 0);
+  afterExpiry.finish({ promptTokens: 1, completionTokens: 0 });
+  check('diagnostic token history expires without controlling admission', policy.snapshot().globalTokens === 1);
 
   const secondIdentity = policy.acquire(linkedAuth('two'));
-  secondIdentity.finish({ promptTokens: 0, completionTokens: 0 });
+  secondIdentity.finish({ promptTokens: 1, completionTokens: 0 });
   let identityMapBlocked = false;
   try { policy.acquire(linkedAuth('three')); } catch { identityMapBlocked = true; }
   check('principal accounting map remains bounded and fails closed', identityMapBlocked && policy.snapshot().principalCount === 2);
@@ -796,7 +878,7 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   policy.clear();
   staleLease.finish({ promptTokens: 100, completionTokens: 100 });
   check('clear resets counters and late completions cannot repopulate a stopped epoch',
-    JSON.stringify(policy.snapshot()) === JSON.stringify({ principalCount: 0, globalActive: 0, globalReserved: 0, globalStarts: 0, globalTokens: 0 }));
+    JSON.stringify(policy.snapshot()) === JSON.stringify({ principalCount: 0, globalActive: 0, globalProviderCallsInFlight: 0, globalReserved: 0, globalStarts: 0, globalTokens: 0, globalAuditTokens: 0 }));
 }
 
 {
@@ -808,22 +890,19 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
     globalStartsPerWindow: 20,
     linkedStartsPerWindow: 20,
     adminStartsPerWindow: 20,
-    globalTokensPerWindow: 100,
-    linkedTokensPerWindow: 100,
-    adminTokensPerWindow: 100,
   });
   const first = policy.acquire(auth);
   const second = policy.acquire(auth);
   let thirdBlocked = false;
   try { policy.acquire(auth); } catch { thirdBlocked = true; }
-  check('simultaneous jobs reserve the entire available token ceiling before any provider starts',
-    thirdBlocked && first.tokenBudget === 50 && second.tokenBudget === 50 && policy.snapshot().globalReserved === 100);
+  check('concurrent jobs retain independent adaptive budgets while active slots remain bounded',
+    thirdBlocked && first.tokenBudget === 64_000 && second.tokenBudget === 64_000 && policy.snapshot().globalReserved === 128_000);
   first.finish();
   second.finish();
-  let debtBlocked = false;
-  try { policy.acquire(auth); } catch { debtBlocked = true; }
-  check('unknown failed runs convert their reservations to debt instead of becoming free',
-    debtBlocked && policy.snapshot().globalReserved === 0 && policy.snapshot().globalTokens === 100);
+  const next = policy.acquire(auth);
+  next.finish({ promptTokens: 0, completionTokens: 0 });
+  check('unknown failed runs remain audited without blocking the next legitimate task',
+    policy.snapshot().globalReserved === 0 && policy.snapshot().globalTokens === 128_000);
 }
 
 {
@@ -835,9 +914,10 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
     globalStartsPerWindow: 20,
     linkedStartsPerWindow: 20,
     adminStartsPerWindow: 20,
-    globalTokensPerWindow: 100,
-    linkedTokensPerWindow: 100,
-    adminTokensPerWindow: 100,
+    adaptiveSimpleCallTokens: 20,
+    adaptiveStandardCallTokens: 40,
+    adaptiveComplexCallTokens: 80,
+    adaptiveAbsoluteMaxTokens: 100,
   });
   const partial = policy.acquire(auth);
   const failedCall = partial.reserveModelCall('api', 30);
@@ -847,28 +927,57 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   partial.finish();
   check('a failed provider invocation retains its conservative call reservation exactly once',
     parallelCallBlocked && policy.snapshot().globalTokens === 30 && policy.snapshot().globalReserved === 0);
+  policy.clear();
   const successful = policy.acquire(auth);
   const exactCall = successful.reserveModelCall('api', 40);
   const within = exactCall.finish({ promptTokens: 6, completionTokens: 4 });
   successful.finish({ promptTokens: 6, completionTokens: 4 });
-  check('successful calls replace their reservation with exact incremental usage',
+  check('syntactically valid under-reporting cannot release the host reservation',
     within && policy.snapshot().globalTokens === 40);
 }
 
 {
   const auth = { isAdmin: true, permissionCap: 'full' };
-  const policy = new ChatRunAdmissionPolicy({
-    globalActive: 1,
-    linkedActive: 1,
-    adminActive: 1,
-    globalStartsPerWindow: 20,
-    linkedStartsPerWindow: 20,
-    adminStartsPerWindow: 20,
-    globalTokensPerWindow: 100,
-    linkedTokensPerWindow: 100,
-    adminTokensPerWindow: 100,
+  const policy = new ChatRunAdmissionPolicy({ globalStartsPerWindow: 40, adminStartsPerWindow: 40 });
+  const profile = (overrides = {}) => ({
+    tokenPolicy: 'adaptive', complexity: 0, executionMode: 'single', reasoningEffort: 'none',
+    plannedModelCalls: 1, hasTools: false, inputBytes: 0, ...overrides,
   });
+
+  const simple = policy.acquire(auth);
+  simple.configureModelBudget(profile());
+  const simpleBudget = simple.tokenBudget;
+  simple.finish({ promptTokens: 0, completionTokens: 0 });
+  const highTool = policy.acquire(auth);
+  highTool.configureModelBudget(profile({ complexity: 6, reasoningEffort: 'high', hasTools: true }));
+  const highBudget = highTool.tokenBudget;
+  highTool.finish({ promptTokens: 0, completionTokens: 0 });
+  const pipeline = policy.acquire(auth);
+  pipeline.configureModelBudget(profile({ complexity: 6, executionMode: 'pipeline', reasoningEffort: 'max', plannedModelCalls: 4 }));
+  const pipelineBudget = pipeline.tokenBudget;
+  pipeline.finish({ promptTokens: 0, completionTokens: 0 });
+  const swarm = policy.acquire(auth);
+  swarm.configureModelBudget(profile({ complexity: 8, executionMode: 'swarm', reasoningEffort: 'max', plannedModelCalls: 20, hasTools: true }));
+  const swarmBudget = swarm.tokenBudget;
+  swarm.finish({ promptTokens: 0, completionTokens: 0 });
+  check('adaptive budgets scale from simple work through reasoning and configured workflows',
+    simpleBudget === 51_200 && highBudget > simpleBudget && pipelineBudget === 8_000_000 && swarmBudget === 8_000_000);
+
+  const progressing = policy.acquire(auth);
+  progressing.configureModelBudget(profile({ hasTools: true }));
+  const firstProgressCall = progressing.reserveModelCall('api', 40_000);
+  firstProgressCall.finish({ promptTokens: 30_000, completionTokens: 0 });
+  let beforeProgressBlocked = false;
+  try { progressing.reserveModelCall('api', 30_000); } catch { beforeProgressBlocked = true; }
+  progressing.noteModelProgress('tool');
+  const continued = progressing.reserveModelCall('api', 30_000);
+  const continuedWithin = continued.finish({ promptTokens: 20_000, completionTokens: 0 });
+  progressing.finish({ promptTokens: 50_000, completionTokens: 0 });
+  check('single tool loops expand only after a completed progress round', beforeProgressBlocked && continuedWithin);
+
+  policy.clear();
   const ordinary = policy.acquire(auth);
+  ordinary.configureModelBudget(profile({ hasTools: true }));
   const estimated = ordinary.reserveModelCall('api', 20);
   const hiddenPromptAccepted = estimated.finish({ promptTokens: 28, completionTokens: 2 });
   ordinary.finish({ promptTokens: 28, completionTokens: 2 });
@@ -877,11 +986,178 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
 
   policy.clear();
   const runaway = policy.acquire(auth);
+  runaway.configureModelBudget(profile());
   const smallEstimate = runaway.reserveModelCall('api', 20);
   const runawayBlocked = !smallEstimate.finish({ promptTokens: 10_000_000, completionTokens: 1 });
   runaway.finish({ promptTokens: 10_000_000, completionTokens: 1 });
   check('a provider report beyond the whole run allowance still fails closed as token debt',
     runawayBlocked && policy.snapshot().globalTokens === 10_000_001);
+}
+
+{
+  const policy = new ChatRunAdmissionPolicy({
+    globalActive: 8,
+    linkedActive: 4,
+    adminActive: 4,
+    globalProviderCallsInFlight: 2,
+    linkedProviderCallsInFlight: 1,
+    adminProviderCallsInFlight: 2,
+    globalStartsPerWindow: 100,
+    linkedStartsPerWindow: 100,
+    adminStartsPerWindow: 100,
+  });
+  const linked = (id) => ({ isAdmin: false, linkId: id, permissionCap: 'ask' });
+  const first = policy.acquire(linked('provider-a'));
+  const firstCall = first.reserveModelCall('api', 5);
+  let principalLimitError;
+  try { first.reserveModelCall('api', 5); } catch (error) { principalLimitError = error; }
+
+  const second = policy.acquire(linked('provider-b'));
+  const secondCall = second.reserveModelCall('api', 5);
+  const third = policy.acquire(linked('provider-c'));
+  let globalLimitError;
+  try { third.reserveModelCall('api', 5); } catch (error) { globalLimitError = error; }
+  check('provider-call fan-out obeys typed per-principal and global in-flight limits without leaking rejected reservations',
+    principalLimitError instanceof ModelBudgetExceededError
+      && globalLimitError instanceof ModelBudgetExceededError
+      && policy.snapshot().globalProviderCallsInFlight === 2);
+
+  firstCall.finish({ promptTokens: 1, completionTokens: 0 });
+  const retriedCall = first.reserveModelCall('api', 5);
+  retriedCall.finish({ promptTokens: 1, completionTokens: 0 });
+  retriedCall.finish({ promptTokens: 999, completionTokens: 999 });
+  first.finish({ promptTokens: 2, completionTokens: 0 });
+  secondCall.finish({ promptTokens: 1, completionTokens: 0 });
+  second.finish({ promptTokens: 1, completionTokens: 0 });
+  third.finish({ promptTokens: 0, completionTokens: 0 });
+  check('provider-call finish is idempotent and releases capacity for a retry',
+    policy.snapshot().globalProviderCallsInFlight === 0);
+
+  const tokensBeforeOrphan = policy.snapshot().globalTokens;
+  const orphaned = policy.acquire(linked('provider-orphan'));
+  const orphanedCall = orphaned.reserveModelCall('api', 5);
+  const neighboring = policy.acquire(linked('provider-neighbor'));
+  const neighboringCall = neighboring.reserveModelCall('api', 5);
+  orphaned.finish({ promptTokens: 0, completionTokens: 0 });
+  const afterOrphanRunFinish = policy.snapshot();
+  const blockedWhileProviderLives = policy.acquire(linked('provider-blocked'));
+  let stillAtGlobalLimit;
+  try { blockedWhileProviderLives.reserveModelCall('api', 5); } catch (error) { stillAtGlobalLimit = error; }
+  blockedWhileProviderLives.finish({ promptTokens: 0, completionTokens: 0 });
+  orphanedCall.finish({ promptTokens: 999, completionTokens: 999 });
+  const afterLateOrphanFinish = policy.snapshot();
+  orphanedCall.finish({ promptTokens: 999, completionTokens: 999 });
+  const afterDuplicateOrphanFinish = policy.snapshot();
+  neighboringCall.finish({ promptTokens: 1, completionTokens: 0 });
+  neighboring.finish({ promptTokens: 1, completionTokens: 0 });
+  check('top-level finish cannot release a live provider slot and call settlement releases it exactly once',
+    afterOrphanRunFinish.globalProviderCallsInFlight === 2
+      && afterOrphanRunFinish.globalTokens === tokensBeforeOrphan + 5
+      && stillAtGlobalLimit instanceof ModelBudgetExceededError
+      && afterLateOrphanFinish.globalProviderCallsInFlight === 1
+      && afterLateOrphanFinish.globalTokens === afterOrphanRunFinish.globalTokens
+      && afterDuplicateOrphanFinish.globalProviderCallsInFlight === 1
+      && policy.snapshot().globalProviderCallsInFlight === 0);
+
+  const stale = policy.acquire(linked('provider-stale'));
+  const staleCall = stale.reserveModelCall('api', 5);
+  policy.clear();
+  const afterClearWithLiveProvider = policy.snapshot();
+  const fresh = policy.acquire(linked('provider-fresh'));
+  const freshCall = fresh.reserveModelCall('api', 5);
+  const afterFreshProvider = policy.snapshot();
+  staleCall.finish({ promptTokens: 1, completionTokens: 0 });
+  stale.finish({ promptTokens: 1, completionTokens: 0 });
+  const afterStaleFinish = policy.snapshot();
+  freshCall.finish({ promptTokens: 1, completionTokens: 0 });
+  fresh.finish({ promptTokens: 1, completionTokens: 0 });
+  check('clear starts a new epoch whose live provider count cannot be decremented by a stale finish',
+    afterClearWithLiveProvider.globalProviderCallsInFlight === 1
+      && afterFreshProvider.globalProviderCallsInFlight === 2
+      && afterStaleFinish.globalProviderCallsInFlight === 1
+      && policy.snapshot().globalProviderCallsInFlight === 0);
+}
+
+{
+  const admin = { isAdmin: true, permissionCap: 'full' };
+  const linked = { isAdmin: false, linkId: 'audit-link', permissionCap: 'ask' };
+  const policy = new ChatRunAdmissionPolicy({ globalStartsPerWindow: 20, adminStartsPerWindow: 20, linkedStartsPerWindow: 20 });
+  const auditProfile = {
+    tokenPolicy: 'audit-only', complexity: 0, executionMode: 'single', reasoningEffort: 'none',
+    plannedModelCalls: 1, hasTools: false, inputBytes: 0,
+  };
+  const audit = policy.acquire(admin, { allowAuditOnly: true });
+  audit.configureModelBudget(auditProfile);
+  const auditCall = audit.reserveModelCall('api', 20);
+  const auditContinues = auditCall.finish({ promptTokens: 10_000_000, completionTokens: 1 });
+  audit.finish({ promptTokens: 10_000_000, completionTokens: 1 });
+  const afterAudit = policy.snapshot();
+  const adaptive = policy.acquire(admin);
+  adaptive.configureModelBudget({ ...auditProfile, tokenPolicy: 'adaptive' });
+  const afterAuditCall = adaptive.reserveModelCall('api', 20);
+  const adaptiveUnaffected = afterAuditCall.finish({ promptTokens: 10, completionTokens: 0 });
+  adaptive.finish({ promptTokens: 10, completionTokens: 0 });
+  check('administrator audit-only usage never stops on tokens or contaminates adaptive accounting',
+    auditContinues && afterAudit.globalTokens === 0 && afterAudit.globalAuditTokens === 10_000_001 && adaptiveUnaffected);
+
+  const remoteAttempt = policy.acquire(linked);
+  remoteAttempt.configureModelBudget(auditProfile);
+  const remoteCall = remoteAttempt.reserveModelCall('api', 20);
+  const remoteRunawayBlocked = !remoteCall.finish({ promptTokens: 10_000_000, completionTokens: 0 });
+  remoteAttempt.finish({ promptTokens: 10_000_000, completionTokens: 0 });
+  check('linked clients cannot activate audit-only by bypassing the RPC UI',
+    remoteAttempt.tokenPolicy === 'adaptive' && remoteRunawayBlocked);
+
+  const remoteAdminAttempt = policy.acquire(admin);
+  remoteAdminAttempt.configureModelBudget(auditProfile);
+  const remoteAdminCall = remoteAdminAttempt.reserveModelCall('api', 20);
+  const remoteAdminRunawayBlocked = !remoteAdminCall.finish({ promptTokens: 10_000_000, completionTokens: 0 });
+  remoteAdminAttempt.finish({ promptTokens: 10_000_000, completionTokens: 0 });
+  check('administrator identity alone cannot bypass adaptive policy without a local capability',
+    remoteAdminAttempt.tokenPolicy === 'adaptive' && remoteAdminRunawayBlocked);
+
+  const invalid = policy.acquire(admin);
+  invalid.configureModelBudget({ ...auditProfile, tokenPolicy: 'adaptive' });
+  const invalidCall = invalid.reserveModelCall('api', 20);
+  const invalidBlocked = !invalidCall.finish({ promptTokens: 0, completionTokens: 0, reportStatus: 'invalid' });
+  invalid.finish({ promptTokens: 0, completionTokens: 0 });
+  check('a normalized invalid provider report still fails closed and remains finite in diagnostics',
+    invalidBlocked && Number.isFinite(policy.snapshot().globalTokens));
+
+  const auditInvalid = policy.acquire(admin, { allowAuditOnly: true });
+  auditInvalid.configureModelBudget(auditProfile);
+  const auditInvalidCall = auditInvalid.reserveModelCall('api', 20);
+  const auditInvalidContinues = auditInvalidCall.finish({ promptTokens: 0, completionTokens: 0, reportStatus: 'invalid' });
+  auditInvalid.finish({ promptTokens: 0, completionTokens: 0 });
+  check('audit-only keeps malformed reports as finite reservation-based audit usage',
+    auditInvalidContinues && Number.isFinite(policy.snapshot().globalAuditTokens));
+
+  policy.clear();
+  const auditUnderReport = policy.acquire(admin, { allowAuditOnly: true });
+  auditUnderReport.configureModelBudget(auditProfile);
+  const auditUnderReportCall = auditUnderReport.reserveModelCall('api', 20);
+  const auditUnderReportContinues = auditUnderReportCall.finish({ promptTokens: 1, completionTokens: 1 });
+  auditUnderReport.finish({ promptTokens: 1, completionTokens: 1 });
+  check('audit-only accounting also retains the host reservation against plausible under-reporting',
+    auditUnderReportContinues && policy.snapshot().globalAuditTokens === 20);
+}
+
+{
+  const store = new ConversationStore(join(home, 'finite-token-accounting'));
+  const conversation = store.create({ tokenPolicy: 'audit-only' });
+  const updated = store.appendResult(conversation.id, [], {
+    promptTokens: Number.POSITIVE_INFINITY,
+    completionTokens: -5,
+    cachedPromptTokens: 1e30,
+    cacheWritePromptTokens: Number.NaN,
+    reasoningTokens: 4.9,
+  });
+  check('persisted usage normalizes malformed provider counters to finite saturated integers',
+    updated.usage.promptTokens === 0
+      && updated.usage.completionTokens === 0
+      && updated.usage.cachedPromptTokens === 1_000_000_000_000
+      && updated.usage.cacheWritePromptTokens === 0
+      && updated.usage.reasoningTokens === 4);
 }
 
 {
@@ -905,6 +1181,35 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
 
 {
   const server = new AgentServer();
+  const handlers = server.handlers();
+  const admin = { id: 'policy-admin', remoteAddress: '::1', directLoopback: true, state: { auth: { isAdmin: true, permissionCap: 'full', nativeAuditOnly: true }, chat: new ChatSession() } };
+  const remoteAdmin = { id: 'policy-remote-admin', remoteAddress: '100.85.4.9', directLoopback: false, state: { auth: { isAdmin: true, permissionCap: 'full' }, chat: new ChatSession() } };
+  const linked = { id: 'policy-link', state: { auth: { isAdmin: false, linkId: 'policy-link-id', permissionCap: 'ask' }, chat: new ChatSession() } };
+  const conversation = handlers.get('conversations.create')({ title: 'audit locally', tokenPolicy: 'audit-only' }, admin);
+  const observedPolicies = [];
+  server.loop.run = async (_turns, _text, _callbacks, _tools, options) => {
+    observedPolicies.push(options.tokenPolicy);
+    return { text: 'ok', turns: [], usage: { promptTokens: 0, completionTokens: 0 } };
+  };
+  await handlers.get('chat.start')({ conversationId: conversation.id, text: 'linked attempt', tokenPolicy: 'audit-only' }, linked);
+  await handlers.get('chat.start')({ conversationId: conversation.id, text: 'admin run', tokenPolicy: 'audit-only' }, admin);
+  await handlers.get('chat.start')({ conversationId: conversation.id, text: 'remote admin attempt', tokenPolicy: 'audit-only' }, remoteAdmin);
+  check('linked and remote-administrator execution of an audit-only conversation is forced back to adaptive',
+    observedPolicies[0] === 'adaptive' && observedPolicies[1] === 'audit-only' && observedPolicies[2] === 'adaptive');
+
+  const startsBeforeInvalid = server.chatRunAdmission.snapshot().globalStarts;
+  let invalidStartRejected = false;
+  try { handlers.get('chat.start')({ conversationId: conversation.id, text: 'bad policy', tokenPolicy: 'unbounded' }, admin); } catch { invalidStartRejected = true; }
+  admin.state.chat.begin();
+  let busyRejected = false;
+  try { handlers.get('chat.start')({ conversationId: conversation.id, text: 'busy' }, admin); } catch { busyRejected = true; }
+  admin.state.chat.end();
+  check('invalid or already-busy starts are rejected before consuming admission state',
+    invalidStartRejected && busyRejected && server.chatRunAdmission.snapshot().globalStarts === startsBeforeInvalid);
+}
+
+{
+  const server = new AgentServer();
   server.chatRunAdmission = new ChatRunAdmissionPolicy({
     globalActive: 4,
     linkedActive: 1,
@@ -912,9 +1217,6 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
     globalStartsPerWindow: 100,
     linkedStartsPerWindow: 100,
     adminStartsPerWindow: 100,
-    globalTokensPerWindow: 1_000_000,
-    linkedTokensPerWindow: 1_000_000,
-    adminTokensPerWindow: 1_000_000,
   });
   const auth = { isAdmin: false, linkId: 'shared-budget-link', permissionCap: 'ask' };
   const client = { id: 'shared-budget-ws', state: { auth, chat: new ChatSession() } };
@@ -932,7 +1234,9 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   server.loop.run = async (_turns, text, callbacks) => {
     const call = callbacks.reserveModelCall('api', 100);
     if (text === 'provider failure') {
-      call.finish();
+      // A real provider promise rejected, so its call lease settles in catch.
+      call.finish({ promptTokens: 2, completionTokens: 1 });
+      callbacks.onModelUsage?.({ promptTokens: 2, completionTokens: 1, accountedTokens: call.accountedTokens });
       throw new Error('expected provider failure');
     }
     if (text === 'cancel me') {
@@ -951,7 +1255,12 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
     };
   };
   const afterRest = await handlers.get('chat.start')({ text: 'after REST release' }, client);
+  const usageBeforeFailure = server.conversations.get(client.state.chat.conversationId).usage;
+  const accountedBeforeFailure = server.telemetry.summary().accountedTokens;
   const failed = await handlers.get('chat.start')({ text: 'provider failure' }, client);
+  const usageAfterFailure = server.conversations.get(client.state.chat.conversationId).usage;
+  const failedTrace = server.telemetry.list().find((trace) => trace.ok === false && trace.error === 'expected provider failure');
+  const accountedAfterFailure = server.telemetry.summary().accountedTokens;
   const cancelPromise = handlers.get('chat.start')({ text: 'cancel me' }, client);
   const cancelId = client.state.chat.conversationId;
   handlers.get('chat.cancel')({ conversationId: cancelId }, client);
@@ -959,8 +1268,89 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   const recovered = await handlers.get('chat.start')({ text: 'after failure and cancel' }, client);
   check('REST and WS share a principal active budget without mutating on rejection',
     wsWhileRestBlocked && noConversationOnAdmissionFailure && afterRest.ok === true);
+  check('failed runs persist partial actual usage and reservation-floor audit usage exactly once',
+    usageAfterFailure.promptTokens - usageBeforeFailure.promptTokens === 2
+      && usageAfterFailure.completionTokens - usageBeforeFailure.completionTokens === 1
+      && (usageAfterFailure.accountedTokens ?? 0) - (usageBeforeFailure.accountedTokens ?? 0) === 100
+      && failedTrace?.promptTokens === 2
+      && failedTrace?.completionTokens === 1
+      && failedTrace?.accountedTokens === 100
+      && accountedAfterFailure - accountedBeforeFailure === 100);
   check('failure and cancellation release the shared active counter for the next run',
-    failed.ok === false && cancelled.ok === false && recovered.ok === true && server.chatRunAdmission.snapshot().globalActive === 0);
+    failed.ok === false
+      && cancelled.ok === false
+      && recovered.ok === true
+      && server.chatRunAdmission.snapshot().globalActive === 0
+      && server.chatRunAdmission.snapshot().globalProviderCallsInFlight === 0);
+}
+
+console.log('8ca. REST chat persists actual and accounted usage exactly once');
+{
+  const server = new AgentServer();
+  server.config.providers.push({
+    id: 'rest-meter',
+    label: 'REST meter',
+    type: 'openai-compatible',
+    baseUrl: 'https://provider.invalid/v1',
+    model: 'meter-model',
+    apiKey: 'test-only',
+    isDefault: true,
+    inputCostPerMillion: 2,
+    outputCostPerMillion: 5,
+  });
+  const observedPolicies = [];
+  let invocation = 0;
+  server.loop.run = async (_turns, _text, callbacks, _tools, options) => {
+    invocation += 1;
+    observedPolicies.push(options.tokenPolicy);
+    const source = { providerId: 'rest-meter', providerLabel: 'REST meter', model: 'meter-model' };
+    if (invocation === 1) {
+      callbacks.onModelUsage?.({ promptTokens: 3, completionTokens: 2, accountedTokens: 100 }, source);
+      return {
+        text: 'REST success',
+        turns: [{ role: 'assistant', content: 'REST success' }],
+        usage: { promptTokens: 3, completionTokens: 2 },
+        route: { ...source, role: 'general', effort: 'none', reason: 'focused REST test' },
+      };
+    }
+    callbacks.onModelUsage?.({ promptTokens: 4, completionTokens: 1, accountedTokens: 200 }, source);
+    throw new Error('expected REST partial failure');
+  };
+  const before = server.telemetry.summary();
+  const traceCountBefore = server.telemetry.list(1_000).length;
+  const started = await server.start({ port: 0, host: '127.0.0.1' });
+  const request = (text) => fetch(`http://127.0.0.1:${started.port}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-mr-robot-token': server.secret,
+    },
+    body: JSON.stringify({ text }),
+  });
+  try {
+    const success = await request('success');
+    const successBody = await success.json();
+    const partialFailure = await request('failure');
+    const after = server.telemetry.summary();
+    const newTraces = server.telemetry.list(1_000).slice(0, 2);
+    const failedTrace = newTraces.find((trace) => trace.ok === false);
+    const successTrace = newTraces.find((trace) => trace.ok === true && trace.providerId === 'rest-meter');
+    check('REST remains adaptive and writes one success plus one partial-failure telemetry record',
+      success.ok && successBody.text === 'REST success' && !partialFailure.ok
+        && observedPolicies.every((policy) => policy === 'adaptive')
+        && server.telemetry.list(1_000).length - traceCountBefore === 2);
+    check('REST Settings aggregates retain actual usage and reservation-floor audit usage without double counting',
+      after.promptTokens - before.promptTokens === 7
+        && after.completionTokens - before.completionTokens === 3
+        && after.accountedTokens - before.accountedTokens === 300
+        && successTrace?.accountedTokens === 100
+        && failedTrace?.accountedTokens === 200);
+    check('REST cost uses only actual provider-reported tokens on success and partial failure',
+      Math.abs((successTrace?.estimatedCost ?? -1) - 0.000016) < 1e-12
+        && Math.abs((failedTrace?.estimatedCost ?? -1) - 0.000013) < 1e-12);
+  } finally {
+    await server.stop();
+  }
 }
 
 console.log('8c. HTTP transfer admission is concurrent-safe and byte-bounded');
@@ -998,7 +1388,7 @@ console.log('8c. HTTP transfer admission is concurrent-safe and byte-bounded');
 console.log('9. cross-PC sync validates both stores and preserves local access decisions');
 {
   const server = new AgentServer();
-  const local = server.conversations.create({ title: 'local original', permissionMode: 'full' });
+  const local = server.conversations.create({ title: 'local original', permissionMode: 'full', tokenPolicy: 'audit-only' });
   const changed = server.conversations.exportSnapshot();
   changed[0].title = 'must not partially apply';
   changed[0].updatedAt += 1;
@@ -1016,12 +1406,24 @@ console.log('9. cross-PC sync validates both stores and preserves local access d
   imported.id = 'sync-new-conversation';
   imported.title = 'safe import';
   imported.permissionMode = 'full';
+  imported.tokenPolicy = 'audit-only';
   imported.workspaceId = 'destination-sensitive-workspace';
   imported.createdAt = Date.now();
   imported.updatedAt = Date.now();
   server.mergeSyncSnapshot({ version: 1, conversations: [imported], routingPresets: [] });
   const safe = server.conversations.get(imported.id);
-  check('new synced conversations are ask-capped and lose remote workspace binding', safe?.permissionMode === 'ask' && safe.workspaceId === undefined);
+  check('new synced conversations are ask-capped and lose remote-only local authority',
+    safe?.permissionMode === 'ask' && safe.tokenPolicy === 'adaptive' && safe.workspaceId === undefined);
+
+  const policySource = new ConversationStore(join(home, 'sync-policy-source'));
+  const policyTarget = new ConversationStore(join(home, 'sync-policy-target'));
+  const policyConversation = policySource.create({ title: 'policy baseline' });
+  policyTarget.mergeSnapshot(policySource.exportSnapshot());
+  policyTarget.update(policyConversation.id, { tokenPolicy: 'audit-only' });
+  policySource.update(policyConversation.id, { title: 'remote content edit' });
+  policyTarget.mergeSnapshot(policySource.exportSnapshot());
+  check('sync content updates preserve the destination-local token policy',
+    policyTarget.get(policyConversation.id)?.tokenPolicy === 'audit-only');
 
   const linearSource = new ConversationStore(join(home, 'sync-linear-source'));
   const linearTarget = new ConversationStore(join(home, 'sync-linear-target'));

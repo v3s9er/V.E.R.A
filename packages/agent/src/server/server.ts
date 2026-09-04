@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { networkInterfaces, hostname as osHostname, platform } from 'node:os';
 import type { AddressInfo } from 'node:net';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type {
   AppSettings,
   DeviceCapability,
@@ -9,6 +9,7 @@ import type {
   ConversationCreateInput,
   ConversationDetail,
   ConversationStatus,
+  ConversationTokenPolicy,
   MemoryItem,
   ReasoningEffort,
   RoutingSettings,
@@ -33,8 +34,9 @@ import { ConfigStore, type ToolPortalConfigureInput } from '../config.js';
 import { EventBus } from '../eventbus.js';
 import { Logger } from '../logger.js';
 import { ProviderRegistry } from '../ai/registry.js';
+import { MAX_PROVIDER_RECORDED_TOKENS, type ProviderUsage } from '../ai/provider.js';
 import { effectiveMode, ToolExecutor } from '../ai/executor.js';
-import { AgentLoop } from '../ai/loop.js';
+import { AgentLoop, ModelBudgetExceededError, type ModelBudgetProfile, type ModelProgressKind } from '../ai/loop.js';
 import { ModelRouter } from '../ai/router.js';
 import { ConversationStore } from '../conversations.js';
 import { MemoryStore } from '../memory.js';
@@ -56,7 +58,7 @@ import { Scheduler, SchedulerStore } from '../scheduler.js';
 import { DependencyManager } from '../dependencies.js';
 import { ChatSession } from './chat.js';
 import { ScreenStreamController } from './stream.js';
-import { WsHub, WsClient, WsUpgradeTickets, type AuthContext, type RpcHandler } from './ws.js';
+import { WsHub, WsClient, WsUpgradeTickets, canUseAuditOnly, type AuthContext, type RpcHandler } from './ws.js';
 import { createHttpApi, type PairingInfo } from './http.js';
 import { ContextBroker } from '../context-broker.js';
 import { resolveRegisteredWorkspacePath } from '../path-security.js';
@@ -75,12 +77,14 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.3';
+export const VERSION = '0.4.4';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
 const PIN_GLOBAL_WINDOW_MS = 5 * 60_000;
 const PIN_GLOBAL_MAX_FAILURES = 50;
+const DESKTOP_AUDIT_PROOF_TTL_MS = 10_000;
+const DESKTOP_AUDIT_PROOF_MAX_PENDING = 32;
 
 export type ServerEventAudience = 'paired' | 'private-calendar' | 'admin' | 'none';
 
@@ -194,14 +198,21 @@ export interface ChatRunAdmissionOptions {
   globalActive: number;
   linkedActive: number;
   adminActive: number;
+  globalProviderCallsInFlight: number;
+  linkedProviderCallsInFlight: number;
+  adminProviderCallsInFlight: number;
   startWindowMs: number;
   globalStartsPerWindow: number;
   linkedStartsPerWindow: number;
   adminStartsPerWindow: number;
-  tokenWindowMs: number;
-  globalTokensPerWindow: number;
-  linkedTokensPerWindow: number;
-  adminTokensPerWindow: number;
+  /** Retention window for diagnostics only; it is never an admission ceiling. */
+  auditWindowMs: number;
+  adaptiveSimpleCallTokens: number;
+  adaptiveStandardCallTokens: number;
+  adaptiveComplexCallTokens: number;
+  adaptiveAbsoluteMaxTokens: number;
+  adaptiveToolProgressCalls: number;
+  maxRecordedTokens: number;
   maxPrincipals: number;
   now: () => number;
 }
@@ -209,27 +220,38 @@ export interface ChatRunAdmissionOptions {
 interface ChatRunPrincipalState {
   kind: 'admin' | 'linked';
   active: number;
-  /** Tokens held by active top-level runs and unavailable to other callers. */
+  providerCallsInFlight: number;
+  /** Sum of active adaptive hard ceilings, exposed only for bounded diagnostics. */
   reserved: number;
   starts: number[];
+  /** Adaptive-mode usage, retained for diagnostics but never used as a fixed window cap. */
   tokens: Array<{ at: number; count: number }>;
+  /** Audit-only usage is deliberately separate from adaptive accounting. */
+  auditTokens: Array<{ at: number; count: number }>;
   lastSeen: number;
 }
 
 export interface ChatModelCallLease {
+  /** Conservative debit chosen during the first settlement. */
+  readonly accountedTokens: number;
   /**
-   * Settle one provider invocation. Missing/zero usage is treated as unknown
-   * and keeps the conservative pre-call reservation as token debt.
-   * Returns false only when settled and still-pending calls exceed the whole
-   * run allowance. A provider may legitimately report more than our pre-call
-   * estimate because subscription CLIs add their own hidden prompt context.
+   * Settle one provider invocation. Every call retains at least its host-owned
+   * pre-call reservation; a larger valid provider report raises the debit.
+   * Returns false only when settled calls exceed the whole run allowance or a
+   * report is malformed. A provider may legitimately report more than our
+   * pre-call estimate because subscription CLIs add hidden prompt context.
    */
-  finish(usage?: Pick<ChatUsage, 'promptTokens' | 'completionTokens'>): boolean;
+  finish(usage?: Pick<ProviderUsage, 'promptTokens' | 'completionTokens' | 'reportStatus'>): boolean;
 }
 
 export interface ChatRunAdmissionLease {
-  /** Maximum aggregate token allowance held for this one user-visible run. */
+  /** Adaptive hard ceiling, or Number.MAX_SAFE_INTEGER in audit-only mode. */
   readonly tokenBudget: number;
+  readonly tokenPolicy: ConversationTokenPolicy;
+  /** Must be called before the first provider invocation. */
+  configureModelBudget(profile: ModelBudgetProfile): void;
+  /** Bounded expansion after a real tool round or a new human instruction. */
+  noteModelProgress(kind: ModelProgressKind): void;
   /**
    * Atomically reserve a model invocation inside this run. Parallel routing
    * nodes share the same allowance; they are not counted as separate jobs.
@@ -245,35 +267,85 @@ const DEFAULT_CHAT_RUN_ADMISSION: ChatRunAdmissionOptions = {
   globalActive: 12,
   linkedActive: 2,
   adminActive: 8,
+  // A single top-level job may intentionally fan out, but the aggregate
+  // provider pressure remains bounded across jobs and identities.
+  globalProviderCallsInFlight: 48,
+  linkedProviderCallsInFlight: 8,
+  adminProviderCallsInFlight: 32,
   startWindowMs: 60_000,
   globalStartsPerWindow: 160,
   linkedStartsPerWindow: 12,
   adminStartsPerWindow: 120,
-  tokenWindowMs: 15 * 60_000,
-  globalTokensPerWindow: 10_000_000,
-  linkedTokensPerWindow: 500_000,
-  adminTokensPerWindow: 8_000_000,
+  auditWindowMs: 15 * 60_000,
+  // These are per-call planning units, not rolling-window quotas. Complexity,
+  // requested reasoning, configured workflow and input size select the unit.
+  adaptiveSimpleCallTokens: 64_000,
+  adaptiveStandardCallTokens: 192_000,
+  adaptiveComplexCallTokens: 512_000,
+  // A malformed report in the ten-million-token range still fails closed.
+  adaptiveAbsoluteMaxTokens: 8_000_000,
+  adaptiveToolProgressCalls: 8,
+  maxRecordedTokens: 1_000_000_000_000,
   maxPrincipals: 512,
   now: () => Date.now(),
 };
 const CHAT_RUN_MAX_HISTORY_SAMPLES = 8_192;
 
+function accumulateProviderUsage(current: ChatUsage | undefined, next: ProviderUsage): ChatUsage {
+  const token = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.min(MAX_PROVIDER_RECORDED_TOKENS, Math.floor(value))
+    : 0;
+  const add = (left: unknown, right: unknown): number => Math.min(
+    MAX_PROVIDER_RECORDED_TOKENS,
+    token(left) + token(right),
+  );
+  return {
+    promptTokens: add(current?.promptTokens, next.promptTokens),
+    completionTokens: add(current?.completionTokens, next.completionTokens),
+    accountedTokens: add(current?.accountedTokens, next.accountedTokens),
+    cachedPromptTokens: add(current?.cachedPromptTokens, next.cachedPromptTokens),
+    cacheWritePromptTokens: add(current?.cacheWritePromptTokens, next.cacheWritePromptTokens),
+    reasoningTokens: add(current?.reasoningTokens, next.reasoningTokens),
+  };
+}
+
+function hasRecordedUsage(usage: ChatUsage | undefined): usage is ChatUsage {
+  return Boolean(usage && [
+    usage.promptTokens,
+    usage.completionTokens,
+    usage.accountedTokens,
+    usage.cachedPromptTokens,
+    usage.cacheWritePromptTokens,
+    usage.reasoningTokens,
+  ].some((value) => typeof value === 'number' && value > 0));
+}
+
+interface AdaptiveRunBudget {
+  initial: number;
+  ceiling: number;
+  progressStep: number;
+  plannedCalls: number;
+}
+
 /**
  * Shared, memory-only admission policy for every interactive model run.
  *
- * REST and WebSocket callers use the same instance. Active slots are always
- * released through an idempotent lease; successful provider-reported usage is
- * charged to both the principal and global sliding token windows. Histories
- * and identity maps are bounded and fail closed instead of evicting a live
- * rate-limit record that a rotating client could otherwise bypass.
+ * REST and WebSocket callers use the same instance. Concurrency and start-rate
+ * ceilings prevent client abuse. Token policy is per run: adaptive mode sizes
+ * a bounded allowance from the task shape and unlocks more only after progress,
+ * while administrator-only audit mode records normalized usage without a token
+ * stop. There is intentionally no fixed rolling token cap that can penalize a
+ * later legitimate task merely because an earlier hard task used its budget.
  */
 export class ChatRunAdmissionPolicy {
   private readonly options: ChatRunAdmissionOptions;
   private readonly principals = new Map<string, ChatRunPrincipalState>();
   private globalActive = 0;
+  private globalProviderCallsInFlight = 0;
   private globalReserved = 0;
   private globalStarts: number[] = [];
   private globalTokens: Array<{ at: number; count: number }> = [];
+  private globalAuditTokens: Array<{ at: number; count: number }> = [];
   private epoch = 0;
 
   constructor(options: Partial<ChatRunAdmissionOptions> = {}) {
@@ -285,20 +357,26 @@ export class ChatRunAdmissionPolicy {
       globalActive: positive(merged.globalActive, DEFAULT_CHAT_RUN_ADMISSION.globalActive),
       linkedActive: positive(merged.linkedActive, DEFAULT_CHAT_RUN_ADMISSION.linkedActive),
       adminActive: positive(merged.adminActive, DEFAULT_CHAT_RUN_ADMISSION.adminActive),
+      globalProviderCallsInFlight: positive(merged.globalProviderCallsInFlight, DEFAULT_CHAT_RUN_ADMISSION.globalProviderCallsInFlight),
+      linkedProviderCallsInFlight: positive(merged.linkedProviderCallsInFlight, DEFAULT_CHAT_RUN_ADMISSION.linkedProviderCallsInFlight),
+      adminProviderCallsInFlight: positive(merged.adminProviderCallsInFlight, DEFAULT_CHAT_RUN_ADMISSION.adminProviderCallsInFlight),
       startWindowMs: positive(merged.startWindowMs, DEFAULT_CHAT_RUN_ADMISSION.startWindowMs),
       globalStartsPerWindow: Math.min(CHAT_RUN_MAX_HISTORY_SAMPLES, positive(merged.globalStartsPerWindow, DEFAULT_CHAT_RUN_ADMISSION.globalStartsPerWindow)),
       linkedStartsPerWindow: Math.min(CHAT_RUN_MAX_HISTORY_SAMPLES, positive(merged.linkedStartsPerWindow, DEFAULT_CHAT_RUN_ADMISSION.linkedStartsPerWindow)),
       adminStartsPerWindow: Math.min(CHAT_RUN_MAX_HISTORY_SAMPLES, positive(merged.adminStartsPerWindow, DEFAULT_CHAT_RUN_ADMISSION.adminStartsPerWindow)),
-      tokenWindowMs: positive(merged.tokenWindowMs, DEFAULT_CHAT_RUN_ADMISSION.tokenWindowMs),
-      globalTokensPerWindow: positive(merged.globalTokensPerWindow, DEFAULT_CHAT_RUN_ADMISSION.globalTokensPerWindow),
-      linkedTokensPerWindow: positive(merged.linkedTokensPerWindow, DEFAULT_CHAT_RUN_ADMISSION.linkedTokensPerWindow),
-      adminTokensPerWindow: positive(merged.adminTokensPerWindow, DEFAULT_CHAT_RUN_ADMISSION.adminTokensPerWindow),
+      auditWindowMs: positive(merged.auditWindowMs, DEFAULT_CHAT_RUN_ADMISSION.auditWindowMs),
+      adaptiveSimpleCallTokens: positive(merged.adaptiveSimpleCallTokens, DEFAULT_CHAT_RUN_ADMISSION.adaptiveSimpleCallTokens),
+      adaptiveStandardCallTokens: positive(merged.adaptiveStandardCallTokens, DEFAULT_CHAT_RUN_ADMISSION.adaptiveStandardCallTokens),
+      adaptiveComplexCallTokens: positive(merged.adaptiveComplexCallTokens, DEFAULT_CHAT_RUN_ADMISSION.adaptiveComplexCallTokens),
+      adaptiveAbsoluteMaxTokens: positive(merged.adaptiveAbsoluteMaxTokens, DEFAULT_CHAT_RUN_ADMISSION.adaptiveAbsoluteMaxTokens),
+      adaptiveToolProgressCalls: Math.min(16, positive(merged.adaptiveToolProgressCalls, DEFAULT_CHAT_RUN_ADMISSION.adaptiveToolProgressCalls)),
+      maxRecordedTokens: Math.min(Number.MAX_SAFE_INTEGER, positive(merged.maxRecordedTokens, DEFAULT_CHAT_RUN_ADMISSION.maxRecordedTokens)),
       maxPrincipals: Math.min(4_096, positive(merged.maxPrincipals, DEFAULT_CHAT_RUN_ADMISSION.maxPrincipals)),
       now: typeof merged.now === 'function' ? merged.now : DEFAULT_CHAT_RUN_ADMISSION.now,
     };
   }
 
-  acquire(auth: AuthContext): ChatRunAdmissionLease {
+  acquire(auth: AuthContext, capabilities: { allowAuditOnly?: boolean } = {}): ChatRunAdmissionLease {
     const now = this.options.now();
     this.prune(now);
     const kind = auth.isAdmin ? 'admin' : 'linked';
@@ -306,10 +384,6 @@ export class ChatRunAdmissionPolicy {
     if (!key) throw new Error('모델 실행의 인증 주체를 확인할 수 없습니다. 다시 연결해 주세요.');
     if (this.globalActive >= this.options.globalActive) throw new Error('동시에 실행 중인 작업이 많습니다. 잠시 후 다시 시도하세요.');
     if (this.globalStarts.length >= this.options.globalStartsPerWindow) throw new Error('전체 작업 시작 한도에 도달했습니다. 잠시 후 다시 시도하세요.');
-    if (this.tokenTotal(this.globalTokens) >= this.options.globalTokensPerWindow
-      || this.globalTokens.length >= CHAT_RUN_MAX_HISTORY_SAMPLES) {
-      throw new Error('전체 AI 토큰 안전 한도에 도달했습니다. 사용량 창이 갱신된 뒤 다시 시도하세요.');
-    }
 
     let state = this.principals.get(key);
     let created = false;
@@ -317,97 +391,144 @@ export class ChatRunAdmissionPolicy {
       if (this.principals.size >= this.options.maxPrincipals) {
         throw new Error('활성 기기별 작업 예산이 가득 찼습니다. 잠시 후 다시 시도하세요.');
       }
-      state = { kind, active: 0, reserved: 0, starts: [], tokens: [], lastSeen: now };
+      state = { kind, active: 0, providerCallsInFlight: 0, reserved: 0, starts: [], tokens: [], auditTokens: [], lastSeen: now };
       this.principals.set(key, state);
       created = true;
     }
     state.lastSeen = now;
     const activeLimit = kind === 'admin' ? this.options.adminActive : this.options.linkedActive;
     const startLimit = kind === 'admin' ? this.options.adminStartsPerWindow : this.options.linkedStartsPerWindow;
-    const tokenLimit = kind === 'admin' ? this.options.adminTokensPerWindow : this.options.linkedTokensPerWindow;
     const reject = (message: string): never => {
-      if (created && state?.active === 0 && state.starts.length === 0 && state.tokens.length === 0) this.principals.delete(key);
+      if (created && state?.active === 0 && state.starts.length === 0 && state.tokens.length === 0 && state.auditTokens.length === 0) this.principals.delete(key);
       throw new Error(message);
     };
     if (state.active >= activeLimit) reject('이 기기에서 동시에 실행 중인 작업이 많습니다. 기존 작업을 완료하거나 중지해 주세요.');
     if (state.starts.length >= startLimit) reject('이 기기의 작업 시작 한도에 도달했습니다. 잠시 후 다시 시도하세요.');
-    if (this.tokenTotal(state.tokens) >= tokenLimit || state.tokens.length >= CHAT_RUN_MAX_HISTORY_SAMPLES) {
-      reject('이 기기의 AI 토큰 안전 한도에 도달했습니다. 사용량 창이 갱신된 뒤 다시 시도하세요.');
-    }
-
-    // Hold a complete per-run allowance before the provider can start. The
-    // principal and global shares are intentionally derived from the active
-    // limits, so even a worst-case set of simultaneous runs cannot reserve
-    // beyond either sliding-window token ceiling.
-    const globalRunShare = Math.max(1, Math.floor(this.options.globalTokensPerWindow / this.options.globalActive));
-    const principalRunShare = Math.max(1, Math.floor(tokenLimit / activeLimit));
-    const globalAvailable = Math.max(0, this.options.globalTokensPerWindow - this.tokenTotal(this.globalTokens) - this.globalReserved);
-    const principalAvailable = Math.max(0, tokenLimit - this.tokenTotal(state.tokens) - state.reserved);
-    // Near the end of a window, admit a smaller final run instead of making a
-    // fixed share strand safe remaining capacity. Its model-call estimates
-    // still have to fit atomically before any request leaves the process.
-    const tokenBudget = Math.min(globalRunShare, principalRunShare, globalAvailable, principalAvailable);
-    if (tokenBudget <= 0) {
-      reject('전체 AI 토큰 예약 한도에 도달했습니다. 실행 중인 작업이 끝나거나 사용량 창이 갱신된 뒤 다시 시도하세요.');
-    }
-
+    let tokenPolicy: ConversationTokenPolicy = 'adaptive';
+    let budget = this.adaptiveBudget({
+      tokenPolicy: 'adaptive', complexity: 0, executionMode: 'single', reasoningEffort: 'auto',
+      plannedModelCalls: 1, hasTools: false, inputBytes: 0,
+    });
+    let granted = budget.initial;
+    let reservedCeiling = budget.ceiling;
     this.globalActive += 1;
-    this.globalReserved += tokenBudget;
+    this.globalReserved += reservedCeiling;
     state.active += 1;
-    state.reserved += tokenBudget;
+    state.reserved += reservedCeiling;
     this.globalStarts.push(now);
     state.starts.push(now);
     const leaseEpoch = this.epoch;
     let finished = false;
     let callStarted = false;
+    let callsReserved = 0;
     let callSpent = 0;
     let callPending = 0;
     return {
-      tokenBudget,
+      get tokenBudget() { return tokenPolicy === 'audit-only' ? Number.MAX_SAFE_INTEGER : budget.ceiling; },
+      get tokenPolicy() { return tokenPolicy; },
+      configureModelBudget: (profile) => {
+        if (finished || leaseEpoch !== this.epoch) throw new Error('종료된 모델 실행 예산은 다시 구성할 수 없습니다.');
+        if (callStarted) throw new Error('모델 호출이 시작된 뒤에는 실행 예산을 바꿀 수 없습니다.');
+        // UI gating is convenience only. The policy itself makes remote
+        // attempts fail safe even if an RPC validation is accidentally missed.
+        tokenPolicy = profile.tokenPolicy === 'audit-only' && auth.isAdmin && capabilities.allowAuditOnly === true
+          ? 'audit-only'
+          : 'adaptive';
+        budget = this.adaptiveBudget({ ...profile, tokenPolicy });
+        granted = budget.initial;
+        const nextReserved = tokenPolicy === 'adaptive' ? budget.ceiling : 0;
+        const delta = nextReserved - reservedCeiling;
+        this.globalReserved = Math.max(0, this.globalReserved + delta);
+        state!.reserved = Math.max(0, state!.reserved + delta);
+        reservedCeiling = nextReserved;
+      },
+      noteModelProgress: (_kind) => {
+        if (finished || leaseEpoch !== this.epoch || tokenPolicy === 'audit-only') return;
+        granted = Math.min(budget.ceiling, granted + budget.progressStep);
+      },
       reserveModelCall: (kind, maximumTokens) => {
         if (finished || leaseEpoch !== this.epoch) throw new Error('종료된 모델 실행 예산은 다시 사용할 수 없습니다.');
         const requested = Number.isFinite(maximumTokens)
-          ? Math.max(1, Math.floor(maximumTokens))
-          : tokenBudget;
-        // Native coding CLIs may perform an opaque internal agent loop and do
-        // not reliably report partial usage. Give such a call the entire
-        // remaining allowance, then conservatively debit it when usage is
-        // absent. API calls use a request-specific, output-capped estimate.
-        const remaining = Math.max(0, tokenBudget - callSpent - callPending);
-        const reservation = kind === 'native' ? remaining : requested;
-        if (reservation <= 0 || reservation > remaining) {
-          throw new Error('이 작업의 AI 토큰 예약 한도에 도달했습니다. 새 작업으로 계속해 주세요.');
+          ? Math.max(1, Math.min(this.options.maxRecordedTokens, Math.floor(maximumTokens)))
+          : budget.progressStep;
+        let reservation: number;
+        if (tokenPolicy === 'audit-only') {
+          // Native CLIs often omit usage. Record a finite task-shaped fallback
+          // rather than Number.MAX_SAFE_INTEGER, but never stop for token use.
+          reservation = kind === 'native' ? budget.initial : requested;
+        } else {
+          reservation = kind === 'native'
+            ? Math.max(0, granted - callSpent - callPending)
+            : requested;
+          const desired = Math.min(this.options.maxRecordedTokens, callSpent + callPending + reservation);
+          // Configured multi-model workflows may consume their planned calls
+          // without fake progress events. A single tool loop grows only after
+          // noteModelProgress() observes a completed tool round or steering.
+          if (desired > granted && callsReserved < budget.plannedCalls) granted = Math.min(budget.ceiling, desired);
+          if (reservation <= 0 || desired > granted || desired > budget.ceiling) {
+            throw new ModelBudgetExceededError('적응형 AI 예산이 소진되었습니다. 반복 없이 실제 작업 진전이 있어야 계속 확장할 수 있습니다.');
+          }
+        }
+        const principalProviderLimit = state!.kind === 'admin'
+          ? this.options.adminProviderCallsInFlight
+          : this.options.linkedProviderCallsInFlight;
+        if (this.globalProviderCallsInFlight >= this.options.globalProviderCallsInFlight) {
+          throw new ModelBudgetExceededError('동시에 실행 중인 전체 AI 제공자 호출이 많습니다. 기존 호출이 끝난 뒤 다시 시도하세요.');
+        }
+        if (state!.providerCallsInFlight >= principalProviderLimit) {
+          throw new ModelBudgetExceededError('이 기기에서 동시에 실행 중인 AI 제공자 호출이 많습니다. 기존 호출이 끝난 뒤 다시 시도하세요.');
         }
         callStarted = true;
-        callPending += reservation;
+        callsReserved += 1;
+        callPending = Math.min(this.options.maxRecordedTokens, callPending + reservation);
+        this.globalProviderCallsInFlight += 1;
+        state!.providerCallsInFlight += 1;
+        let providerCallReleased = false;
+        const releaseProviderCall = () => {
+          if (providerCallReleased) return;
+          providerCallReleased = true;
+          // Global in-flight accounting spans clear()/restart epochs: an old
+          // request remains real outbound work until its own promise settles.
+          this.globalProviderCallsInFlight = Math.max(0, this.globalProviderCallsInFlight - 1);
+          if (leaseEpoch !== this.epoch) return;
+          const current = this.principals.get(key);
+          if (current === state) current.providerCallsInFlight = Math.max(0, current.providerCallsInFlight - 1);
+        };
         let callFinished = false;
+        let settlementAccepted = true;
+        let accountedTokens = 0;
         return {
+          get accountedTokens() { return accountedTokens; },
           finish: (usage) => {
-            if (callFinished) return callSpent <= tokenBudget;
+            if (callFinished) return settlementAccepted;
             callFinished = true;
+            releaseProviderCall();
             callPending = Math.max(0, callPending - reservation);
-            const reported = this.usageTokens(usage);
-            // A zero report from streaming-compatible or native providers is
-            // indistinguishable from missing usage. Retain the reservation so
-            // aborts, transport errors and non-reporting CLIs cannot be free.
-            callSpent = Math.min(
-              Number.MAX_SAFE_INTEGER,
-              callSpent + (reported > 0 ? reported : reservation),
-            );
-            // `reservation` is an admission estimate, not a provider quota.
-            // The complete tokenBudget is already held atomically against the
-            // principal and global limits, so an honest CLI's hidden system
-            // prompt may exceed this one estimate without making the run
-            // unsafe. Include concurrent pending calls when enforcing the
-            // actual ceiling; a true runaway report still fails closed and is
-            // retained as debt by finish().
-            return callSpent <= tokenBudget - callPending;
+            const report = this.usageReport(usage);
+            // Metering from arbitrary compatible endpoints is untrusted even
+            // when syntactically valid. Never release the host-owned pre-call
+            // reservation; a larger valid report still raises the debit.
+            const charged = report.valid ? Math.max(reservation, report.tokens) : reservation;
+            accountedTokens = charged;
+            callSpent = Math.min(this.options.maxRecordedTokens, callSpent + charged);
+            if (tokenPolicy === 'audit-only') return settlementAccepted;
+            // An invalid or truly excessive provider report fails closed. A
+            // legitimate hidden CLI prompt may exceed the call estimate as long
+            // as aggregate run use remains inside the adaptive ceiling.
+            // Parallel calls have already passed atomic reservation. Judge
+            // their conservative aggregate as each settles; a pending
+            // estimate must not create another hidden-context false positive.
+            settlementAccepted = report.valid && callSpent <= budget.ceiling;
+            return settlementAccepted;
           },
         };
       },
       finish: (usage) => {
         if (finished) return;
         finished = true;
+        // A top-level workflow ending is not evidence that every parallel
+        // provider request ended. Call leases alone own provider slots and
+        // release them only after their provider promise settles or rejects.
         // stop()/clear() begins a new accounting epoch. A late provider
         // completion from the stopped epoch must not repopulate cleared maps.
         if (leaseEpoch !== this.epoch) return;
@@ -416,22 +537,27 @@ export class ChatRunAdmissionPolicy {
         const finishedAt = this.options.now();
         this.prune(finishedAt);
         this.globalActive = Math.max(0, this.globalActive - 1);
-        this.globalReserved = Math.max(0, this.globalReserved - tokenBudget);
+        this.globalReserved = Math.max(0, this.globalReserved - reservedCeiling);
         current.active = Math.max(0, current.active - 1);
-        current.reserved = Math.max(0, current.reserved - tokenBudget);
+        current.reserved = Math.max(0, current.reserved - reservedCeiling);
         current.lastSeen = finishedAt;
-        const reportedTotal = this.usageTokens(usage);
+        const reportedTotal = this.usageReport(usage).tokens;
         // Real AgentLoop calls settle every provider invocation incrementally.
         // If an alternate loop throws without doing so, keep the top-level
         // reservation as a fail-closed debit because provider use is unknown.
         const tokens = Math.max(
           reportedTotal,
           callSpent + callPending,
-          !usage && !callStarted ? tokenBudget : 0,
+          !usage && !callStarted ? granted : 0,
         );
         if (tokens > 0) {
-          this.globalTokens.push({ at: finishedAt, count: tokens });
-          current.tokens.push({ at: finishedAt, count: tokens });
+          if (tokenPolicy === 'audit-only') {
+            this.pushUsage(this.globalAuditTokens, finishedAt, tokens);
+            this.pushUsage(current.auditTokens, finishedAt, tokens);
+          } else {
+            this.pushUsage(this.globalTokens, finishedAt, tokens);
+            this.pushUsage(current.tokens, finishedAt, tokens);
+          }
         }
       },
     };
@@ -441,28 +567,79 @@ export class ChatRunAdmissionPolicy {
     this.epoch += 1;
     this.principals.clear();
     this.globalActive = 0;
+    // Do not erase live provider calls. Their idempotent call leases decrement
+    // this counter after the underlying request actually settles, even when it
+    // belongs to the prior accounting epoch.
     this.globalReserved = 0;
     this.globalStarts = [];
     this.globalTokens = [];
+    this.globalAuditTokens = [];
   }
 
   /** Narrow diagnostics for regression tests; never includes link IDs. */
-  snapshot(): { principalCount: number; globalActive: number; globalReserved: number; globalStarts: number; globalTokens: number } {
+  snapshot(): { principalCount: number; globalActive: number; globalProviderCallsInFlight: number; globalReserved: number; globalStarts: number; globalTokens: number; globalAuditTokens: number } {
     this.prune(this.options.now());
     return {
       principalCount: this.principals.size,
       globalActive: this.globalActive,
+      globalProviderCallsInFlight: this.globalProviderCallsInFlight,
       globalReserved: this.globalReserved,
       globalStarts: this.globalStarts.length,
       globalTokens: this.tokenTotal(this.globalTokens),
+      globalAuditTokens: this.tokenTotal(this.globalAuditTokens),
     };
   }
 
-  private usageTokens(usage?: Pick<ChatUsage, 'promptTokens' | 'completionTokens'>): number {
-    if (!usage) return 0;
-    const prompt = Number.isFinite(usage.promptTokens) ? Math.max(0, Math.floor(usage.promptTokens)) : 0;
-    const completion = Number.isFinite(usage.completionTokens) ? Math.max(0, Math.floor(usage.completionTokens)) : 0;
-    return Math.min(Number.MAX_SAFE_INTEGER, prompt + completion);
+  private adaptiveBudget(profile: ModelBudgetProfile): AdaptiveRunBudget {
+    const complexity = Number.isFinite(profile.complexity) ? Math.max(0, Math.min(8, Math.floor(profile.complexity))) : 0;
+    const base = complexity <= 1
+      ? this.options.adaptiveSimpleCallTokens
+      : complexity <= 4
+        ? this.options.adaptiveStandardCallTokens
+        : this.options.adaptiveComplexCallTokens;
+    const effortPercent: Record<ReasoningEffort, number> = {
+      none: 80, low: 80, auto: 100, medium: 125, high: 160, xhigh: 220, max: 300,
+    };
+    const effort = effortPercent[profile.reasoningEffort] ?? 100;
+    const inputBytes = Number.isFinite(profile.inputBytes) ? Math.max(0, Math.floor(profile.inputBytes)) : 0;
+    const contextFloor = Math.min(this.options.adaptiveAbsoluteMaxTokens, inputBytes + 16_384);
+    const progressStep = Math.min(
+      this.options.adaptiveAbsoluteMaxTokens,
+      Math.max(contextFloor, Math.ceil(base * effort / 100)),
+    );
+    const plannedCalls = Math.max(1, Math.min(64, Math.floor(profile.plannedModelCalls) || 1));
+    const initial = Math.min(this.options.adaptiveAbsoluteMaxTokens, progressStep * plannedCalls);
+    const progressCalls = profile.hasTools
+      ? this.options.adaptiveToolProgressCalls
+      : profile.executionMode === 'single' ? 0 : 2;
+    const ceiling = Math.min(
+      this.options.adaptiveAbsoluteMaxTokens,
+      Math.max(initial, progressStep * (plannedCalls + progressCalls)),
+    );
+    return { initial: Math.max(1, initial), ceiling: Math.max(1, ceiling), progressStep: Math.max(1, progressStep), plannedCalls };
+  }
+
+  private usageReport(
+    usage?: Pick<ProviderUsage, 'promptTokens' | 'completionTokens' | 'reportStatus'>,
+  ): { tokens: number; valid: boolean } {
+    if (!usage) return { tokens: 0, valid: true };
+    // Provider adapters normalize malformed counters to zero so storage stays
+    // finite. Preserve their trust signal here: an invalid report must not be
+    // mistaken for a legitimate zero-token call. Missing metering remains a
+    // supported case and is charged at the conservative reservation instead.
+    if (usage.reportStatus === 'invalid') return { tokens: 0, valid: false };
+    const values = [usage.promptTokens, usage.completionTokens];
+    const valid = values.every((value) => value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0));
+    const tokens = values.reduce<number>((total, value) => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return total;
+      return Math.min(this.options.maxRecordedTokens, total + Math.floor(value));
+    }, 0);
+    return { tokens, valid };
+  }
+
+  private pushUsage(samples: Array<{ at: number; count: number }>, at: number, count: number): void {
+    samples.push({ at, count: Math.min(this.options.maxRecordedTokens, Math.max(0, Math.floor(count))) });
+    if (samples.length > CHAT_RUN_MAX_HISTORY_SAMPLES) samples.splice(0, samples.length - CHAT_RUN_MAX_HISTORY_SAMPLES);
   }
 
   private tokenTotal(samples: Array<{ at: number; count: number }>): number {
@@ -471,11 +648,13 @@ export class ChatRunAdmissionPolicy {
 
   private prune(now: number): void {
     this.globalStarts = this.globalStarts.filter((at) => now - at < this.options.startWindowMs);
-    this.globalTokens = this.globalTokens.filter((sample) => now - sample.at < this.options.tokenWindowMs);
+    this.globalTokens = this.globalTokens.filter((sample) => now - sample.at < this.options.auditWindowMs);
+    this.globalAuditTokens = this.globalAuditTokens.filter((sample) => now - sample.at < this.options.auditWindowMs);
     for (const [key, state] of this.principals) {
       state.starts = state.starts.filter((at) => now - at < this.options.startWindowMs);
-      state.tokens = state.tokens.filter((sample) => now - sample.at < this.options.tokenWindowMs);
-      if (state.active === 0 && state.reserved === 0 && state.starts.length === 0 && state.tokens.length === 0) this.principals.delete(key);
+      state.tokens = state.tokens.filter((sample) => now - sample.at < this.options.auditWindowMs);
+      state.auditTokens = state.auditTokens.filter((sample) => now - sample.at < this.options.auditWindowMs);
+      if (state.active === 0 && state.providerCallsInFlight === 0 && state.reserved === 0 && state.starts.length === 0 && state.tokens.length === 0 && state.auditTokens.length === 0) this.principals.delete(key);
     }
   }
 }
@@ -526,6 +705,8 @@ export class AgentServer {
   private httpServer: HttpServer | null = null;
   private readonly activeHttpTransfers = new Set<AbortController>();
   private readonly wsUpgradeTickets = new WsUpgradeTickets();
+  /** Hash-only, memory-only proofs issued directly to the embedded Electron main process. */
+  private readonly desktopAuditProofs = new Map<string, number>();
   private hub: WsHub | null = null;
   private pinLimiter = new PinLimiter();
   /** Explicitly-created, memory-only enrollment code for an unattended handoff. */
@@ -672,6 +853,47 @@ export class AgentServer {
     // separate. Even a full device link cannot edit providers, plugins or
     // global settings unless it uses the local administrator secret.
     return { isAdmin: false, linkId: link.id, permissionCap: link.permissionCap };
+  }
+
+  /**
+   * In-process desktop bootstrap only. This method is not reachable through
+   * HTTP, WebSocket RPC or preload IPC; Electron main attaches the returned
+   * one-use value to its private auth frame and then discards it.
+   */
+  issueDesktopAuditProof(): string {
+    if (!this.httpServer) throw new Error('로컬 에이전트가 실행 중일 때만 네이티브 감사 권한을 발급할 수 있습니다.');
+    const now = Date.now();
+    this.pruneDesktopAuditProofs(now);
+    if (this.desktopAuditProofs.size >= DESKTOP_AUDIT_PROOF_MAX_PENDING) {
+      throw new Error('미사용 네이티브 감사 권한이 너무 많습니다. 잠시 후 다시 연결해 주세요.');
+    }
+    const proof = randomBytes(32).toString('base64url');
+    this.desktopAuditProofs.set(hashToken(proof), now + DESKTOP_AUDIT_PROOF_TTL_MS);
+    return proof;
+  }
+
+  private authenticateWebSocket(candidate: string, desktopAuditProof?: string): AuthContext | null {
+    // Consume before authenticating the bearer so a proof presented with the
+    // wrong secret cannot be recovered and replayed with the right one.
+    const nativeAuditOnly = this.consumeDesktopAuditProof(desktopAuditProof);
+    const auth = this.authenticate(candidate);
+    if (!auth) return null;
+    return nativeAuditOnly && auth.isAdmin ? { ...auth, nativeAuditOnly: true } : auth;
+  }
+
+  private consumeDesktopAuditProof(proof: string | undefined, now = Date.now()): boolean {
+    this.pruneDesktopAuditProofs(now);
+    if (typeof proof !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(proof)) return false;
+    const digest = hashToken(proof);
+    const expiresAt = this.desktopAuditProofs.get(digest);
+    this.desktopAuditProofs.delete(digest);
+    return typeof expiresAt === 'number' && expiresAt > now;
+  }
+
+  private pruneDesktopAuditProofs(now = Date.now()): void {
+    for (const [digest, expiresAt] of this.desktopAuditProofs) {
+      if (expiresAt <= now) this.desktopAuditProofs.delete(digest);
+    }
   }
 
   private bindRemoteHandoffBootstrap(value: unknown): boolean {
@@ -1491,12 +1713,86 @@ export class AgentServer {
     if (permissionMode === 'read-only') throw new Error('이 기기는 읽기 전용입니다. AI 작업을 시작할 수 없습니다.');
     const admission = this.chatRunAdmission.acquire(auth);
     let usage: ChatUsage | undefined;
+    let estimatedCost = 0;
+    let costObservedByCall = false;
+    let observedRoute: { providerId: string; providerLabel: string; model: string } | undefined;
+    let mixedObservedRoutes = false;
+    let telemetryRecorded = false;
+    const recordTelemetryOnce = (trace: Parameters<TelemetryStore['record']>[0]): void => {
+      if (telemetryRecorded) return;
+      telemetryRecorded = true;
+      try { this.telemetry.record(trace); }
+      catch (error) {
+        this.logger.error(`failed to persist REST chat telemetry: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    const startedAt = Date.now();
     try {
       const result = await this.loop.run([], text, {
+        configureModelBudget: (profile) => admission.configureModelBudget(profile),
+        noteModelProgress: (kind) => admission.noteModelProgress(kind),
         reserveModelCall: (kind, maximumTokens) => admission.reserveModelCall(kind, maximumTokens),
-      }, this.plugins.aiTools(text), { permissionMode });
-      usage = result.usage;
+        onModelUsage: (delta, source) => {
+          usage = accumulateProviderUsage(usage, delta);
+          if (!source) return;
+          if (observedRoute && (observedRoute.providerId !== source.providerId || observedRoute.model !== source.model)) {
+            mixedObservedRoutes = true;
+          } else if (!observedRoute) {
+            observedRoute = source;
+          }
+          const providerConfig = this.config.providers.find((provider) => provider.id === source.providerId);
+          estimatedCost += ((delta.promptTokens * (providerConfig?.inputCostPerMillion ?? 0))
+            + (delta.completionTokens * (providerConfig?.outputCostPerMillion ?? 0))) / 1_000_000;
+          costObservedByCall = true;
+        },
+      }, this.plugins.aiTools(text), { permissionMode, tokenPolicy: 'adaptive' });
+      usage ??= result.usage;
+      if (!costObservedByCall) {
+        const providerConfig = result.route
+          ? this.config.providers.find((provider) => provider.id === result.route?.providerId)
+          : undefined;
+        estimatedCost = ((usage.promptTokens * (providerConfig?.inputCostPerMillion ?? 0))
+          + (usage.completionTokens * (providerConfig?.outputCostPerMillion ?? 0))) / 1_000_000;
+      }
+      recordTelemetryOnce({
+        id: randomUUID(), at: Date.now(),
+        providerId: result.route?.providerId,
+        providerLabel: result.route?.providerLabel,
+        model: result.route?.model,
+        role: result.route?.role,
+        effort: result.route?.effort,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        accountedTokens: usage.accountedTokens,
+        cachedPromptTokens: usage.cachedPromptTokens,
+        cacheWritePromptTokens: usage.cacheWritePromptTokens,
+        reasoningTokens: usage.reasoningTokens,
+        toolCalls: result.turns.reduce((sum, turn) => sum + (turn.toolCalls?.length ?? 0), 0),
+        latencyMs: Date.now() - startedAt,
+        estimatedCost,
+        ok: true,
+      });
       return { text: result.text };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      recordTelemetryOnce({
+        id: randomUUID(), at: Date.now(),
+        ...(!mixedObservedRoutes && observedRoute ? observedRoute : {}),
+        promptTokens: usage?.promptTokens ?? 0,
+        completionTokens: usage?.completionTokens ?? 0,
+        accountedTokens: usage?.accountedTokens,
+        cachedPromptTokens: usage?.cachedPromptTokens,
+        cacheWritePromptTokens: usage?.cacheWritePromptTokens,
+        reasoningTokens: usage?.reasoningTokens,
+        toolCalls: 0,
+        latencyMs: Date.now() - startedAt,
+        // Only normalized provider-reported prompt/completion deltas enter
+        // this total; conservative accountedTokens never affect cost.
+        estimatedCost,
+        ok: false,
+        error: message.slice(0, 500),
+      });
+      throw error;
     } finally {
       admission.finish(usage);
     }
@@ -1580,7 +1876,13 @@ export class AgentServer {
     this.boundPort = addr.port;
     this.startedAt = Date.now();
 
-    this.hub = new WsHub(this.httpServer, this.handlers(), (s) => this.authenticate(s), this.logger, this.wsUpgradeTickets);
+    this.hub = new WsHub(
+      this.httpServer,
+      this.handlers(),
+      (secret, desktopAuditProof) => this.authenticateWebSocket(secret, desktopAuditProof),
+      this.logger,
+      this.wsUpgradeTickets,
+    );
     this.scheduler.start();
 
     // Server-wide pushes (only to authenticated clients). Keep every disposer
@@ -1636,6 +1938,7 @@ export class AgentServer {
     }
     this.activeHttpTransfers.clear();
     this.wsUpgradeTickets.clear();
+    this.desktopAuditProofs.clear();
     this.chatRunAdmission.clear();
     this.hub?.close();
     this.hub = null;
@@ -1711,6 +2014,18 @@ export class AgentServer {
         effectiveMode(requested ?? fallback, client.state.auth?.permissionCap),
       )
     );
+    const requestedTokenPolicy = (value: unknown): ConversationTokenPolicy | undefined => {
+      if (value === undefined) return undefined;
+      if (value === 'adaptive' || value === 'audit-only') return value;
+      throw new Error('대화 토큰 정책이 올바르지 않습니다.');
+    };
+    const clientTokenPolicy = (
+      client: WsClient,
+      requested?: ConversationTokenPolicy,
+      fallback: ConversationTokenPolicy = 'adaptive',
+    ): ConversationTokenPolicy => (
+      canUseAuditOnly(client) && (requested ?? fallback) === 'audit-only' ? 'audit-only' : 'adaptive'
+    );
     const assertContentWrite = (client: WsClient): void => {
       if (clientPermission(client) === 'read-only') {
         throw new Error('이 기기는 읽기 전용입니다. 대화·기억·예약 데이터를 변경할 수 없습니다.');
@@ -1779,6 +2094,7 @@ export class AgentServer {
       assertAdmin(client);
       this.remoteHandoff = null;
       this.remoteBootstrapChallenges.clear();
+      this.desktopAuditProofs.clear();
       const secret = this.config.regenerateSecret();
       const pin = this.config.regeneratePin();
       this.pinLimiter.reset();
@@ -1912,7 +2228,11 @@ export class AgentServer {
       assertContentWrite(client);
       const input = p(params) as ConversationCreateInput;
       const requested = ['read-only', 'ask', 'workspace', 'full'].includes(String(input.permissionMode)) ? input.permissionMode : undefined;
-      const created = this.conversations.create({ ...input, permissionMode: clientPermission(client, requested) });
+      const created = this.conversations.create({
+        ...input,
+        permissionMode: clientPermission(client, requested),
+        tokenPolicy: clientTokenPolicy(client, requestedTokenPolicy(input.tokenPolicy)),
+      });
       this.bus.emit('conversations.changed', this.conversations.list());
       return created;
     });
@@ -1935,6 +2255,9 @@ export class AgentServer {
         routingPresetId: body.routingPresetId === null || typeof body.routingPresetId === 'string' ? body.routingPresetId : undefined,
         workspaceId: body.workspaceId === null || typeof body.workspaceId === 'string' ? body.workspaceId : undefined,
         permissionMode: requestedPermission ? clientPermission(client, requestedPermission) : undefined,
+        tokenPolicy: requestedTokenPolicy(body.tokenPolicy) === undefined
+          ? undefined
+          : clientTokenPolicy(client, requestedTokenPolicy(body.tokenPolicy)),
       });
       this.bus.emit('conversations.changed', this.conversations.list());
       return item;
@@ -2005,14 +2328,22 @@ export class AgentServer {
       assertContentWrite(client);
       const auth = client.state.auth;
       if (!auth) throw new Error('인증되지 않은 연결입니다.');
-      const admission = this.chatRunAdmission.acquire(auth);
-      let chargedUsage: ChatUsage | undefined;
-      return (async () => {
       const body = p(params);
-      const text = str(body.text);
+      // Validate attacker-controlled policy input and cheap busy conditions
+      // before consuming an admission-window start.
+      requestedTokenPolicy(body.tokenPolicy);
       const session = client.state.chat;
       if (session.busy) throw new Error('chat already running');
-      let conversationId = str(body.conversationId) || session.conversationId;
+      const requestedConversationId = str(body.conversationId) || session.conversationId;
+      if (requestedConversationId && this.busyConversations.has(requestedConversationId)) {
+        throw new Error('conversation is already running on another client');
+      }
+      const admission = this.chatRunAdmission.acquire(auth, { allowAuditOnly: canUseAuditOnly(client) });
+      let chargedUsage: ChatUsage | undefined;
+      let usagePersisted = false;
+      return (async () => {
+      const text = str(body.text);
+      let conversationId = requestedConversationId;
       if (!conversationId || !this.conversations.get(conversationId)) {
         const requestedPermission = ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : undefined;
         conversationId = this.conversations.create({
@@ -2021,6 +2352,7 @@ export class AgentServer {
           providerModel: typeof body.providerModel === 'string' ? body.providerModel : undefined,
           routingPresetId: typeof body.routingPresetId === 'string' ? body.routingPresetId : undefined,
           permissionMode: clientPermission(client, requestedPermission),
+          tokenPolicy: clientTokenPolicy(client, requestedTokenPolicy(body.tokenPolicy)),
         }).id;
       }
       if (this.busyConversations.has(conversationId)) throw new Error('conversation is already running on another client');
@@ -2038,6 +2370,14 @@ export class AgentServer {
           ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : conversation.permissionMode,
           client.state.auth?.permissionCap,
         ),
+      );
+      // `audit-only` requires the destination's embedded native-main
+      // capability. Browsers, linked clients and remote administrators always
+      // run adaptively even when opening a conversation previously marked so.
+      const effectiveTokenPolicy = clientTokenPolicy(
+        client,
+        requestedTokenPolicy(body.tokenPolicy),
+        conversation.tokenPolicy,
       );
       this.busyConversations.add(conversationId);
       session.begin();
@@ -2076,7 +2416,10 @@ export class AgentServer {
               sendRunEvent('chat.status', { conversationId, status });
             },
             takeSteering: () => session.takeSteering(),
+            configureModelBudget: (profile) => admission.configureModelBudget(profile),
+            noteModelProgress: (kind) => admission.noteModelProgress(kind),
             reserveModelCall: (kind, maximumTokens) => admission.reserveModelCall(kind, maximumTokens),
+            onModelUsage: (delta) => { chargedUsage = accumulateProviderUsage(chargedUsage, delta); },
             confirm: (req) => session.askConfirm(sendRunEvent, {
               ...req,
               conversationId,
@@ -2093,17 +2436,20 @@ export class AgentServer {
             routing: conversationRouting,
             workspacePath: workspace?.path,
             cacheKey: `mrrobot:${conversationId}`,
+            tokenPolicy: effectiveTokenPolicy,
           },
         );
-        chargedUsage = result.usage;
+        chargedUsage ??= result.usage;
         session.turns = result.turns;
         const updated = this.conversations.appendResult(conversationId, result.turns, result.usage);
+        usagePersisted = true;
         const providerConfig = result.route ? this.config.providers.find((provider) => provider.id === result.route?.providerId) : undefined;
         const estimatedCost = ((result.usage.promptTokens * (providerConfig?.inputCostPerMillion ?? 0)) + (result.usage.completionTokens * (providerConfig?.outputCostPerMillion ?? 0))) / 1_000_000;
         this.telemetry.record({
           id: randomUUID(), at: Date.now(), conversationId, providerId: result.route?.providerId, providerLabel: result.route?.providerLabel,
           model: result.route?.model, role: result.route?.role, effort: result.route?.effort,
           promptTokens: result.usage.promptTokens, completionTokens: result.usage.completionTokens,
+          accountedTokens: result.usage.accountedTokens,
           cachedPromptTokens: result.usage.cachedPromptTokens,
           cacheWritePromptTokens: result.usage.cacheWritePromptTokens,
           reasoningTokens: result.usage.reasoningTokens,
@@ -2121,7 +2467,26 @@ export class AgentServer {
         const message = session.signal()?.aborted || /^작업이 중지되었습니다\.?$/i.test(rawMessage.trim())
           ? '작업이 중지되었습니다.'
           : rawMessage;
-        this.telemetry.record({ id: randomUUID(), at: Date.now(), conversationId, promptTokens: 0, completionTokens: 0, toolCalls: 0, latencyMs: Date.now() - runStartedAt, estimatedCost: 0, ok: false, error: message.slice(0, 500) });
+        if (!usagePersisted && hasRecordedUsage(chargedUsage)) {
+          try {
+            this.conversations.appendUsage(conversationId, chargedUsage);
+            usagePersisted = true;
+            this.bus.emit('conversations.changed', this.conversations.list());
+          } catch (usageError) {
+            this.logger.error(`failed to persist partial provider usage: ${usageError instanceof Error ? usageError.message : String(usageError)}`);
+          }
+        }
+        this.telemetry.record({
+          id: randomUUID(), at: Date.now(), conversationId,
+          promptTokens: chargedUsage?.promptTokens ?? 0,
+          completionTokens: chargedUsage?.completionTokens ?? 0,
+          accountedTokens: chargedUsage?.accountedTokens,
+          cachedPromptTokens: chargedUsage?.cachedPromptTokens,
+          cacheWritePromptTokens: chargedUsage?.cacheWritePromptTokens,
+          reasoningTokens: chargedUsage?.reasoningTokens,
+          toolCalls: 0, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
+          ok: false, error: message.slice(0, 500),
+        });
         sendRunEvent('chat.error', { conversationId, message });
         return { ok: false, error: message };
       } finally {
