@@ -9,6 +9,7 @@ import type {
   ConversationStatus,
   ConversationSummary,
   ConversationSyncMergeResult,
+  ConversationTokenPolicy,
   PermissionMode,
   ReasoningEffort,
 } from '@mr-robot/shared';
@@ -27,6 +28,7 @@ interface StoredConversation {
   routingPresetId?: string;
   workspaceId?: string;
   permissionMode?: PermissionMode;
+  tokenPolicy?: ConversationTokenPolicy;
   summary?: string;
   compactedMessages: number;
   turns: Turn[];
@@ -54,6 +56,7 @@ const emptyUsage = (): ChatUsage => ({ promptTokens: 0, completionTokens: 0 });
 const conversationStatuses = new Set<ConversationStatus>(['active', 'archived']);
 const reasoningEfforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']);
 const permissionModes: PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
+const tokenPolicies = new Set<ConversationTokenPolicy>(['adaptive', 'audit-only']);
 const turnRoles = new Set<Turn['role']>(['system', 'user', 'assistant', 'tool']);
 const MAX_SYNC_CONVERSATIONS = 5_000;
 const MAX_SYNC_CONVERSATION_BYTES = 32 * 1024 * 1024;
@@ -61,6 +64,7 @@ const MAX_SYNC_ANCESTORS = 64;
 const MAX_SUMMARY_BYTES = 64 * 1024;
 const MAX_CONVERSATION_TURNS = 512;
 const MAX_CONVERSATION_TURNS_BYTES = 4 * 1024 * 1024;
+const MAX_RECORDED_TOKEN_COUNT = 1_000_000_000_000;
 const SYNC_REVISION = /^[a-f0-9]{64}$/;
 
 function utf8Tail(value: string, maxBytes: number): string {
@@ -73,7 +77,7 @@ function utf8Tail(value: string, maxBytes: number): string {
 }
 
 function conversationRevision(item: StoredConversation): string {
-  // Access policy and workspace binding are destination-local security state.
+  // Access/token policies and workspace binding are destination-local state.
   // The id and wall-clock updatedAt are also excluded so a deterministic
   // conflict copy keeps the ancestry of the branch it protects.
   const content = {
@@ -91,6 +95,7 @@ function conversationRevision(item: StoredConversation): string {
     usage: {
       promptTokens: item.usage.promptTokens,
       completionTokens: item.usage.completionTokens,
+      accountedTokens: item.usage.accountedTokens ?? 0,
       cachedPromptTokens: item.usage.cachedPromptTokens ?? 0,
       cacheWritePromptTokens: item.usage.cacheWritePromptTokens ?? 0,
       reasoningTokens: item.usage.reasoningTokens ?? 0,
@@ -133,6 +138,15 @@ function safeNumber(value: unknown, label: string, min: number, max: number): nu
     throw new Error(`${label} 숫자가 올바르지 않습니다.`);
   }
   return value;
+}
+
+function addRecordedTokens(current: unknown, next: unknown): number {
+  const normalize = (value: unknown): number => (
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? Math.min(MAX_RECORDED_TOKEN_COUNT, Math.floor(value))
+      : 0
+  );
+  return Math.min(MAX_RECORDED_TOKEN_COUNT, normalize(current) + normalize(next));
 }
 
 function narrowPermission(requested: PermissionMode, ceiling: PermissionMode): PermissionMode {
@@ -192,16 +206,22 @@ function normalizeStoredConversation(raw: unknown, index: number): StoredConvers
   const createdAt = Math.min(safeNumber(source.createdAt, '대화 생성 시각', 0, 9_007_199_254_740_991), updatedAt);
   if (!reasoningEfforts.has(source.reasoningEffort as ReasoningEffort)) throw new Error('대화 추론 단계가 올바르지 않습니다.');
   const permissionMode = permissionModes.includes(source.permissionMode as PermissionMode) ? source.permissionMode as PermissionMode : 'ask';
+  const tokenPolicy = source.tokenPolicy === undefined
+    ? 'adaptive'
+    : tokenPolicies.has(source.tokenPolicy as ConversationTokenPolicy)
+      ? source.tokenPolicy as ConversationTokenPolicy
+      : (() => { throw new Error('대화 토큰 정책이 올바르지 않습니다.'); })();
   if (!Array.isArray(source.turns) || source.turns.length > MAX_CONVERSATION_TURNS) throw new Error('대화 메시지 수가 제한을 초과했습니다.');
   const turns = source.turns.map((turn, turnIndex) => normalizeTurn(turn, index, turnIndex));
   if (Buffer.byteLength(JSON.stringify(turns), 'utf8') > MAX_CONVERSATION_TURNS_BYTES) throw new Error('한 대화의 동기화 크기가 4MB를 초과했습니다.');
   const usageSource = source.usage && typeof source.usage === 'object' ? source.usage : emptyUsage();
   const usage: ChatUsage = {
-    promptTokens: safeNumber(usageSource.promptTokens ?? 0, '입력 토큰', 0, 1_000_000_000_000),
-    completionTokens: safeNumber(usageSource.completionTokens ?? 0, '출력 토큰', 0, 1_000_000_000_000),
-    cachedPromptTokens: safeNumber(usageSource.cachedPromptTokens ?? 0, '캐시 적중 토큰', 0, 1_000_000_000_000),
-    cacheWritePromptTokens: safeNumber(usageSource.cacheWritePromptTokens ?? 0, '캐시 기록 토큰', 0, 1_000_000_000_000),
-    reasoningTokens: safeNumber(usageSource.reasoningTokens ?? 0, '추론 토큰', 0, 1_000_000_000_000),
+    promptTokens: safeNumber(usageSource.promptTokens ?? 0, '입력 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
+    completionTokens: safeNumber(usageSource.completionTokens ?? 0, '출력 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
+    accountedTokens: safeNumber(usageSource.accountedTokens ?? 0, '감사 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
+    cachedPromptTokens: safeNumber(usageSource.cachedPromptTokens ?? 0, '캐시 적중 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
+    cacheWritePromptTokens: safeNumber(usageSource.cacheWritePromptTokens ?? 0, '캐시 기록 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
+    reasoningTokens: safeNumber(usageSource.reasoningTokens ?? 0, '추론 토큰', 0, MAX_RECORDED_TOKEN_COUNT),
   };
   const normalized: StoredConversation = {
     id,
@@ -216,6 +236,7 @@ function normalizeStoredConversation(raw: unknown, index: number): StoredConvers
     routingPresetId: boundedString(source.routingPresetId, '프리셋 ID', 256, true),
     workspaceId: boundedString(source.workspaceId, '작업 폴더 ID', 256, true),
     permissionMode,
+    tokenPolicy,
     summary: boundedString(source.summary, '대화 요약', MAX_SUMMARY_BYTES, true),
     compactedMessages: Math.floor(safeNumber(source.compactedMessages ?? 0, '압축 메시지 수', 0, 10_000_000)),
     turns,
@@ -276,6 +297,7 @@ function summarize(c: StoredConversation): ConversationSummary {
     routingPresetId: c.routingPresetId,
     workspaceId: c.workspaceId,
     permissionMode: c.permissionMode ?? 'ask',
+    tokenPolicy: c.tokenPolicy ?? 'adaptive',
     compactedMessages: c.compactedMessages,
   };
 }
@@ -482,7 +504,10 @@ export class ConversationStore {
     // store may legitimately exceed them and still has to be recoverable.
     const previous = this.items;
     this.items = structuredClone(value as StoredConversation[]);
-    for (const item of this.items) ensureSyncMetadata(item);
+    for (const item of this.items) {
+      item.tokenPolicy = tokenPolicies.has(item.tokenPolicy as ConversationTokenPolicy) ? item.tokenPolicy : 'adaptive';
+      ensureSyncMetadata(item);
+    }
     try {
       this.save();
     } catch (error) {
@@ -500,7 +525,12 @@ export class ConversationStore {
     for (const candidate of candidates) {
       const existingIndex = next.findIndex((item) => item.id === candidate.id);
       if (existingIndex < 0) {
-        next.push({ ...structuredClone(candidate), permissionMode: narrowPermission(candidate.permissionMode ?? 'ask', permissionCeiling), workspaceId: undefined });
+        next.push({
+          ...structuredClone(candidate),
+          permissionMode: narrowPermission(candidate.permissionMode ?? 'ask', permissionCeiling),
+          tokenPolicy: 'adaptive',
+          workspaceId: undefined,
+        });
         added++;
         continue;
       }
@@ -520,6 +550,7 @@ export class ConversationStore {
           ...structuredClone(candidate),
           // Destination-local access decisions are never overwritten by sync.
           permissionMode: existing.permissionMode ?? 'ask',
+          tokenPolicy: existing.tokenPolicy ?? 'adaptive',
           workspaceId: existing.workspaceId,
         };
         updated++;
@@ -547,6 +578,7 @@ export class ConversationStore {
           title,
           pinned: false,
           permissionMode: importedLoser ? narrowPermission(loser.permissionMode ?? 'ask', permissionCeiling) : existing.permissionMode ?? 'ask',
+          tokenPolicy: importedLoser ? 'adaptive' : existing.tokenPolicy ?? 'adaptive',
           workspaceId: importedLoser ? undefined : existing.workspaceId,
         };
         advanceSyncRevision(conflictCopy, loserRevision, loser.syncAncestors ?? []);
@@ -559,6 +591,7 @@ export class ConversationStore {
         next[existingIndex] = {
           ...structuredClone(candidate),
           permissionMode: existing.permissionMode ?? 'ask',
+          tokenPolicy: existing.tokenPolicy ?? 'adaptive',
           workspaceId: existing.workspaceId,
         };
         updated++;
@@ -582,6 +615,7 @@ export class ConversationStore {
   }
 
   create(input: ConversationCreateInput = {}): ConversationDetail {
+    if (input.tokenPolicy !== undefined && !tokenPolicies.has(input.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     const now = Date.now();
     const item: StoredConversation = {
       id: randomUUID(),
@@ -596,6 +630,7 @@ export class ConversationStore {
       routingPresetId: input.routingPresetId,
       workspaceId: input.workspaceId,
       permissionMode: input.permissionMode ?? 'ask',
+      tokenPolicy: input.tokenPolicy ?? 'adaptive',
       compactedMessages: 0,
       turns: [],
       usage: emptyUsage(),
@@ -620,8 +655,9 @@ export class ConversationStore {
     return this.require(id).summary;
   }
 
-  update(id: string, patch: { title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode }): ConversationDetail {
+  update(id: string, patch: { title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
     const item = this.require(id);
+    if (patch.tokenPolicy !== undefined && !tokenPolicies.has(patch.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     // update() mutates the live object so existing server-side references keep
     // observing the same conversation. Preserve a complete detached copy first
     // because save() can fail after sync metadata and optional fields changed.
@@ -641,6 +677,7 @@ export class ConversationStore {
     if (patch.routingPresetId !== undefined) item.routingPresetId = patch.routingPresetId?.trim() || undefined;
     if (patch.workspaceId !== undefined) item.workspaceId = patch.workspaceId?.trim() || undefined;
     if (patch.permissionMode) item.permissionMode = patch.permissionMode;
+    if (patch.tokenPolicy !== undefined) item.tokenPolicy = patch.tokenPolicy;
     item.updatedAt = Date.now();
     advanceSyncRevision(item, previousRevision, previousAncestors);
     try {
@@ -669,16 +706,44 @@ export class ConversationStore {
     const previousAncestors = [...(previous.syncAncestors ?? [])];
     const candidate = structuredClone(previous);
     candidate.turns = normalizeLocalTurns(turns, false);
-    candidate.usage.promptTokens += usage.promptTokens;
-    candidate.usage.completionTokens += usage.completionTokens;
-    candidate.usage.cachedPromptTokens = (candidate.usage.cachedPromptTokens ?? 0) + (usage.cachedPromptTokens ?? 0);
-    candidate.usage.cacheWritePromptTokens = (candidate.usage.cacheWritePromptTokens ?? 0) + (usage.cacheWritePromptTokens ?? 0);
-    candidate.usage.reasoningTokens = (candidate.usage.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0);
+    candidate.usage.promptTokens = addRecordedTokens(candidate.usage.promptTokens, usage.promptTokens);
+    candidate.usage.completionTokens = addRecordedTokens(candidate.usage.completionTokens, usage.completionTokens);
+    candidate.usage.accountedTokens = addRecordedTokens(candidate.usage.accountedTokens, usage.accountedTokens);
+    candidate.usage.cachedPromptTokens = addRecordedTokens(candidate.usage.cachedPromptTokens, usage.cachedPromptTokens);
+    candidate.usage.cacheWritePromptTokens = addRecordedTokens(candidate.usage.cacheWritePromptTokens, usage.cacheWritePromptTokens);
+    candidate.usage.reasoningTokens = addRecordedTokens(candidate.usage.reasoningTokens, usage.reasoningTokens);
     candidate.updatedAt = Date.now();
     const firstUser = candidate.turns.find((turn) => turn.role === 'user')?.content.trim();
     if (candidate.title === '새 대화' && firstUser) candidate.title = firstUser.replace(/\s+/g, ' ').slice(0, 48);
     this.compact(candidate);
     candidate.turns = normalizeLocalTurns(candidate.turns);
+    advanceSyncRevision(candidate, previousRevision, previousAncestors);
+    this.items[index] = candidate;
+    try {
+      this.save();
+    } catch (error) {
+      this.items[index] = previous;
+      throw error;
+    }
+    return this.detail(candidate);
+  }
+
+  /** Persist usage from provider calls that settled before a later run error. */
+  appendUsage(id: string, usage: ChatUsage): ConversationDetail {
+    const index = this.items.findIndex((conversation) => conversation.id === id);
+    if (index < 0) throw new Error('conversation not found');
+    const previous = this.items[index];
+    ensureSyncMetadata(previous);
+    const previousRevision = previous.syncRevision as string;
+    const previousAncestors = [...(previous.syncAncestors ?? [])];
+    const candidate = structuredClone(previous);
+    candidate.usage.promptTokens = addRecordedTokens(candidate.usage.promptTokens, usage.promptTokens);
+    candidate.usage.completionTokens = addRecordedTokens(candidate.usage.completionTokens, usage.completionTokens);
+    candidate.usage.accountedTokens = addRecordedTokens(candidate.usage.accountedTokens, usage.accountedTokens);
+    candidate.usage.cachedPromptTokens = addRecordedTokens(candidate.usage.cachedPromptTokens, usage.cachedPromptTokens);
+    candidate.usage.cacheWritePromptTokens = addRecordedTokens(candidate.usage.cacheWritePromptTokens, usage.cacheWritePromptTokens);
+    candidate.usage.reasoningTokens = addRecordedTokens(candidate.usage.reasoningTokens, usage.reasoningTokens);
+    candidate.updatedAt = Date.now();
     advanceSyncRevision(candidate, previousRevision, previousAncestors);
     this.items[index] = candidate;
     try {

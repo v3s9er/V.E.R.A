@@ -1,27 +1,96 @@
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
-import type { AiProvider, ChatRequest, ProviderHealth, ProviderResult, ProviderToolCall, ProviderUsage, Turn } from './provider.js';
+import {
+  normalizeProviderUsageReport,
+  type AiProvider,
+  type ChatRequest,
+  type ProviderHealth,
+  type ProviderResult,
+  type ProviderToolCall,
+  type ProviderUsage,
+  type RawProviderUsage,
+  type Turn,
+} from './provider.js';
 import { toOpenAiTools } from './tools.js';
-import { readErrorBody, readSse } from './sse.js';
+import { createProviderRequestDeadline, readErrorBody, readSse } from './sse.js';
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '');
 }
 
-function usageFromOpenAi(value: any, current: ProviderUsage = { promptTokens: 0, completionTokens: 0 }): ProviderUsage {
-  const input = value?.prompt_tokens ?? value?.input_tokens ?? current.promptTokens;
-  const output = value?.completion_tokens ?? value?.output_tokens ?? current.completionTokens;
-  const cached = value?.prompt_tokens_details?.cached_tokens
-    ?? value?.input_tokens_details?.cached_tokens
-    ?? current.cachedPromptTokens;
-  const reasoning = value?.completion_tokens_details?.reasoning_tokens
-    ?? value?.output_tokens_details?.reasoning_tokens
-    ?? current.reasoningTokens;
-  return {
-    promptTokens: typeof input === 'number' ? input : 0,
-    completionTokens: typeof output === 'number' ? output : 0,
-    ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
-    ...(typeof reasoning === 'number' ? { reasoningTokens: reasoning } : {}),
-  };
+interface OpenAiUsageState {
+  raw: RawProviderUsage;
+  invalid: boolean;
+}
+
+type UsageField = keyof RawProviderUsage;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function ownValues(source: Record<string, unknown>, keys: string[]): unknown[] {
+  return keys.flatMap((key) => Object.prototype.hasOwnProperty.call(source, key) ? [source[key]] : []);
+}
+
+function nestedOwnValues(
+  state: OpenAiUsageState,
+  source: Record<string, unknown>,
+  containers: string[],
+  key: string,
+): unknown[] {
+  const values: unknown[] = [];
+  for (const container of containers) {
+    if (!Object.prototype.hasOwnProperty.call(source, container)) continue;
+    const details = source[container];
+    if (details === null || details === undefined) continue;
+    if (!isRecord(details)) {
+      state.invalid = true;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(details, key)) values.push(details[key]);
+  }
+  return values;
+}
+
+function validUsageCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
+function updateUsageCounter(state: OpenAiUsageState, key: UsageField, candidates: unknown[]): void {
+  if (candidates.length === 0) return;
+  if (!candidates.every(validUsageCounter) || candidates.some((value) => value !== candidates[0])) {
+    state.invalid = true;
+    return;
+  }
+  const next = candidates[0] as number;
+  const previous = state.raw[key];
+  if (previous !== undefined && (!validUsageCounter(previous) || next < previous)) {
+    state.invalid = true;
+    return;
+  }
+  state.raw[key] = next;
+}
+
+function updateUsageFromOpenAi(state: OpenAiUsageState, value: unknown): void {
+  if (!isRecord(value)) {
+    state.invalid = true;
+    return;
+  }
+  updateUsageCounter(state, 'promptTokens', ownValues(value, ['prompt_tokens', 'input_tokens']));
+  updateUsageCounter(state, 'completionTokens', ownValues(value, ['completion_tokens', 'output_tokens']));
+  updateUsageCounter(state, 'cachedPromptTokens', nestedOwnValues(
+    state, value, ['prompt_tokens_details', 'input_tokens_details'], 'cached_tokens',
+  ));
+  updateUsageCounter(state, 'reasoningTokens', nestedOwnValues(
+    state, value, ['completion_tokens_details', 'output_tokens_details'], 'reasoning_tokens',
+  ));
+}
+
+function usageFromOpenAi(state: OpenAiUsageState): ProviderUsage {
+  if (state.invalid) {
+    return normalizeProviderUsageReport({ promptTokens: Number.NaN, completionTokens: Number.NaN });
+  }
+  return normalizeProviderUsageReport(state.raw);
 }
 
 function cacheKey(value: string | undefined): string | undefined {
@@ -120,7 +189,18 @@ export class OpenAICompatibleProvider implements AiProvider {
   }
 
   async chat(req: ChatRequest): Promise<ProviderResult> {
-    if (this.usesResponsesApi()) return this.chatResponses(req);
+    const deadline = createProviderRequestDeadline(req.signal);
+    const boundedRequest: ChatRequest = { ...req, signal: deadline.signal };
+    try {
+      return this.usesResponsesApi()
+        ? await this.chatResponses(boundedRequest)
+        : await this.chatCompletions(boundedRequest);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private async chatCompletions(req: ChatRequest): Promise<ProviderResult> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: toOpenAiMessages(req.turns, req.system),
@@ -147,7 +227,7 @@ export class OpenAICompatibleProvider implements AiProvider {
 
     let text = '';
     const byIndex = new Map<number, ProviderToolCall>();
-    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
+    const usageState: OpenAiUsageState = { raw: {}, invalid: false };
     let sawDone = false;
 
     for await (const { data } of readSse(res)) {
@@ -181,9 +261,10 @@ export class OpenAICompatibleProvider implements AiProvider {
           if (tc.function?.arguments) cur.args += tc.function.arguments;
         }
       }
-      if (json.usage) {
-        usage = usageFromOpenAi(json.usage, usage);
-      }
+      // OpenAI emits `usage: null` on ordinary streamed chunks before the
+      // terminal usage object; null is absence, while any other malformed
+      // supplied value is an invalid report.
+      if (json.usage !== undefined && json.usage !== null) updateUsageFromOpenAi(usageState, json.usage);
     }
 
     if (!sawDone) {
@@ -197,7 +278,7 @@ export class OpenAICompatibleProvider implements AiProvider {
         req.onEvent?.({ type: 'tool', call: c });
       }
     }
-    return { text, toolCalls, usage };
+    return { text, toolCalls, usage: usageFromOpenAi(usageState) };
   }
 
   private async chatResponses(req: ChatRequest): Promise<ProviderResult> {
@@ -225,7 +306,7 @@ export class OpenAICompatibleProvider implements AiProvider {
     let refusalText = '';
     let sawRefusal = false;
     let completed = false;
-    let usage: ProviderUsage = { promptTokens: 0, completionTokens: 0 };
+    const usageState: OpenAiUsageState = { raw: {}, invalid: false };
     const calls = new Map<number, ProviderToolCall>();
     const emitted = new Set<string>();
     const emitCall = (call: ProviderToolCall): void => {
@@ -310,7 +391,9 @@ export class OpenAICompatibleProvider implements AiProvider {
           throw new Error(`[${this.label}] Responses stream ended with unexpected status: ${event.response.status}`);
         }
         completed = true;
-        usage = usageFromOpenAi(event.response?.usage, usage);
+        if (event.response?.usage !== undefined && event.response.usage !== null) {
+          updateUsageFromOpenAi(usageState, event.response.usage);
+        }
         if (!text) {
           for (const output of event.response?.output ?? []) {
             if (output.type !== 'message') continue;
@@ -322,7 +405,7 @@ export class OpenAICompatibleProvider implements AiProvider {
           if (text) req.onEvent?.({ type: 'text', text });
         }
       }
-      if (event.usage) usage = usageFromOpenAi(event.usage, usage);
+      if (event.usage !== undefined && event.usage !== null) updateUsageFromOpenAi(usageState, event.usage);
       if (completed) break;
     }
 
@@ -336,7 +419,7 @@ export class OpenAICompatibleProvider implements AiProvider {
 
     const toolCalls = [...calls.values()].filter((call) => call.name || call.args);
     for (const call of toolCalls) emitCall(call);
-    return { text, toolCalls, usage };
+    return { text, toolCalls, usage: usageFromOpenAi(usageState) };
   }
 
   async ping(): Promise<ProviderHealth> {

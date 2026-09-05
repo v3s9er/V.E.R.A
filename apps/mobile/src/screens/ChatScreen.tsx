@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { MrRobotClient } from '../rpc';
-import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
+import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
 import { colors, radius } from '../theme';
 import { httpBaseForPc, pcAuthenticatedHeaders } from '../pcs';
 
@@ -105,6 +105,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [showAccess, setShowAccess] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
+  const [showTokenPolicy, setShowTokenPolicy] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [savingReasoning, setSavingReasoning] = useState(false);
@@ -267,7 +268,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const applyConversationConfiguration = (id: string, patch: Partial<Pick<ConversationDetail,
-    'reasoningEffort' | 'providerId' | 'providerModel' | 'routingPresetId' | 'workspaceId' | 'permissionMode'
+    'reasoningEffort' | 'providerId' | 'providerModel' | 'routingPresetId' | 'workspaceId' | 'permissionMode' | 'tokenPolicy'
   >>): void => {
     if (conversationRef.current?.id === id) conversationRef.current = { ...conversationRef.current, ...patch };
     setConversation((current) => current?.id === id ? { ...current, ...patch } : current);
@@ -513,7 +514,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setUnseenMessages(false);
     setMessages((items) => appendPendingAttempt(items, text));
     try {
-      await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode }, 10 * 60_000);
+      await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode, tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive' }, 10 * 60_000);
     } catch (err) {
       setMessages((msgs) => {
         const last = msgs[msgs.length - 1];
@@ -715,6 +716,20 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     }
   };
 
+  const selectTokenPolicy = async (tokenPolicy: ConversationTokenPolicy): Promise<void> => {
+    if (!client.canUseAuditOnly || !conversation || busy || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, tokenPolicy }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, { tokenPolicy: updated.tokenPolicy });
+      setShowTokenPolicy(false);
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally {
+      finishConfigurationSave();
+    }
+  };
+
   const togglePin = async (target: ConversationSummary): Promise<void> => {
     if (busy || configurationSaveInFlightRef.current) return;
     const updated = await client.call('conversations.update', { id: target.id, pinned: !target.pinned }) as ConversationDetail;
@@ -881,6 +896,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <TouchableOpacity style={[styles.effortBtn, conversation?.routingPresetId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={() => setShowScenarios(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>🧩 {routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '복합 트리 선택'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowWorkspaces(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>📁 {workspaces.find((workspace) => workspace.id === conversation?.workspaceId)?.name ?? workspaces.find((workspace) => workspace.isDefault)?.name ?? '작업 폴더'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowAccess(true)} disabled={configurationLocked}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="대화 토큰 정책" style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowTokenPolicy(true)} disabled={configurationLocked}><Text style={styles.effortText}>◈ {client.canUseAuditOnly && (conversation?.tokenPolicy ?? 'adaptive') === 'audit-only' ? '무제한 · 감사만' : '적응형 · 품질 우선'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
         <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
       </ScrollView>}
@@ -1095,6 +1111,22 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               })}
             </ScrollView>
             <TouchableOpacity style={styles.bigBtn} onPress={() => setShowReasoning(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showTokenPolicy} transparent animationType="fade" onRequestClose={() => setShowTokenPolicy(false)} accessibilityViewIsModal>
+        <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>이 대화의 토큰 정책</Text>
+            <Text style={styles.modalText}>{client.canUseAuditOnly ? '별도 작업 등급 없이 이 대화에만 적용됩니다. 실행 중에는 바꿀 수 없습니다.' : '무제한 감사는 내장 네이티브 데스크톱 앱의 로컬 관리자 연결에서만 사용할 수 있습니다. 이 연결은 적응형 · 품질 우선으로 고정됩니다.'}</Text>
+            <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
+              {([
+                ['adaptive', '적응형 · 품질 우선', '요청 난이도와 실행 방식에 맞춰 품질을 우선하고 안전 상한을 자동 조정합니다.'],
+                ...(client.canUseAuditOnly ? [['audit-only', '무제한 · 감사만', 'Mr.Robot의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정합니다. 공급자 자체 한도와 요금은 계속 적용되며, 사용량은 대화 기록과 PC 설정의 텔레메트리에서 확인합니다.']] : []),
+              ] as Array<[ConversationTokenPolicy, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, (configurationLocked || !client.canUseAuditOnly) && styles.disabledBtn]} disabled={configurationLocked || !client.canUseAuditOnly} onPress={() => void selectTokenPolicy(value)}><Text style={styles.modelProvider}>{(client.canUseAuditOnly ? conversation?.tokenPolicy ?? 'adaptive' : 'adaptive') === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
+            </ScrollView>
+            <TouchableOpacity style={styles.bigBtn} onPress={() => setShowTokenPolicy(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>

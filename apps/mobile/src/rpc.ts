@@ -10,7 +10,7 @@ export type RpcConnectionState = 'offline' | 'connecting' | 'authenticating' | '
 const WS_RPC_PROTOCOL = 'mr-robot-rpc-v1';
 const WS_UPGRADE_TICKET_PROTOCOL_PREFIX = 'mr-robot-ticket.';
 interface WsUpgradeTicketInfo { protocol: string; expiresAt: number }
-interface AuthResult { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode }
+interface AuthResult { ok?: boolean; isAdmin?: boolean; permissionCap?: PermissionMode; canUseAuditOnly?: boolean }
 const PERMISSION_MODES: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
 const isPermissionMode = (value: unknown): value is PermissionMode => PERMISSION_MODES.includes(value as PermissionMode);
 type ReactNativeWebSocketConstructor = new (
@@ -71,6 +71,7 @@ export class MrRobotClient {
   authed = false;
   isAdmin = false;
   permissionCap: PermissionMode = 'read-only';
+  canUseAuditOnly = false;
   state: RpcConnectionState = 'offline';
   onClose: (() => void) | null = null;
   onStateChange: ((state: RpcConnectionState) => void) | null = null;
@@ -103,6 +104,7 @@ export class MrRobotClient {
           this.authed = false;
           this.isAdmin = false;
           this.permissionCap = 'read-only';
+          this.canUseAuditOnly = false;
           if (ws !== null && this.ws === ws) this.ws = null;
           this.setState('offline');
           try { ws?.close(); } catch { /* 이미 닫힌 소켓 */ }
@@ -146,6 +148,7 @@ export class MrRobotClient {
               this.permissionCap = this.authed && isPermissionMode(auth?.permissionCap)
                 ? auth.permissionCap
                 : 'read-only';
+              this.canUseAuditOnly = this.authed && auth?.canUseAuditOnly === true;
               if (!this.authed) throw new Error('인증 실패: 시크릿이 일치하지 않습니다.');
               finish();
             })
@@ -164,6 +167,7 @@ export class MrRobotClient {
             this.authed = false;
             this.isAdmin = false;
             this.permissionCap = 'read-only';
+            this.canUseAuditOnly = false;
             this.ws = null;
             this.setState('offline');
           } else {
@@ -233,6 +237,7 @@ export class MrRobotClient {
     this.authed = false;
     this.isAdmin = false;
     this.permissionCap = 'read-only';
+    this.canUseAuditOnly = false;
     this.settlePending(new Error('연결 종료'));
     const ws = this.ws;
     this.ws = null;

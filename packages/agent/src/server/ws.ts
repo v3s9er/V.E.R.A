@@ -36,13 +36,24 @@ const WS_UPGRADE_TICKET_ISSUE_WINDOW_MS = 10_000;
 const WS_MAX_UPGRADE_TICKET_ISSUES_PER_WINDOW = 16;
 const CLOUDFLARE_RAY = /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i;
 
-export interface AuthContext { isAdmin: boolean; linkId?: string; permissionCap: PermissionMode }
+export interface AuthContext {
+  isAdmin: boolean;
+  linkId?: string;
+  permissionCap: PermissionMode;
+  /**
+   * Main-process-issued, single-connection authority for the unbounded audit
+   * policy. Ordinary administrator credentials never imply this capability.
+   */
+  nativeAuditOnly?: boolean;
+}
 
 export interface WsTicketBinding {
   source: string;
   audience: string;
   requiresTicket: boolean;
   trustedCloudflare: boolean;
+  /** True only for a socket and Host that both resolve directly to loopback. */
+  directLoopback: boolean;
 }
 
 interface WsUpgradeTicketGrant {
@@ -101,6 +112,7 @@ export function webSocketTicketBinding(input: {
     audience: normalizedHostAudience(input.hostHeader, trustedCloudflare),
     requiresTicket,
     trustedCloudflare,
+    directLoopback: loopback && !requiresTicket && !trustedCloudflare,
   };
 }
 
@@ -213,6 +225,7 @@ export class WsClient {
     readonly socket: WebSocket,
     remoteAddress: string,
     readonly admissionPrincipal?: string,
+    readonly directLoopback = false,
   ) {
     this.remoteAddress = remoteAddress;
   }
@@ -232,6 +245,18 @@ export class WsClient {
   }
 }
 
+/**
+ * Token-limit bypass is intentionally narrower than ordinary administrator
+ * access. Only an administrator auth carrying a fresh capability issued
+ * directly to the embedded Electron main process may enable it. Socket, Host,
+ * Origin and forwarded headers are never authority for this decision.
+ */
+export function canUseAuditOnly(
+  client: Pick<WsClient, 'state'>,
+): boolean {
+  return client.state.auth?.isAdmin === true && client.state.auth.nativeAuditOnly === true;
+}
+
 export type RpcHandler = (params: unknown, client: WsClient) => unknown | Promise<unknown>;
 
 /**
@@ -243,12 +268,13 @@ export type RpcHandler = (params: unknown, client: WsClient) => unknown | Promis
 export class WsHub {
   private readonly wss: WebSocketServer;
   private readonly admittedPrincipals = new WeakMap<IncomingMessage, string>();
+  private readonly admittedBindings = new WeakMap<IncomingMessage, WsTicketBinding>();
   readonly clients = new Set<WsClient>();
 
   constructor(
     server: Server,
     private readonly handlers: Map<string, RpcHandler>,
-    private readonly authenticate: (secret: string) => AuthContext | null,
+    private readonly authenticate: (secret: string, desktopAuditProof?: string) => AuthContext | null,
     private readonly logger: Logger,
     private readonly upgradeTickets: WsUpgradeTickets,
   ) {
@@ -267,6 +293,7 @@ export class WsHub {
           cloudflareRay: String(info.req.headers['cf-ray'] ?? ''),
         });
         if (!binding.requiresTicket) {
+          this.admittedBindings.set(info.req, binding);
           done(true);
           return;
         }
@@ -281,6 +308,7 @@ export class WsHub {
           return;
         }
         this.admittedPrincipals.set(info.req, principal);
+        this.admittedBindings.set(info.req, binding);
         done(true);
       },
     });
@@ -347,6 +375,14 @@ export class WsHub {
   private onConnection(socket: WebSocket, req: import('node:http').IncomingMessage): void {
     const directRemote = (req.socket.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
     const directLocal = (req.socket.localAddress ?? 'unknown').replace(/^::ffff:/, '');
+    const binding = this.admittedBindings.get(req) ?? webSocketTicketBinding({
+      directRemote,
+      directLocal,
+      hostHeader: req.headers.host,
+      cloudflareConnectingIp: String(req.headers['cf-connecting-ip'] ?? ''),
+      cloudflareRay: String(req.headers['cf-ray'] ?? ''),
+    });
+    this.admittedBindings.delete(req);
     const tailnet = isEncryptedTailnetTransport(directRemote, directLocal);
     const loopback = isLoopback(directRemote);
     if (loopback === false && tailnet === false) {
@@ -356,7 +392,8 @@ export class WsHub {
     }
     const forwarded = String(req.headers['cf-connecting-ip'] ?? '').trim();
     const ray = String(req.headers['cf-ray'] ?? '');
-    const trustedCloudflare = loopback && isIP(forwarded) > 0 && /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray);
+    const trustedCloudflare = binding.trustedCloudflare
+      && loopback && isIP(forwarded) > 0 && /^[a-f0-9-]{8,}(?:-[a-z]{3})?$/i.test(ray);
     const remote = trustedCloudflare ? `cloudflare:${forwarded}` : directRemote;
     const origin = String(req.headers.origin ?? '').trim();
     if (origin) {
@@ -404,7 +441,7 @@ export class WsHub {
     }
     const admissionPrincipal = this.admittedPrincipals.get(req);
     this.admittedPrincipals.delete(req);
-    const client = new WsClient(socket, remote, admissionPrincipal);
+    const client = new WsClient(socket, remote, admissionPrincipal, binding.directLoopback);
     this.clients.add(client);
     this.logger.info(`ws connected: ${remote} (${this.clients.size} clients)`);
 
@@ -487,8 +524,17 @@ export class WsHub {
     const { id, method, params } = msg;
 
     if (method === 'auth') {
-      const p = (params ?? {}) as { secret?: string };
-      let authenticated = typeof p.secret === 'string' ? this.authenticate(p.secret) : null;
+      const p = (params ?? {}) as { secret?: string; desktopAuditProof?: string };
+      // desktopAuditProof is generated and attached by Electron main. It is
+      // never returned through HTTP/preload/renderer IPC. Strict parsing here
+      // also prevents arbitrary JSON values reaching the proof store.
+      const desktopAuditProof = typeof p.desktopAuditProof === 'string'
+        && /^[A-Za-z0-9_-]{43}$/.test(p.desktopAuditProof)
+        ? p.desktopAuditProof
+        : undefined;
+      let authenticated = typeof p.secret === 'string'
+        ? this.authenticate(p.secret, desktopAuditProof)
+        : null;
       // A public upgrade ticket is admission for exactly the credential that
       // obtained it. It cannot be lent to another device token or used to turn
       // one low-privilege link into an anonymous connection-slot sponsor.
@@ -507,6 +553,7 @@ export class WsHub {
         result: {
           ok: client.state.authed,
           isAdmin: client.state.auth?.isAdmin === true,
+          canUseAuditOnly: canUseAuditOnly(client),
           permissionCap: client.state.auth?.permissionCap ?? 'read-only',
         },
       });

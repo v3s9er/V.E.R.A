@@ -82,6 +82,7 @@ export interface ShellResult {
 
 export type ProviderType = 'openai-compatible' | 'anthropic' | 'ollama' | 'codex-cli' | 'claude-cli';
 export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ConversationTokenPolicy = 'adaptive' | 'audit-only';
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
 
 export interface ConversationSyncMergeResult {
@@ -190,6 +191,7 @@ export interface ConversationSummary {
   routingPresetId?: string;
   workspaceId?: string;
   permissionMode: PermissionMode;
+  tokenPolicy: ConversationTokenPolicy;
   compactedMessages: number;
 }
 

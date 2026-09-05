@@ -10,6 +10,7 @@ const rpc = read('src/rpc.ts');
 const pcList = read('src/screens/PcListScreen.tsx');
 const settings = read('src/screens/SettingsScreen.tsx');
 const schedules = read('src/screens/SchedulesScreen.tsx');
+const types = read('src/types.ts');
 
 function check(description, condition) {
   if (!condition) throw new Error(`MOBILE UI CONTRACT FAILED: ${description}`);
@@ -78,6 +79,23 @@ check('an exact failed retry replaces only the failed tail while a start-dispatc
   && chat.includes('if (startingConversationRef.current === currentConversation.id) return;')
   && chat.includes('startingConversationRef.current = currentConversation.id;')
   && chat.includes('setMessages((items) => appendPendingAttempt(items, text));'));
+const mobilePermissionControl = chat.indexOf('onPress={() => setShowAccess(true)}');
+const mobileTokenPolicyControl = chat.indexOf('accessibilityLabel="대화 토큰 정책"');
+check('per-conversation token policy follows permission and is run-locked, rollback-safe, and administrator-gated',
+  mobilePermissionControl >= 0
+  && mobileTokenPolicyControl > mobilePermissionControl
+  && types.includes("export type ConversationTokenPolicy = 'adaptive' | 'audit-only';")
+  && types.includes('tokenPolicy: ConversationTokenPolicy;')
+  && rpc.includes('isAdmin = false;')
+  && rpc.includes('this.isAdmin = this.authed && auth?.isAdmin === true;')
+  && rpc.includes('canUseAuditOnly = false;')
+  && rpc.includes('this.canUseAuditOnly = this.authed && auth?.canUseAuditOnly === true;')
+  && chat.includes("if (!client.canUseAuditOnly || !conversation || busy || !beginConfigurationSave()) return;")
+  && chat.includes("tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive'")
+  && chat.includes('disabled={configurationLocked || !client.canUseAuditOnly}')
+  && chat.includes("...(client.canUseAuditOnly ? [['audit-only', '무제한 · 감사만'")
+  && chat.includes('적응형 · 품질 우선')
+  && chat.includes('대화 기록과 PC 설정의 텔레메트리에서 확인'));
 
 check('small screens and enlarged fonts switch connection cards to a stacked layout',
   pcList.includes('width < 480 || fontScale > 1.25')

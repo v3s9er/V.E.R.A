@@ -12,6 +12,7 @@ import type {
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Input, Modal, Select } from '../components/ui';
 import { PluginWorkbench } from '../components/PluginWorkbench';
+import { DiscordPanel } from '../components/DiscordPanel';
 import { PLUGIN_CATEGORY_LABELS, groupPluginsByCategory } from '../plugin-categories';
 
 interface OrcaConfig {
@@ -949,6 +950,7 @@ export function PluginsView() {
               <Button variant="ghost" onClick={() => void copyRemoteAddress(remoteStatus.publicUrl as string)}>복사</Button>
             </div>}
             {expanded === p.id && <div className="plugin-detail">
+            {p.id === 'discord-agent' && <DiscordPanel />}
             <div className="plugin-detail-facts"><span><b>상태</b>{p.status === 'loaded' ? '정상 로드됨' : p.status}</span><span><b>이벤트</b>구독 {p.subscriptions} · 타이머 {p.timers}</span><span title={p.source}><b>소스</b>{p.source}</span></div>
             {p.capabilities.length > 0 && <div className="plugin-capabilities">{p.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
             {p.permissions.length > 0 && <p className="panel-hint">권한: {p.permissions.join(' · ')}</p>}

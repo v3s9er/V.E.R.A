@@ -223,6 +223,8 @@ export interface ToolCallRecord {
 export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
+  /** Host-accounted usage after applying conservative pre-call reservation floors. */
+  accountedTokens?: number;
   /** Input tokens served from a provider-side prompt cache. */
   cachedPromptTokens?: number;
   /** Input tokens written into a provider-side prompt cache. */
@@ -232,6 +234,11 @@ export interface ChatUsage {
 }
 
 export type ConversationStatus = 'active' | 'archived';
+/**
+ * Per-conversation model-usage policy. `audit-only` is a local administrator
+ * choice and is never trusted when imported from another device.
+ */
+export type ConversationTokenPolicy = 'adaptive' | 'audit-only';
 
 export interface ConversationSummary {
   id: string;
@@ -252,6 +259,8 @@ export interface ConversationSummary {
   workspaceId?: string;
   /** Per-conversation access level. The paired-device cap can only narrow it. */
   permissionMode: PermissionMode;
+  /** Adaptive by default; audit-only can be selected only by the local administrator. */
+  tokenPolicy: ConversationTokenPolicy;
   compactedMessages: number;
 }
 
@@ -269,6 +278,7 @@ export interface ConversationCreateInput {
   routingPresetId?: string;
   workspaceId?: string;
   permissionMode?: PermissionMode;
+  tokenPolicy?: ConversationTokenPolicy;
   pinned?: boolean;
 }
 

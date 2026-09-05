@@ -45,6 +45,7 @@ copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
 copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
+copyTree(join(root, 'integrations', 'discordbot'), join(stage, 'integrations', 'discordbot'));
 // Keep the live window and tray on the exact same full icon as Android.
 copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'icon.png'));
 // main.mjs uses ws for native Cloudflare Access headers on WSS upgrades.
@@ -56,6 +57,6 @@ const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.4.4', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
+  name: 'mr-robot-desktop', version: '0.4.5', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

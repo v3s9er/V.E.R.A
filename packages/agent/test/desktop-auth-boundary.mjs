@@ -16,7 +16,16 @@ const check = (name, condition) => {
 
 console.log('desktop administrator credential boundary');
 check('local connection IPC never returns the global administrator secret', !/mr-robot:local-connection[\s\S]{0,500}secret:\s*server\.secret/.test(main));
-check('main process owns WebSocket authentication', main.includes("callLocalRpc('auth', { secret: credential }") && main.includes('mr-robot:local-rpc.connect'));
+check('main process owns WebSocket authentication', main.includes("callLocalRpc('auth', {")
+  && main.includes('secret: credential,') && main.includes('mr-robot:local-rpc.connect'));
+check('native-only audit capability is forwarded without conflating remote administrator identity',
+  main.includes('server.issueDesktopAuditProof()')
+    && main.includes('...(desktopAuditProof ? { desktopAuditProof } : {})')
+    && main.includes('auth.canUseAuditOnly !== true')
+    && main.includes('canUseAuditOnly: auth.canUseAuditOnly === true')
+    && rpc.includes('this.canUseAuditOnly = auth?.canUseAuditOnly === true;')
+    && !preload.includes('desktopAuditProof')
+    && !rpc.includes('desktopAuditProof'));
 check('preload exposes calls and events but no secret getter', preload.includes('connectLocalRpc') && preload.includes('callLocalRpc') && !preload.includes('server.secret'));
 check('renderer uses an inert local-session marker', rpc.includes("DESKTOP_LOCAL_AUTH_TOKEN = 'electron-main-process-managed-session'") && pcs.includes('secret: DESKTOP_LOCAL_AUTH_TOKEN'));
 check('loopback REST authorization is injected after the renderer boundary', main.includes('onBeforeSendHeaders') && main.includes('resolveDesktopCredential(reference, parsed.origin)') && main.includes('return server.secret'));

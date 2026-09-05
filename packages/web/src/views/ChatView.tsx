@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
+import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
@@ -17,6 +17,7 @@ type ExecutionConfigPatch = {
   routingPresetId?: string | null;
   workspaceId?: string | null;
   permissionMode?: PermissionMode;
+  tokenPolicy?: ConversationTokenPolicy;
 };
 
 const EXECUTION_CONFIG_SAVE_MESSAGE = '모델 실행 설정을 저장하고 있습니다. 저장이 끝난 뒤 명령을 보내주세요.';
@@ -27,7 +28,7 @@ declare global {
       chooseDirectory(): Promise<string | null>;
       chooseCalendarWorkbook(): Promise<string | null>;
       getLocalConnection(): Promise<{ name: string; host: string; port: number; auth: string }>;
-      connectLocalRpc(input: { url: string; credentialRef: string }): Promise<{ ok: boolean; isAdmin: boolean; permissionCap: PermissionMode }>;
+      connectLocalRpc(input: { url: string; credentialRef: string }): Promise<{ ok: boolean; isAdmin: boolean; canUseAuditOnly: boolean; permissionCap: PermissionMode }>;
       callLocalRpc(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
       closeLocalRpc(): void;
       onLocalRpcEvent(handler: (message: { event: string; data: unknown }) => void): () => void;
@@ -105,6 +106,10 @@ const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'worksp
 const permissionWithinCap = (mode: PermissionMode, cap: PermissionMode): boolean => (
   PERMISSION_ORDER.indexOf(mode) <= PERMISSION_ORDER.indexOf(cap)
 );
+const TOKEN_POLICIES: Array<{ value: ConversationTokenPolicy; label: string; short: string; detail: string }> = [
+  { value: 'adaptive', label: '적응형 · 품질 우선', short: '적응형', detail: '요청 난이도와 실행 방식에 맞춰 품질을 우선하고 안전 상한을 자동 조정합니다.' },
+  { value: 'audit-only', label: '무제한 · 감사만', short: '감사만', detail: 'Mr.Robot의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정하며, 공급자 자체 한도와 요금은 계속 적용됩니다.' },
+];
 
 export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc, onExecutionBusyChange }: {
   profile?: ReactNode;
@@ -274,6 +279,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         routingPresetId: conversation.routingPresetId,
         workspaceId: conversation.workspaceId,
         permissionMode: conversation.permissionMode,
+        tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive',
       }, 10 * 60_000) as { ok?: boolean; error?: string; text?: string; route?: RouteInfo };
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
       if (result.route) setRoute(result.route);
@@ -803,6 +809,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const effectivePermissionMode = permissionWithinCap(requestedPermissionMode, client.permissionCap) ? requestedPermissionMode : client.permissionCap;
   const selectedAccess = ACCESS.find((access) => access.value === effectivePermissionMode) ?? ACCESS[0];
   const permissionLimitedByDevice = effectivePermissionMode !== requestedPermissionMode;
+  const selectedTokenPolicy = client.canUseAuditOnly
+    ? TOKEN_POLICIES.find((policy) => policy.value === selected?.tokenPolicy) ?? TOKEN_POLICIES[0]
+    : TOKEN_POLICIES[0];
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
   const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
@@ -909,9 +918,31 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   {(providerModels[provider.id] ?? [provider.model]).map((model) => <option key={model} value={modelChoiceValue(provider.id, model)}>{model}</option>)}
                 </optgroup>)}
               </Select>
+              <div className="chat-policy-controls">
+                <Select
+                  className="permission-select"
+                  aria-label="대화 권한"
+                  title="이 대화가 PC에서 실행할 수 있는 작업 범위"
+                  value={selectedAccess.value}
+                  onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })}
+                  disabled={executionControlsDisabled}
+                >
+                  {ACCESS.map((access) => <option key={access.value} value={access.value} disabled={!permissionWithinCap(access.value, client.permissionCap)}>{access.label}</option>)}
+                </Select>
+                <Select
+                  className="token-policy-select"
+                  aria-label="대화 토큰 정책"
+                  title={client.canUseAuditOnly ? selectedTokenPolicy.detail : '무제한 감사는 내장 네이티브 앱의 로컬 관리자 연결에서만 사용할 수 있으며, 이 연결은 적응형으로 고정됩니다.'}
+                  value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}
+                  onChange={(event) => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })}
+                  disabled={executionControlsDisabled || !client.canUseAuditOnly}
+                >
+                  {TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value === 'adaptive').map((policy) => <option key={policy.value} value={policy.value}>{policy.label}</option>)}
+                </Select>
+              </div>
             </div>
             <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
-              <span className="context-trigger-icon">◎</span><span><b>컨텍스트</b><small>{selectedWorkspace?.name ?? '폴더 없음'} · {selectedAccess.short}</small></span><em>⌄</em>
+              <span className="context-trigger-icon">◎</span><span><b>컨텍스트</b><small>{selectedWorkspace?.name ?? '폴더 없음'} · {selectedAccess.short} · {selectedTokenPolicy.short}</small></span><em>⌄</em>
             </button>
             <button type="button" className={`icon-action ${selected.pinned ? 'active' : ''}`} title={selected.pinned ? '대화 고정 해제' : '대화 고정'} aria-label={selected.pinned ? '대화 고정 해제' : '대화 고정'} onClick={() => void pinConversation(selected)} disabled={busy}>⌖</button>
           </header>
@@ -922,6 +953,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
               <label className="context-field access-field"><span>액세스 권한</span><Select aria-label="컨텍스트 액세스 권한" value={selectedAccess.value} onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })} disabled={executionControlsDisabled}>{ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · PC에서 기기 상향 필요' : ''}</option>; })}</Select><small className="context-help"><b>{selectedAccess.detail}</b> {permissionLimitedByDevice ? `이 대화의 저장값은 ${requestedPermissionMode}이지만 현재 기기에서는 ${selectedAccess.label}까지만 적용됩니다. ` : ''}연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></label>
             </div>
+            <p className="context-help">{selectedTokenPolicy.detail} 실제 사용량은 대화 기록과 설정의 텔레메트리에서 확인할 수 있습니다.</p>
             <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
           </section>}
         </>}

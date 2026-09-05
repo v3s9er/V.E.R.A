@@ -35,6 +35,56 @@ export interface ProviderUsage extends ChatUsage {
   cachedPromptTokens?: number;
   cacheWritePromptTokens?: number;
   reasoningTokens?: number;
+  /** Internal trust signal for admission/audit code; never supplied by callers. */
+  reportStatus?: 'reported' | 'missing' | 'invalid' | 'capped';
+}
+
+export const MAX_PROVIDER_RECORDED_TOKENS = 1_000_000_000_000;
+
+export interface RawProviderUsage {
+  promptTokens?: unknown;
+  completionTokens?: unknown;
+  cachedPromptTokens?: unknown;
+  cacheWritePromptTokens?: unknown;
+  reasoningTokens?: unknown;
+}
+
+/**
+ * Provider metering is untrusted input. Validate the report atomically so one
+ * plausible field cannot hide a negative/NaN/otherwise malformed companion.
+ * Missing or invalid reports normalize to zero; adaptive admission therefore
+ * retains its conservative pre-call reservation instead of treating them as
+ * free. Very large finite counters saturate at the persistence-safe ceiling.
+ */
+export function normalizeProviderUsageReport(raw: RawProviderUsage): ProviderUsage {
+  const requiredMissing = raw.promptTokens === undefined || raw.completionTokens === undefined;
+  const supplied = [
+    raw.promptTokens,
+    raw.completionTokens,
+    raw.cachedPromptTokens,
+    raw.cacheWritePromptTokens,
+    raw.reasoningTokens,
+  ].filter((value) => value !== undefined);
+  const invalid = supplied.some((value) => (
+    typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0
+  ));
+  if (requiredMissing || invalid) {
+    return {
+      promptTokens: 0,
+      completionTokens: 0,
+      reportStatus: invalid ? 'invalid' : 'missing',
+    };
+  }
+  const capped = supplied.some((value) => Number(value) > MAX_PROVIDER_RECORDED_TOKENS);
+  const token = (value: unknown): number => Math.min(MAX_PROVIDER_RECORDED_TOKENS, Number(value));
+  return {
+    promptTokens: token(raw.promptTokens),
+    completionTokens: token(raw.completionTokens),
+    ...(raw.cachedPromptTokens !== undefined ? { cachedPromptTokens: token(raw.cachedPromptTokens) } : {}),
+    ...(raw.cacheWritePromptTokens !== undefined ? { cacheWritePromptTokens: token(raw.cacheWritePromptTokens) } : {}),
+    ...(raw.reasoningTokens !== undefined ? { reasoningTokens: token(raw.reasoningTokens) } : {}),
+    reportStatus: capped ? 'capped' : 'reported',
+  };
 }
 
 export interface ProviderHealth {
