@@ -1,6 +1,6 @@
 {
   "name": "@mr-robot/agent",
-  "version": "0.4.1",
+  "version": "0.4.4",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@mr-robot/shared": "*",
     "express": "^5.2.1",
-    "fflate": "0.8.2",
+    "fflate": "0.8.3",
     "tldts": "7.4.11",
     "ws": "^8.18.0",
     "zod": "^4.4.3"

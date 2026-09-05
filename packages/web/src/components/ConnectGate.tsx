@@ -18,6 +18,7 @@ import {
   type SavedPc,
 } from '../pcs';
 import { Button, Card, Field, Input, Spinner } from './ui';
+import { BrandIcon } from './BrandIcon';
 
 type Phase = 'auto' | 'list' | 'connecting' | 'error';
 
@@ -290,19 +291,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       <div className="gate-glow" />
       <Card className="gate-card wide">
         <div className="gate-brand">
-          <span className="brand-mark">
-            <svg viewBox="0 0 100 100" width="32" height="32">
-              <defs>
-                <linearGradient id="lg3" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#7c5cff" />
-                  <stop offset="1" stopColor="#22d3ee" />
-                </linearGradient>
-              </defs>
-              <rect width="100" height="100" rx="24" fill="url(#lg3)" />
-              <circle cx="50" cy="50" r="16" fill="white" />
-              <circle cx="50" cy="26" r="8" fill="white" opacity=".7" />
-            </svg>
-          </span>
+          <span className="brand-mark"><BrandIcon /></span>
           <h1>Mr.Robot</h1>
         </div>
         <p className="gate-sub">연결할 PC를 선택하세요</p>

@@ -295,6 +295,18 @@ export interface ChatConfirmRequest {
 // ---------------------------------------------------------------------------
 
 export type PluginKind = 'model-provider' | 'tool' | 'transport' | 'input' | 'workflow' | 'integration';
+/** Stable catalog sections shared by plugin manifests, the agent and clients. */
+export const PLUGIN_CATEGORY_ORDER = ['system', 'productivity', 'development', 'pentest', 'other'] as const;
+export type PluginCategory = typeof PLUGIN_CATEGORY_ORDER[number];
+
+export function isPluginCategory(value: unknown): value is PluginCategory {
+  return typeof value === 'string' && (PLUGIN_CATEGORY_ORDER as readonly string[]).includes(value);
+}
+
+export function normalizePluginCategory(value: unknown, fallback: PluginCategory = 'other'): PluginCategory {
+  return isPluginCategory(value) ? value : fallback;
+}
+
 export type PluginPermission =
   | 'filesystem.read'
   | 'filesystem.write'
@@ -321,6 +333,7 @@ export interface PluginInfo {
   description: string;
   status: 'loaded' | 'error';
   kind: PluginKind;
+  category: PluginCategory;
   builtin: boolean;
   enabled: boolean;
   capabilities: string[];

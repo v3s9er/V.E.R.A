@@ -1,6 +1,6 @@
 {
   "name": "@mr-robot/desktop",
-  "version": "0.4.1",
+  "version": "0.4.4",
   "private": true,
   "type": "module",
   "main": "main.mjs",

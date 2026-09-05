@@ -856,6 +856,35 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
 }
 
 {
+  const auth = { isAdmin: true, permissionCap: 'full' };
+  const policy = new ChatRunAdmissionPolicy({
+    globalActive: 1,
+    linkedActive: 1,
+    adminActive: 1,
+    globalStartsPerWindow: 20,
+    linkedStartsPerWindow: 20,
+    adminStartsPerWindow: 20,
+    globalTokensPerWindow: 100,
+    linkedTokensPerWindow: 100,
+    adminTokensPerWindow: 100,
+  });
+  const ordinary = policy.acquire(auth);
+  const estimated = ordinary.reserveModelCall('api', 20);
+  const hiddenPromptAccepted = estimated.finish({ promptTokens: 28, completionTokens: 2 });
+  ordinary.finish({ promptTokens: 28, completionTokens: 2 });
+  check('provider usage may exceed a conservative call estimate within the held run budget',
+    hiddenPromptAccepted && policy.snapshot().globalTokens === 30);
+
+  policy.clear();
+  const runaway = policy.acquire(auth);
+  const smallEstimate = runaway.reserveModelCall('api', 20);
+  const runawayBlocked = !smallEstimate.finish({ promptTokens: 10_000_000, completionTokens: 1 });
+  runaway.finish({ promptTokens: 10_000_000, completionTokens: 1 });
+  check('a provider report beyond the whole run allowance still fails closed as token debt',
+    runawayBlocked && policy.snapshot().globalTokens === 10_000_001);
+}
+
+{
   const server = new AgentServer();
   const handlers = server.handlers();
   let providerCalls = 0;

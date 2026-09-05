@@ -67,6 +67,17 @@ check('mobile auth retains the server authority ceiling and the access picker ca
 check('busy steering and stop actions occupy their own responsive row',
   chat.includes('{busy && <View style={styles.busyActions}>')
   && chat.includes('busyActionBtn: { flex: 1 }'));
+check('an exact failed retry replaces only the failed tail while a start-dispatch ref blocks fast duplicate taps',
+  chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] =>')
+  && chat.includes("assistant?.role === 'assistant'")
+  && chat.includes('Boolean(assistant.error)')
+  && chat.includes("user?.role === 'user'")
+  && chat.includes('user.content === text')
+  && chat.includes('const base = retryingFailedTail ? items.slice(0, -2) : items;')
+  && chat.includes('const startingConversationRef = useRef<string | null>(null);')
+  && chat.includes('if (startingConversationRef.current === currentConversation.id) return;')
+  && chat.includes('startingConversationRef.current = currentConversation.id;')
+  && chat.includes('setMessages((items) => appendPendingAttempt(items, text));'));
 
 check('small screens and enlarged fonts switch connection cards to a stacked layout',
   pcList.includes('width < 480 || fontScale > 1.25')

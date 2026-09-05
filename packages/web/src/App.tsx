@@ -8,6 +8,7 @@ import type { ViewKey } from './components/Sidebar';
 import { ProfileMenu } from './components/ProfileMenu';
 import { ChatView } from './views/ChatView';
 import { DependencySetup } from './components/DependencySetup';
+import { BrandIcon } from './components/BrandIcon';
 
 const SchedulesView = lazy(() => import('./views/SchedulesView').then((module) => ({ default: module.SchedulesView })));
 const PluginsView = lazy(() => import('./views/PluginsView').then((module) => ({ default: module.PluginsView })));
@@ -211,7 +212,7 @@ export function App() {
           {view !== 'chat' && <header className="workspace-header">
             <div className="workspace-header-main">
               <button className="workspace-brand" type="button" onClick={() => setView('chat')} title="대화로 돌아가기">
-                <span className="workspace-brand-mark">✦</span>
+                <span className="workspace-brand-mark"><BrandIcon /></span>
                 <span><b>Mr.Robot</b><small>{viewMeta[view].eyebrow}</small></span>
               </button>
               <div className="workspace-heading"><h1>{viewMeta[view].title}</h1><p>{viewMeta[view].description}</p></div>

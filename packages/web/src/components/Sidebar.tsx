@@ -1,3 +1,5 @@
+import { BrandIcon } from './BrandIcon';
+
 export type ViewKey = 'chat' | 'files' | 'schedules' | 'plugins' | 'settings';
 
 const ICONS: Record<ViewKey, React.ReactNode> = {
@@ -51,19 +53,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark">
-          <svg viewBox="0 0 100 100" width="26" height="26">
-            <defs>
-              <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#7c5cff" />
-                <stop offset="1" stopColor="#22d3ee" />
-              </linearGradient>
-            </defs>
-            <rect width="100" height="100" rx="24" fill="url(#lg)" />
-            <circle cx="50" cy="50" r="16" fill="white" />
-            <circle cx="50" cy="26" r="8" fill="white" opacity=".7" />
-          </svg>
-        </span>
+        <span className="brand-mark"><BrandIcon /></span>
         <span className="brand-name">Mr.Robot</span>
       </div>
 

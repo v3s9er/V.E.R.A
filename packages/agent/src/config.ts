@@ -5,6 +5,14 @@ import { randomInt, randomUUID } from 'node:crypto';
 import type { AppSettings, DeviceCapability, PermissionMode, ProviderConfig, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
 import { hashToken } from './auth.js';
 import { SecretVault } from './secrets.js';
+import {
+  createToolPortalPasswordVerifier,
+  isToolPortalPasswordVerifier,
+  normalizeToolPortalTargetHosts,
+  verifyToolPortalPassword,
+  type ToolPortalConfigData,
+  type ToolPortalConfigSnapshot,
+} from './tool-portal.js';
 
 export interface PairingConfig {
   /** Long-lived random secret the mobile/remote client authenticates with. */
@@ -49,6 +57,14 @@ export interface MrRobotConfigData {
   workspaces: WorkspaceInfo[];
   pairing: PairingConfig;
   deviceLinks: DeviceLinkConfig[];
+  toolPortal: ToolPortalConfigData;
+}
+
+export interface ToolPortalConfigureInput {
+  password?: unknown;
+  portalWorkspaceId?: unknown;
+  allowedTargetHosts?: unknown;
+  hookMutationEnabled?: unknown;
 }
 
 export function defaultRouting(): RoutingSettings {
@@ -546,12 +562,51 @@ function atomicWriteUtf8(file: string, value: string): void {
   }
 }
 
+function defaultToolPortalConfig(): ToolPortalConfigData {
+  return {
+    enabled: false,
+    allowedTargetHosts: [],
+    hookMutationEnabled: false,
+    revision: 0,
+  };
+}
+
+function normalizeStoredToolPortal(value: unknown): ToolPortalConfigData {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return defaultToolPortalConfig();
+  const source = value as Partial<ToolPortalConfigData>;
+  const passwordVerifier = isToolPortalPasswordVerifier(source.passwordVerifier) ? source.passwordVerifier : undefined;
+  let allowedTargetHosts: string[] = [];
+  try {
+    allowedTargetHosts = normalizeToolPortalTargetHosts(source.allowedTargetHosts ?? []);
+  } catch {
+    // A malformed authorization list must narrow to no network targets.
+  }
+  const portalWorkspaceId = typeof source.portalWorkspaceId === 'string'
+    && source.portalWorkspaceId.length > 0 && source.portalWorkspaceId.length <= 256
+    ? source.portalWorkspaceId
+    : undefined;
+  return {
+    enabled: source.enabled === true && Boolean(passwordVerifier),
+    ...(passwordVerifier ? { passwordVerifier } : {}),
+    ...(portalWorkspaceId ? { portalWorkspaceId } : {}),
+    allowedTargetHosts,
+    hookMutationEnabled: source.hookMutationEnabled === true,
+    revision: Number.isSafeInteger(source.revision) && Number(source.revision) >= 0 ? Number(source.revision) : 0,
+    ...(typeof source.updatedAt === 'number' && Number.isSafeInteger(source.updatedAt) && source.updatedAt > 0
+      ? { updatedAt: source.updatedAt }
+      : {}),
+  };
+}
+
 function isConfigJson(value: string): boolean {
   try {
     const parsed = JSON.parse(value) as Partial<MrRobotConfigData>;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
     if (parsed.settings != null && (typeof parsed.settings !== 'object' || Array.isArray(parsed.settings))) return false;
     if (parsed.pairing != null && (typeof parsed.pairing !== 'object' || Array.isArray(parsed.pairing))) return false;
+    if (parsed.toolPortal != null && (typeof parsed.toolPortal !== 'object' || Array.isArray(parsed.toolPortal))) return false;
+    if (parsed.toolPortal && (Object.prototype.hasOwnProperty.call(parsed.toolPortal, 'password')
+      || Object.prototype.hasOwnProperty.call(parsed.toolPortal, 'passwordHash'))) return false;
     return [parsed.providers, parsed.routingPresets, parsed.workspaces, parsed.deviceLinks]
       .every((field) => field == null || (Array.isArray(field) && field.every((item) => Boolean(item && typeof item === 'object' && !Array.isArray(item)))));
   } catch {
@@ -625,6 +680,7 @@ export class ConfigStore {
   private readonly unavailableProviderSecrets = new Map<string, string>();
   private recoveryDiagnostics: ConfigRecoveryDiagnostic[] = [];
   private writesBlocked = false;
+  private toolPortalConfigurationTail: Promise<void> = Promise.resolve();
 
   constructor(home = mrRobotHome(), dependencies: ConfigStoreDependencies = {}) {
     this.dir = home;
@@ -714,6 +770,7 @@ export class ConfigStore {
         const permissionCap = normalizeDevicePermission(link.permissionCap);
         return { ...link, permissionCap, capabilities: normalizeDeviceCapabilities(link.capabilities, permissionCap) };
       }),
+      toolPortal: normalizeStoredToolPortal(parsed.toolPortal),
     };
     this.unavailableProviderSecrets.clear();
     this.recoveryDiagnostics = this.recoveryDiagnostics.filter((item) => item.code !== 'provider-secret-unavailable');
@@ -741,6 +798,7 @@ export class ConfigStore {
       workspaces: [],
       pairing: { ...freshPairing(), secret },
       deviceLinks: [],
+      toolPortal: defaultToolPortalConfig(),
     };
   }
 
@@ -820,6 +878,19 @@ export class ConfigStore {
               createdAt: Date.now(),
             };
             for (const link of decoded.data.deviceLinks) if (!link.revokedAt) link.revokedAt = Date.now();
+            // A backup can contain an older password verifier. Recovery must
+            // not silently reopen a public portal under a credential that was
+            // rotated or disabled after that backup was written.
+            decoded.data.toolPortal = {
+              ...decoded.data.toolPortal,
+              enabled: false,
+              passwordVerifier: undefined,
+              hookMutationEnabled: false,
+              revision: Number.isSafeInteger(decoded.data.toolPortal.revision + 1)
+                ? decoded.data.toolPortal.revision + 1
+                : 1,
+              updatedAt: Date.now(),
+            };
             this.save(decoded.data);
           } catch (error) {
             throw error instanceof PairingSecretUnavailableError
@@ -975,6 +1046,106 @@ export class ConfigStore {
 
   get workspaces(): WorkspaceInfo[] {
     return clone(this.data.workspaces);
+  }
+
+  toolPortalStatus(): ToolPortalConfigSnapshot {
+    const portal = this.data.toolPortal;
+    const workspaceConfigured = Boolean(
+      portal.portalWorkspaceId
+      && this.data.workspaces.some((workspace) => workspace.id === portal.portalWorkspaceId),
+    );
+    return {
+      enabled: portal.enabled && Boolean(portal.passwordVerifier),
+      ...(portal.portalWorkspaceId ? { portalWorkspaceId: portal.portalWorkspaceId } : {}),
+      workspaceConfigured,
+      allowedTargetHosts: [...portal.allowedTargetHosts],
+      hookMutationEnabled: portal.hookMutationEnabled,
+      revision: portal.revision,
+      ...(portal.updatedAt ? { updatedAt: portal.updatedAt } : {}),
+    };
+  }
+
+  async verifyToolPortalPassword(candidate: unknown): Promise<boolean> {
+    const portal = this.data.toolPortal;
+    return portal.enabled && await verifyToolPortalPassword(candidate, portal.passwordVerifier);
+  }
+
+  toolPortalWorkspace(): WorkspaceInfo | undefined {
+    const id = this.data.toolPortal.portalWorkspaceId;
+    return clone(id ? this.data.workspaces.find((workspace) => workspace.id === id) : undefined);
+  }
+
+  /** Configure or rotate the portal only from the native administrator RPC. */
+  configureToolPortal(input: ToolPortalConfigureInput): Promise<ToolPortalConfigSnapshot> {
+    const operation = this.toolPortalConfigurationTail.then(() => this.configureToolPortalLocked(input));
+    this.toolPortalConfigurationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async configureToolPortalLocked(input: ToolPortalConfigureInput): Promise<ToolPortalConfigSnapshot> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('도구 포털 설정이 올바르지 않습니다.');
+    const allowedKeys = new Set(['password', 'portalWorkspaceId', 'allowedTargetHosts', 'hookMutationEnabled']);
+    if (Object.keys(input).some((key) => !allowedKeys.has(key))) throw new Error('지원하지 않는 도구 포털 설정 항목입니다.');
+    if (!Object.keys(input).length) throw new Error('변경할 도구 포털 설정을 입력하세요.');
+
+    const previous = clone(this.data.toolPortal);
+    const next = clone(previous);
+    if (Object.prototype.hasOwnProperty.call(input, 'password')) {
+      next.passwordVerifier = await createToolPortalPasswordVerifier(input.password);
+      next.enabled = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'portalWorkspaceId')) {
+      if (input.portalWorkspaceId === null || input.portalWorkspaceId === '') {
+        delete next.portalWorkspaceId;
+      } else if (typeof input.portalWorkspaceId === 'string'
+        && this.data.workspaces.some((workspace) => workspace.id === input.portalWorkspaceId)) {
+        next.portalWorkspaceId = input.portalWorkspaceId;
+      } else {
+        throw new Error('등록된 포털 작업 폴더 ID를 선택하세요. 경로는 직접 지정할 수 없습니다.');
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'allowedTargetHosts')) {
+      next.allowedTargetHosts = normalizeToolPortalTargetHosts(input.allowedTargetHosts);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'hookMutationEnabled')) {
+      if (typeof input.hookMutationEnabled !== 'boolean') throw new Error('Hook 변경 opt-in 값이 올바르지 않습니다.');
+      next.hookMutationEnabled = input.hookMutationEnabled;
+    }
+    next.revision = Number.isSafeInteger(previous.revision + 1) ? previous.revision + 1 : 1;
+    next.updatedAt = Date.now();
+    this.data.toolPortal = next;
+    try {
+      this.save();
+    } catch (error) {
+      this.data.toolPortal = previous;
+      throw error;
+    }
+    return this.toolPortalStatus();
+  }
+
+  disableToolPortal(): Promise<ToolPortalConfigSnapshot> {
+    const operation = this.toolPortalConfigurationTail.then(() => this.disableToolPortalLocked());
+    this.toolPortalConfigurationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private disableToolPortalLocked(): ToolPortalConfigSnapshot {
+    const previous = clone(this.data.toolPortal);
+    this.data.toolPortal = {
+      ...previous,
+      enabled: false,
+      passwordVerifier: undefined,
+      hookMutationEnabled: false,
+      revision: Number.isSafeInteger(previous.revision + 1) ? previous.revision + 1 : 1,
+      updatedAt: Date.now(),
+    };
+    try {
+      this.save();
+    } catch (error) {
+      this.data.toolPortal = previous;
+      throw error;
+    }
+    return this.toolPortalStatus();
   }
 
   addWorkspace(path: string, name?: string): WorkspaceInfo {

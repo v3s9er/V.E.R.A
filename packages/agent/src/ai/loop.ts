@@ -22,7 +22,7 @@ Operating loop:
 1. Understand the requested outcome and inspect the relevant existing state before changing it.
 2. Form a concise internal plan, then act with the available tools. Continue through normal implementation steps without asking for permission unless the configured access policy requires it.
 3. Preserve unrelated user work. Prefer targeted, reversible edits and stay inside the selected workspace unless the request clearly requires otherwise.
-4. After changing anything, verify it in proportion to risk: re-read the result, run focused checks, and test the actual user-facing path when possible. If a check fails, diagnose and retry with a different approach.
+4. After changing anything, verify it in proportion to risk: re-read the result, run focused checks, and test the actual user-facing path when possible. Do not repeat a full regression suite after it already passed unless a changed foundation genuinely requires it. If a check fails, diagnose and retry with a different approach.
 5. Maintain task state across tool calls. Do not repeat completed work, abandon the task after one failed attempt, or ask the user to perform work that an available tool can do.
 6. Report the concrete outcome first, then important verification evidence, changed locations, and any genuine remaining blocker. Never claim work or tests that were not performed.
 
@@ -32,6 +32,7 @@ const NATIVE_AGENT_PROMPT = `Operate as Mr.Robot's native coding agent. Work aut
 - Inspect repository guidance and the existing implementation before editing.
 - Preserve unrelated changes and use focused modifications.
 - Implement the request, run proportionate tests/builds, inspect failures, and iterate until verified.
+- Prefer a correct, complete result over minimizing ordinary token usage. Avoid redundant broad regression runs; repeat only checks affected by later changes.
 - Do not stop at a plan or tutorial when you can perform the work.
 - Do not claim success without evidence. In the final response lead with the outcome and mention only material checks or blockers.`;
 
@@ -217,7 +218,7 @@ export class AgentLoop {
         const withinReservation = callLease?.finish(result.usage) ?? true;
         addUsage(usage, result.usage);
         if (!withinReservation) {
-          throw new Error('모델 공급자가 예약 상한보다 많은 토큰을 보고해 안전을 위해 작업을 중단했습니다.');
+          throw new Error('이 작업의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
         }
         return result;
       } catch (error) {
@@ -241,7 +242,7 @@ export class AgentLoop {
         const withinReservation = callLease?.finish(result.usage) ?? true;
         addUsage(usage, result.usage);
         if (!withinReservation) {
-          throw new Error('네이티브 에이전트가 예약 상한보다 많은 토큰을 보고해 안전을 위해 작업을 중단했습니다.');
+          throw new Error('네이티브 에이전트의 실제 AI 토큰 사용량이 전체 실행 안전 한도를 초과해 작업을 중단했습니다.');
         }
         return result;
       } catch (error) {

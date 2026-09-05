@@ -3,6 +3,7 @@ import type { ChatConfirmRequest, ChatRunState, ConversationDetail, Conversation
 import { useMrRobot } from '../state';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
+import { BrandIcon } from '../components/BrandIcon';
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string }
@@ -52,6 +53,20 @@ interface SpeechRecognitionLike {
 
 let uid = 1;
 const nextId = (): string => `m${uid++}`;
+const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
+  const assistant = items[items.length - 1];
+  const user = items[items.length - 2];
+  const retryingFailedTail = assistant?.role === 'assistant'
+    && Boolean(assistant.error)
+    && user?.role === 'user'
+    && user.content === text;
+  const base = retryingFailedTail ? items.slice(0, -2) : items;
+  return [
+    ...base,
+    { id: nextId(), role: 'user', content: text, tools: [], done: true },
+    { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
+  ];
+};
 const modelChoiceValue = (providerId: string, model: string): string => JSON.stringify([providerId, model]);
 const describe = (input: unknown): string => { try { const s = JSON.stringify(input); return s.length > 90 ? `${s.slice(0, 90)}…` : s; } catch { return ''; } };
 const fromDetail = (detail: ConversationDetail): UiMsg[] => detail.messages
@@ -248,7 +263,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setStatus('모델 선택 중…');
     setRoute(null);
     stickToBottomRef.current = true;
-    setMessages((items) => [...items, { id: nextId(), role: 'user', content: text, tools: [], done: true }, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }]);
+    setMessages((items) => appendPendingAttempt(items, text));
     try {
       const result = await client.call('chat.start', {
         conversationId: conversation.id,
@@ -796,7 +811,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   return (
     <div className="conversation-layout">
       <aside className="conversation-list">
-        <div className="conversation-brand"><span className="conversation-brand-mark">✦</span><b>Mr.Robot</b></div>
+        <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>Mr.Robot</b></div>
         <div className="conversation-list-head"><Button onClick={() => void createConversation()}>＋ 새 대화</Button><button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
         <div className="conversation-items">
           {conversations.map((c) => <div

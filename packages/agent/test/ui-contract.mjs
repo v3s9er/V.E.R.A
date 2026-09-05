@@ -33,12 +33,19 @@ if (!main.includes("preload: resolve(here, 'preload.cjs')")) throw new Error('de
 if (!preload.includes("ipcRenderer.invoke('mr-robot:choose-directory')")) throw new Error('directory picker is missing from preload bridge');
 if (!main.includes("ipcMain.handle('mr-robot:choose-directory'")) throw new Error('directory picker IPC handler is missing');
 if (!stage.includes("copyFileSync(join(desktop, 'preload.cjs')")) throw new Error('desktop stage omits the preload bridge');
+if (!main.includes("nativeImage.createFromPath(runtimeIconPath)")
+  || main.includes('ICON_B64')
+  || !stage.includes("copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'icon.png'))")) {
+  throw new Error('desktop window and tray do not use the canonical mobile app icon');
+}
 
 const chat = read('packages/web/src/views/ChatView.tsx');
+const brandIcon = read('packages/web/src/components/BrandIcon.tsx');
 const app = read('packages/web/src/App.tsx');
 const ui = read('packages/web/src/components/ui.tsx');
 const settings = read('packages/web/src/views/SettingsView.tsx');
 const pluginsView = read('packages/web/src/views/PluginsView.tsx');
+const pluginCategories = read('packages/web/src/plugin-categories.ts');
 const schedulesView = read('packages/web/src/views/SchedulesView.tsx');
 const dependencySetup = read('packages/web/src/components/DependencySetup.tsx');
 const routingGraph = read('packages/web/src/components/RoutingGraphEditor.tsx');
@@ -61,6 +68,10 @@ const mobileManifest = read('apps/mobile/android/app/src/main/AndroidManifest.xm
 const css = read('packages/web/src/styles.css');
 if (/window\.(prompt|alert|confirm)\(/.test(uiSource)) throw new Error('native browser prompt/alert/confirm returned to the product UI');
 if (!chat.includes('chat-context-panel') || !chat.includes('workspaceDialogOpen')) throw new Error('conversation context/workspace fallback UI is missing');
+if (!brandIcon.includes('src="/favicon.svg"')
+  || !chat.includes('<BrandIcon />')
+  || !app.includes('<BrandIcon />')
+  || !connectGate.includes('<BrandIcon />')) throw new Error('desktop surfaces do not share the canonical mobile brand icon');
 if (!chat.includes('MarkdownMessage') || !existsSync(join(root, 'packages/web/src/components/MarkdownMessage.tsx'))) throw new Error('rich assistant response rendering is missing');
 if (!ui.includes("size?: 'default' | 'wide'")) throw new Error('responsive modal sizing contract is missing');
 if (!settings.includes('size="wide"')) throw new Error('preset browser does not request a wide modal');
@@ -71,6 +82,15 @@ if (!settings.includes('Number(telemetry.cachedPromptTokens ?? 0)') || !settings
 if (!chat.includes('aria-label={`${c.title} 메뉴`}') || !chat.includes('setConversationMenu({ conversation: c')) throw new Error('conversation ellipsis is not an actual menu trigger');
 if (!app.includes("client.on('voice.command'") || !app.includes("setView('chat')") || !chat.includes('executeCommand(voiceCommand.text)')) throw new Error('recognized wake commands are not globally queued and connected to chat execution');
 if (!chat.includes('finally {') || !chat.includes('busyRef.current = false')) throw new Error('chat busy state has no request-completion fallback');
+if (!chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] =>')
+  || !chat.includes("assistant?.role === 'assistant'")
+  || !chat.includes('Boolean(assistant.error)')
+  || !chat.includes("user?.role === 'user'")
+  || !chat.includes('user.content === text')
+  || !chat.includes('const base = retryingFailedTail ? items.slice(0, -2) : items;')
+  || !chat.includes('setMessages((items) => appendPendingAttempt(items, text))')) {
+  throw new Error('desktop chat can accumulate a duplicate tail when the exact failed request is retried');
+}
 if (!chat.includes('signal: uploadController.signal') || !chat.includes("uploadAbortReason.current = 'timeout'") || !chat.includes('업로드 취소')) throw new Error('chat drag-and-drop uploads lack cancellation and timeout UX');
 if (!chat.includes('routingPresetId: null,') || !chat.includes('providerId,') || !chat.includes('providerModel,')) throw new Error('model picker cannot switch directly from a routing preset to single-model mode');
 if (!chat.includes("const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])")
@@ -249,6 +269,11 @@ if (!schedulesView.includes('clearNaverCredentials: true')
   || !schedulesView.includes('집 주소와 근무 일정은 유지됩니다.')) throw new Error('NAVER credential removal lacks an explicit scoped confirmation dialog');
 if (!dependencySetup.includes('const canManage = client.isAdmin') || !dependencySetup.includes('disabled={!canManage')) throw new Error('dependency setup is not safely read-only for paired devices');
 if (!pluginsView.includes('if (!canManage)') || !pluginsView.includes('플러그인 관리는 PC 전용입니다') || !pluginsView.includes('if (!canManage) return;')) throw new Error('plugin management is not replaced by a read-only catalog for paired devices');
+if ((pluginsView.match(/className="plugin-category-list"/g) ?? []).length !== 2
+  || !pluginsView.includes('groupPluginsByCategory(plugins)')
+  || !pluginsView.includes("client.call('plugins.setCategory'")
+  || !pluginCategories.includes("pentest: '모의해킹'")
+  || !css.includes('.plugin-category-head')) throw new Error('plugin categories are not grouped into labeled sections in both administrator and read-only catalogs');
 if (!schedulesView.includes('Promise.allSettled') || !schedulesView.includes('canManageJobs ? client.call(\'scheduler.list\'') || !schedulesView.includes('일정 보기 모드')) throw new Error('paired-device scheduler denial can still block general calendar use');
 if (!schedulesView.includes('disabled={busy || !importPerson.trim()}')
   || schedulesView.includes('disabled={busy || !importPerson.trim() || !importTeam.trim()}')) throw new Error('optional workbook team filter is incorrectly required by the UI');

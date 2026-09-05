@@ -27,9 +27,11 @@ try {
   throw error;
 }
 
-// 32x32 gradient logo (generated at build time).
-const ICON_B64 =
-  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAOZSURBVFhHxdfbT1RHHAfwefTRP6FvtbFGYlODRqtGTWmtGgwaWTW7irDCZruAi+KVIcbiJdZFrAiiq5EQY2wLbQ0qWlPTaDXGC3iLN7xHk0YW9nIuc8756pzNbtgt3Zl90P0m87qfmTnn/H6/JSRDfBVanq/CcPm8JvX6+GLUU8Vo+WpGy2sYda9ltHQdo6UbGC3ZxOjyOo066zXq3KLRZVs1uqRBo44GxeXYoeWl//b/proMY/xu69fqchNVHhOVXhPf+0x4Kw14qg1U+A2UrzHgrmUoW89QupGhZDPDijodrnodzi06lm3VsbRBg2O7huKdGhbv0rDoRxVFAbW7sDGan24m419puFa7TeVD4AsDKor2qFiwV0Vhs9IwLYhRKXjNSmOV320hG7xmFwNtZljTxOTxfQrm71cwt0VtTuL82rM5eeCwgRv3LNx9bOFOf3z1PrLwUxeTwue1KviuLYY5B5Tp9gb8ZdZ5WfzUBdOGh+N3nli4/cTE7acmTl8zsDQggR+M4ZtDkX5S58QoWXxvu5ER5+vWMxMtPUyMB6MoOBIFqVql58vg/JnfeiDG7fXchKtVjH99NAri8xiVMvi6QPz0MnjfcxPrf9aF+Oz2CAgvMiKcf2qNHYY03vfCxJ5zuhCf1REBsSucAOff+eYW9h/8wSsL/W8sPHydivNFT2pCfOYxewOMinBeZEp+0JP4y38tGCZSYlnA65Bl470vTZR0qEJ8xvEICK/tIjxRZNrPGggrVqqclqhmobOXSeHTT4RB7MYigfMKF+xh6d6I6epjUvhXv/AN8K4mgfMKp8v5dhzHYkJ8amcYhLdUGbz2iJ5uZEz9n6oQn/JbGMTu5wKc1/Y2yetP5OhNXYhP/n0IxB4mBDhvLPR4djew86IqxCedHALhk4wI543F0aSmGxmz/I+YEM/vHgLhY5QITzSWU31GujNirrwypPCJp4dA4jOcGOeNZVGLgrfRzHUgrFlY2BmVwr/sGQSJD5BiPNFYig+rOHt/5JvgJ88G/+LcIAifXmXx4bXd06Wg6ZJmv+3NVzV4z8g98+H4hPODIPbonCUuU+Fk8Ly/BkGKt6m1ucLHXwiBLN6hFOQKH/d3CMS5G6NzhX9+MQR7Ki4KqP25wMf+E1LiG2hUCnKAY8zlt7XJPyeF+2LBj4l/dmXgUhLnmR8cGD2vVe3+WPin1wc+SdlAIt+2RVwFh6IDHwhXUq79fd4B90qNYqnHq5EAAAAASUVORK5CYII=';
+// The staged runtime, Windows executable, installer, Android package and web
+// favicon all derive from the same canonical mobile brand asset.
+const runtimeIconPath = existsSync(resolve(here, 'icon.png'))
+  ? resolve(here, 'icon.png')
+  : resolve(here, 'build', 'icon.png');
 
 let server = null;
 let agentPort = 0;
@@ -636,7 +638,9 @@ async function pairRemotePc(input) {
 }
 
 function icon() {
-  return nativeImage.createFromBuffer(Buffer.from(ICON_B64, 'base64'));
+  const image = nativeImage.createFromPath(runtimeIconPath);
+  if (image.isEmpty()) throw new Error(`Mr.Robot icon could not be loaded: ${runtimeIconPath}`);
+  return image;
 }
 
 function logStartup(error) {
