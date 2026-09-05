@@ -84,7 +84,7 @@ const mobileTokenPolicyControl = chat.indexOf('accessibilityLabel="대화 토큰
 check('per-conversation token policy follows permission and is run-locked, rollback-safe, and administrator-gated',
   mobilePermissionControl >= 0
   && mobileTokenPolicyControl > mobilePermissionControl
-  && types.includes("export type ConversationTokenPolicy = 'adaptive' | 'audit-only';")
+  && types.includes("export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'quality' | 'audit-only';")
   && types.includes('tokenPolicy: ConversationTokenPolicy;')
   && rpc.includes('isAdmin = false;')
   && rpc.includes('this.isAdmin = this.authed && auth?.isAdmin === true;')

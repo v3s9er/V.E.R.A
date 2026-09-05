@@ -139,14 +139,14 @@ console.log('1bb. public WebSocket admission tickets are bound, expiring, and si
   check('Cloudflare/public loopback route requires a ticket', publicBinding.requiresTicket === true
     && publicBinding.directLoopback === false
     && publicBinding.source === 'cloudflare:203.0.113.20' && publicBinding.audience === 'robot.example.com');
-  check('public Host, rewritten loopback Host, Cloudflare and Tailnet paths cannot infer native audit authority',
+  check('authenticated administrators may choose question-unlimited while transport still requires tickets',
     genericProxyBinding.requiresTicket === true
       && genericProxyBinding.directLoopback === false
       && rewrittenProxyBinding.directLoopback === true
-      && canUseAuditOnly(ordinaryAdmin('public:198.51.100.4', false)) === false
-      && canUseAuditOnly(ordinaryAdmin('127.0.0.1', rewrittenProxyBinding.directLoopback)) === false
-      && canUseAuditOnly(ordinaryAdmin('cloudflare:203.0.113.20', false)) === false
-      && canUseAuditOnly(ordinaryAdmin('100.90.1.2', false)) === false
+      && canUseAuditOnly(ordinaryAdmin('public:198.51.100.4', false)) === true
+      && canUseAuditOnly(ordinaryAdmin('127.0.0.1', rewrittenProxyBinding.directLoopback)) === true
+      && canUseAuditOnly(ordinaryAdmin('cloudflare:203.0.113.20', false)) === true
+      && canUseAuditOnly(ordinaryAdmin('100.90.1.2', false)) === true
       && canUseAuditOnly({ state: { auth: { isAdmin: true, permissionCap: 'full', nativeAuditOnly: true } } }) === true);
 
   const protocols = (ticket) => `mr-robot-rpc-v1, ${ticket.protocol}`;
@@ -785,10 +785,10 @@ console.log('7d. unattended remote handoff is admin-only, strong, memory-only an
     undefined,
     { Host: `127.0.0.1:${localStarted.port}` },
   );
-  check('only a fresh main-process-issued proof grants local desktop audit authority and it cannot replay',
+  check('question-unlimited is available to authenticated administrators independently of legacy native proofs',
     nativeAuth?.ok === true && nativeAuth.canUseAuditOnly === true
-      && replayedProof?.ok === true && replayedProof.canUseAuditOnly === false
-      && rewrittenProxyAuth?.ok === true && rewrittenProxyAuth.canUseAuditOnly === false);
+      && replayedProof?.ok === true && replayedProof.canUseAuditOnly === true
+      && rewrittenProxyAuth?.ok === true && rewrittenProxyAuth.canUseAuditOnly === true);
   const handoffBeforeLinkStop = handlers.get('pairing.createRemoteHandoff')({ ttlMinutes: 24 * 60 }, admin);
   server.bus.emit('remote-link.changed', { running: false });
   check('stopping the public remote link revokes its remote handoff', server.exchangePin(handoffBeforeLinkStop.pin, 'link-stop replay', 'ask', 'link-stop-client').ok === false);
@@ -826,11 +826,11 @@ console.log('8. stored conversation permissions cannot exceed the linked device 
   const adminAudit = handlers.get('conversations.create')({ title: 'local audit', tokenPolicy: 'audit-only' }, admin);
   const remoteAdminAudit = handlers.get('conversations.create')({ title: 'remote admin audit attempt', tokenPolicy: 'audit-only' }, remoteAdmin);
   const linkedDowngrade = handlers.get('conversations.update')({ id: adminAudit.id, tokenPolicy: 'audit-only' }, ask);
-  check('only a native-capability administrator can persist audit-only token policy',
-    linkedAudit.tokenPolicy === 'adaptive'
+  check('authenticated run-enabled clients can persist question-unlimited token policy',
+    linkedAudit.tokenPolicy === 'audit-only'
       && adminAudit.tokenPolicy === 'audit-only'
-      && remoteAdminAudit.tokenPolicy === 'adaptive'
-      && linkedDowngrade.tokenPolicy === 'adaptive');
+      && remoteAdminAudit.tokenPolicy === 'audit-only'
+      && linkedDowngrade.tokenPolicy === 'audit-only');
   let invalidTokenPolicyRejected = false;
   try { handlers.get('conversations.create')({ tokenPolicy: 'unbounded' }, admin); } catch { invalidTokenPolicyRejected = true; }
   let invalidTokenPolicyUpdateRejected = false;
@@ -1194,8 +1194,8 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   await handlers.get('chat.start')({ conversationId: conversation.id, text: 'linked attempt', tokenPolicy: 'audit-only' }, linked);
   await handlers.get('chat.start')({ conversationId: conversation.id, text: 'admin run', tokenPolicy: 'audit-only' }, admin);
   await handlers.get('chat.start')({ conversationId: conversation.id, text: 'remote admin attempt', tokenPolicy: 'audit-only' }, remoteAdmin);
-  check('linked and remote-administrator execution of an audit-only conversation is forced back to adaptive',
-    observedPolicies[0] === 'adaptive' && observedPolicies[1] === 'audit-only' && observedPolicies[2] === 'adaptive');
+  check('authenticated linked and remote-administrator requests may explicitly select unlimited',
+    observedPolicies.every(policy => policy === 'audit-only'));
 
   const startsBeforeInvalid = server.chatRunAdmission.snapshot().globalStarts;
   let invalidStartRejected = false;

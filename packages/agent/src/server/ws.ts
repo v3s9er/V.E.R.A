@@ -45,6 +45,8 @@ export interface AuthContext {
    * policy. Ordinary administrator credentials never imply this capability.
    */
   nativeAuditOnly?: boolean;
+  /** Host-issued, process-lifetime Discord bridge grant; never parsed from RPC. */
+  trustedDiscord?: boolean;
 }
 
 export interface WsTicketBinding {
@@ -246,15 +248,15 @@ export class WsClient {
 }
 
 /**
- * Token-limit bypass is intentionally narrower than ordinary administrator
- * access. Only an administrator auth carrying a fresh capability issued
- * directly to the embedded Electron main process may enable it. Socket, Host,
- * Origin and forwarded headers are never authority for this decision.
+ * Question-unlimited is a usage policy, not control-plane administration.
+ * Authenticated run-enabled clients may select it; anonymous/read-only clients
+ * may not. Headers and JSON flags never create an authentication context.
  */
 export function canUseAuditOnly(
   client: Pick<WsClient, 'state'>,
 ): boolean {
-  return client.state.auth?.isAdmin === true && client.state.auth.nativeAuditOnly === true;
+  const auth = client.state.auth;
+  return Boolean(auth && (auth.isAdmin || auth.linkId) && auth.permissionCap !== 'read-only');
 }
 
 export type RpcHandler = (params: unknown, client: WsClient) => unknown | Promise<unknown>;
@@ -274,7 +276,7 @@ export class WsHub {
   constructor(
     server: Server,
     private readonly handlers: Map<string, RpcHandler>,
-    private readonly authenticate: (secret: string, desktopAuditProof?: string) => AuthContext | null,
+    private readonly authenticate: (secret: string, desktopAuditProof?: string, directLoopback?: boolean) => AuthContext | null,
     private readonly logger: Logger,
     private readonly upgradeTickets: WsUpgradeTickets,
   ) {
@@ -533,7 +535,7 @@ export class WsHub {
         ? p.desktopAuditProof
         : undefined;
       let authenticated = typeof p.secret === 'string'
-        ? this.authenticate(p.secret, desktopAuditProof)
+        ? this.authenticate(p.secret, desktopAuditProof, client.directLoopback)
         : null;
       // A public upgrade ticket is admission for exactly the credential that
       // obtained it. It cannot be lent to another device token or used to turn

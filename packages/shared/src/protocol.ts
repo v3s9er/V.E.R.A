@@ -238,7 +238,7 @@ export type ConversationStatus = 'active' | 'archived';
  * Per-conversation model-usage policy. `audit-only` is a local administrator
  * choice and is never trusted when imported from another device.
  */
-export type ConversationTokenPolicy = 'adaptive' | 'audit-only';
+export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'quality' | 'audit-only';
 
 export interface ConversationSummary {
   id: string;

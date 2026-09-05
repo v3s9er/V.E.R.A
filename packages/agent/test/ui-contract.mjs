@@ -119,7 +119,7 @@ if (desktopPermissionSelect < 0 || desktopTokenPolicySelect < desktopPermissionS
   || !chat.includes("tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive'")
   || !chat.includes("value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}")
   || !chat.includes('disabled={executionControlsDisabled || !client.canUseAuditOnly}')
-  || !chat.includes("TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value === 'adaptive')")
+  || !chat.includes("TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value !== 'audit-only')")
   || !chat.includes('적응형 · 품질 우선')
   || !chat.includes('무제한 · 감사만')
   || !chat.includes('대화 기록과 설정의 텔레메트리에서 확인')) {

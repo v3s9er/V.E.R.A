@@ -158,7 +158,7 @@ export class MrRobotClient {
     const id = this.reqId++;
     const req: RpcRequest = { id, method, params };
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = method === 'chat.start' ? undefined : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`응답 시간 초과: ${method}`));
       }, timeoutMs);

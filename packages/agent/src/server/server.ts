@@ -78,7 +78,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.5';
+export const VERSION = '0.4.7';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -328,6 +328,8 @@ interface AdaptiveRunBudget {
   plannedCalls: number;
 }
 
+export const QUESTION_TOKEN_LIMITS = { economy: 64_000, standard: 256_000, quality: 1_000_000 } as const;
+
 /**
  * Shared, memory-only admission policy for every interactive model run.
  *
@@ -432,12 +434,14 @@ export class ChatRunAdmissionPolicy {
         if (callStarted) throw new Error('모델 호출이 시작된 뒤에는 실행 예산을 바꿀 수 없습니다.');
         // UI gating is convenience only. The policy itself makes remote
         // attempts fail safe even if an RPC validation is accidentally missed.
-        tokenPolicy = profile.tokenPolicy === 'audit-only' && auth.isAdmin && capabilities.allowAuditOnly === true
-          ? 'audit-only'
-          : 'adaptive';
+        tokenPolicy = profile.tokenPolicy === 'audit-only'
+          ? capabilities.allowAuditOnly === true && (auth.isAdmin || auth.linkId) && auth.permissionCap !== 'read-only' ? 'audit-only' : 'adaptive'
+          : profile.tokenPolicy in QUESTION_TOKEN_LIMITS ? profile.tokenPolicy : 'adaptive';
         budget = this.adaptiveBudget({ ...profile, tokenPolicy });
+        const questionLimit = QUESTION_TOKEN_LIMITS[tokenPolicy as keyof typeof QUESTION_TOKEN_LIMITS];
+        if (questionLimit) budget = { ...budget, initial: questionLimit, ceiling: questionLimit, progressStep: 0 };
         granted = budget.initial;
-        const nextReserved = tokenPolicy === 'adaptive' ? budget.ceiling : 0;
+        const nextReserved = tokenPolicy !== 'audit-only' ? budget.ceiling : 0;
         const delta = nextReserved - reservedCeiling;
         this.globalReserved = Math.max(0, this.globalReserved + delta);
         state!.reserved = Math.max(0, state!.reserved + delta);
@@ -467,7 +471,7 @@ export class ChatRunAdmissionPolicy {
           // noteModelProgress() observes a completed tool round or steering.
           if (desired > granted && callsReserved < budget.plannedCalls) granted = Math.min(budget.ceiling, desired);
           if (reservation <= 0 || desired > granted || desired > budget.ceiling) {
-            throw new ModelBudgetExceededError('적응형 AI 예산이 소진되었습니다. 반복 없이 실제 작업 진전이 있어야 계속 확장할 수 있습니다.');
+            throw new ModelBudgetExceededError(tokenPolicy === 'adaptive' ? '이번 질문의 자동 AI 예산이 소진되었습니다. 질문 예산 단계를 높이거나 무제한을 선택하세요.' : '이번 질문의 토큰 예산이 소진되었습니다. 단계를 높이거나 무제한을 선택하세요. 새 질문은 새 예산으로 시작합니다.');
           }
         }
         const principalProviderLimit = state!.kind === 'admin'
@@ -509,7 +513,8 @@ export class ChatRunAdmissionPolicy {
             // Metering from arbitrary compatible endpoints is untrusted even
             // when syntactically valid. Never release the host-owned pre-call
             // reservation; a larger valid report still raises the debit.
-            const charged = report.valid ? Math.max(reservation, report.tokens) : reservation;
+            const fixedQuestion = tokenPolicy in QUESTION_TOKEN_LIMITS;
+            const charged = fixedQuestion && report.valid && report.tokens > 0 ? report.tokens : report.valid ? Math.max(reservation, report.tokens) : reservation;
             accountedTokens = charged;
             callSpent = Math.min(this.options.maxRecordedTokens, callSpent + charged);
             if (tokenPolicy === 'audit-only') return settlementAccepted;
@@ -691,14 +696,17 @@ export class AgentServer {
   readonly contextBroker: ContextBroker;
   readonly chatRunAdmission = new ChatRunAdmissionPolicy();
   private readonly remoteLinkPlugin = createRemoteLinkPlugin();
+  private readonly discordLinkIds = new Set<string>();
   private readonly discordPlugin = createDiscordPlugin({
     port: () => this.boundPort,
     enabled: () => this.plugins.list().some((item) => item.id === 'discord-agent' && item.enabled),
     issue: () => {
-      const grant = this.config.createDeviceLink('Discord Agent', 'ask', []);
+      const grant = this.config.createDeviceLink('Discord Agent', 'full', []);
+      this.discordLinkIds.add(grant.link.id);
       return { token: grant.token, id: grant.link.id };
     },
-    revoke: (id) => { try { this.config.revokeDeviceLink(id); } finally { this.invalidateDeviceLink(id); } },
+    revoke: (id) => { this.discordLinkIds.delete(id); try { this.config.revokeDeviceLink(id); } finally { this.invalidateDeviceLink(id); } },
+    permissionCeiling: () => this.config.settings.safety.mode === 'read-only' ? 'read-only' : 'full',
     models: () => this.config.providers.map((provider) => ({ providerId: provider.id, name: provider.label, model: provider.model })),
   });
   private readonly webCryptoObserverPlugin = createWebCryptoObserverPlugin({
@@ -883,11 +891,12 @@ export class AgentServer {
     return proof;
   }
 
-  private authenticateWebSocket(candidate: string, desktopAuditProof?: string): AuthContext | null {
+  private authenticateWebSocket(candidate: string, desktopAuditProof?: string, directLoopback = false): AuthContext | null {
     // Consume before authenticating the bearer so a proof presented with the
     // wrong secret cannot be recovered and replayed with the right one.
     const nativeAuditOnly = this.consumeDesktopAuditProof(desktopAuditProof);
     const auth = this.authenticate(candidate);
+    if (directLoopback && auth?.linkId && this.discordLinkIds.has(auth.linkId)) return { ...auth, trustedDiscord: true };
     if (!auth) return null;
     return nativeAuditOnly && auth.isAdmin ? { ...auth, nativeAuditOnly: true } : auth;
   }
@@ -1891,7 +1900,7 @@ export class AgentServer {
     this.hub = new WsHub(
       this.httpServer,
       this.handlers(),
-      (secret, desktopAuditProof) => this.authenticateWebSocket(secret, desktopAuditProof),
+      (secret, desktopAuditProof, directLoopback) => this.authenticateWebSocket(secret, desktopAuditProof, directLoopback),
       this.logger,
       this.wsUpgradeTickets,
     );
@@ -2022,13 +2031,13 @@ export class AgentServer {
     };
     const clientPermission = (client: WsClient, requested?: PermissionMode, fallback: PermissionMode = 'ask'): PermissionMode => (
       effectiveMode(
-        this.config.settings.safety.mode,
+        client.state.auth?.trustedDiscord && this.config.settings.safety.mode !== 'read-only' ? 'full' : this.config.settings.safety.mode,
         effectiveMode(requested ?? fallback, client.state.auth?.permissionCap),
       )
     );
     const requestedTokenPolicy = (value: unknown): ConversationTokenPolicy | undefined => {
       if (value === undefined) return undefined;
-      if (value === 'adaptive' || value === 'audit-only') return value;
+      if (value === 'adaptive' || value === 'economy' || value === 'standard' || value === 'quality' || value === 'audit-only') return value;
       throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     };
     const clientTokenPolicy = (
@@ -2036,7 +2045,7 @@ export class AgentServer {
       requested?: ConversationTokenPolicy,
       fallback: ConversationTokenPolicy = 'adaptive',
     ): ConversationTokenPolicy => (
-      canUseAuditOnly(client) && (requested ?? fallback) === 'audit-only' ? 'audit-only' : 'adaptive'
+      (requested ?? fallback) === 'audit-only' ? canUseAuditOnly(client) ? 'audit-only' : 'adaptive' : requested ?? fallback
     );
     const assertContentWrite = (client: WsClient): void => {
       if (clientPermission(client) === 'read-only') {
@@ -2377,15 +2386,14 @@ export class AgentServer {
       const conversationRouting = routingPresetId ? this.config.routingForPreset(routingPresetId) : null;
       if (routingPresetId && !conversationRouting) throw new Error('이 대화의 모델 시나리오가 삭제되었습니다. 다른 시나리오를 선택하세요.');
       const effectivePermissionMode = effectiveMode(
-        this.config.settings.safety.mode,
+        client.state.auth?.trustedDiscord && this.config.settings.safety.mode !== 'read-only' ? 'full' : this.config.settings.safety.mode,
         effectiveMode(
           ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : conversation.permissionMode,
           client.state.auth?.permissionCap,
         ),
       );
-      // `audit-only` requires the destination's embedded native-main
-      // capability. Browsers, linked clients and remote administrators always
-      // run adaptively even when opening a conversation previously marked so.
+      // Question budgets are independently selected by authenticated run-enabled
+      // clients. Unlimited is usage policy, not control-plane administration.
       const effectiveTokenPolicy = clientTokenPolicy(
         client,
         requestedTokenPolicy(body.tokenPolicy),
@@ -2449,6 +2457,7 @@ export class AgentServer {
             workspacePath: workspace?.path,
             cacheKey: `mrrobot:${conversationId}`,
             tokenPolicy: effectiveTokenPolicy,
+            trustedPermissionOverride: auth.trustedDiscord === true,
           },
         );
         chargedUsage ??= result.usage;

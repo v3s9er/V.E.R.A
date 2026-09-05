@@ -56,7 +56,7 @@ const emptyUsage = (): ChatUsage => ({ promptTokens: 0, completionTokens: 0 });
 const conversationStatuses = new Set<ConversationStatus>(['active', 'archived']);
 const reasoningEfforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']);
 const permissionModes: PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
-const tokenPolicies = new Set<ConversationTokenPolicy>(['adaptive', 'audit-only']);
+const tokenPolicies = new Set<ConversationTokenPolicy>(['adaptive', 'economy', 'standard', 'quality', 'audit-only']);
 const turnRoles = new Set<Turn['role']>(['system', 'user', 'assistant', 'tool']);
 const MAX_SYNC_CONVERSATIONS = 5_000;
 const MAX_SYNC_CONVERSATION_BYTES = 32 * 1024 * 1024;

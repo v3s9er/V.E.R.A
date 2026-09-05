@@ -107,7 +107,10 @@ const permissionWithinCap = (mode: PermissionMode, cap: PermissionMode): boolean
   PERMISSION_ORDER.indexOf(mode) <= PERMISSION_ORDER.indexOf(cap)
 );
 const TOKEN_POLICIES: Array<{ value: ConversationTokenPolicy; label: string; short: string; detail: string }> = [
-  { value: 'adaptive', label: '적응형 · 품질 우선', short: '적응형', detail: '요청 난이도와 실행 방식에 맞춰 품질을 우선하고 안전 상한을 자동 조정합니다.' },
+  { value: 'economy', label: '질문 예산 · 절약 6.4만', short: '절약 6.4만', detail: '질문 하나당 64,000토큰. 복합 트리의 모든 모델 사용량을 합산하며 새 질문마다 초기화합니다.' },
+  { value: 'standard', label: '질문 예산 · 표준 25.6만', short: '표준 25.6만', detail: '질문 하나당 256,000토큰. 이전 질문의 사용량은 차감하지 않습니다.' },
+  { value: 'quality', label: '질문 예산 · 고품질 100만', short: '고품질 100만', detail: '질문 하나당 1,000,000토큰. 긴 코드 작업과 복합 모델 실행용입니다.' },
+  { value: 'adaptive', label: '질문 예산 · 자동', short: '자동', detail: '적응형 · 품질 우선. 질문마다 난이도에 맞춰 새 예산을 계산합니다. 이전 질문 사용량은 이월하지 않습니다.' },
   { value: 'audit-only', label: '무제한 · 감사만', short: '감사만', detail: 'Mr.Robot의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정하며, 공급자 자체 한도와 요금은 계속 적용됩니다.' },
 ];
 
@@ -810,8 +813,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const selectedAccess = ACCESS.find((access) => access.value === effectivePermissionMode) ?? ACCESS[0];
   const permissionLimitedByDevice = effectivePermissionMode !== requestedPermissionMode;
   const selectedTokenPolicy = client.canUseAuditOnly
-    ? TOKEN_POLICIES.find((policy) => policy.value === selected?.tokenPolicy) ?? TOKEN_POLICIES[0]
-    : TOKEN_POLICIES[0];
+    ? TOKEN_POLICIES.find((policy) => policy.value === (selected?.tokenPolicy ?? 'adaptive')) ?? TOKEN_POLICIES.find(p => p.value === 'adaptive')!
+    : TOKEN_POLICIES.find(p => p.value === 'adaptive')!;
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
   const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
@@ -932,12 +935,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 <Select
                   className="token-policy-select"
                   aria-label="대화 토큰 정책"
-                  title={client.canUseAuditOnly ? selectedTokenPolicy.detail : '무제한 감사는 내장 네이티브 앱의 로컬 관리자 연결에서만 사용할 수 있으며, 이 연결은 적응형으로 고정됩니다.'}
+                  title={selectedTokenPolicy.detail}
                   value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}
                   onChange={(event) => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })}
                   disabled={executionControlsDisabled || !client.canUseAuditOnly}
                 >
-                  {TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value === 'adaptive').map((policy) => <option key={policy.value} value={policy.value}>{policy.label}</option>)}
+                  {TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value !== 'audit-only').map((policy) => <option key={policy.value} value={policy.value}>{policy.label}</option>)}
                 </Select>
               </div>
             </div>
@@ -986,6 +989,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 </Select>
               </label>
               {selected?.compactedMessages ? <span className="compaction-note">이전 메시지 {selected.compactedMessages}개 압축됨</span> : null}
+              <label className="composer-select-control" title={selectedTokenPolicy.detail}>
+                <span className="composer-control-label">질문 예산</span>
+                <Select className="composer-control-select" aria-label="입력창 질문 토큰 예산" value={selectedTokenPolicy.value} onChange={event => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })} disabled={executionControlsDisabled || !client.canUseAuditOnly}>
+                  {TOKEN_POLICIES.map(policy => <option key={policy.value} value={policy.value}>{policy.value === 'audit-only' ? '무제한' : policy.short}</option>)}
+                </Select>
+              </label>
             </div>
             <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />
             <Button variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '업로드 취소' : '＋ 파일'}</Button>

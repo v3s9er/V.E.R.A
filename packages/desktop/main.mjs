@@ -293,7 +293,7 @@ function callLocalRpc(method, params, timeoutMs = 60_000, allowAuth = false) {
   if (Buffer.byteLength(payload, 'utf8') > MAX_LOCAL_RPC_BYTES) return Promise.reject(new Error('로컬 RPC 요청이 너무 큽니다.'));
   const boundedTimeout = Math.max(1_000, Math.min(15 * 60_000, Number(timeoutMs) || 60_000));
   return new Promise((resolvePromise, rejectPromise) => {
-    const timer = setTimeout(() => {
+    const timer = normalizedMethod === 'chat.start' ? undefined : setTimeout(() => {
       localRpcPending.delete(id);
       rejectPromise(new Error(`응답 시간 초과: ${normalizedMethod}`));
     }, boundedTimeout);

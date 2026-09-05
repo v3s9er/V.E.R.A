@@ -14,6 +14,7 @@ import uuid
 
 import discord
 from discord import app_commands
+from thread_sessions import ThreadManager
 
 PREFIX = '__MR_ROBOT_DISCORD__'
 _output_lock = threading.Lock()
@@ -27,15 +28,16 @@ def emit(value):
 
 
 class Approval(discord.ui.View):
-    def __init__(self, bridge, channel_id, request_id):
+    def __init__(self, bridge, channel_id, request_id, user_id):
         super().__init__(timeout=110)
         self.bridge = bridge
         self.channel_id = channel_id
         self.request_id = request_id
+        self.user_id = user_id
         self.used = False
 
     async def interaction_check(self, interaction):
-        return interaction.user.id == self.bridge.owner and interaction.channel_id == self.channel_id
+        return interaction.user.id == self.user_id and interaction.channel_id == self.channel_id
 
     async def settle(self, interaction, approve):
         if self.used:
@@ -69,18 +71,43 @@ class Bridge:
         self.loop = asyncio.get_running_loop()
         self.tree = app_commands.CommandTree(client)
         self.reader_started = False
+        self.allowed_guilds = set()
+        self.threads = ThreadManager(self, getattr(client, '_mr_robot_thread_state', None))
+
+    @staticmethod
+    def scope_key(interaction):
+        return f'{interaction.guild_id}:{interaction.channel_id}:{interaction.user.id}'
+
+    async def authorize(self, interaction):
+        if interaction.guild_id not in self.allowed_guilds or not interaction.guild:
+            raise PermissionError('등록된 Discord 서버에서만 사용할 수 있습니다. DM은 지원하지 않습니다.')
+        if hasattr(self, 'threads'):
+            self.threads.check_context(interaction)
+        # Fetch current role assignments AND role permission bits, not cached
+        # channel permissions. A renamed role or Manage Server is not Administrator.
+        guild = await self.client.fetch_guild(interaction.guild_id)
+        member = await guild.fetch_member(interaction.user.id)
+        roles = await guild.fetch_roles()
+        role_ids = set(member._roles)
+        if member.id == guild.owner_id or any(role.permissions.administrator for role in roles if role.id in role_ids or role.id == guild.id):
+            return
+        raise PermissionError('Discord 서버의 관리자(Administrator) 권한이 필요합니다.')
 
     async def setup(self):
         global _bridge, _reader_started
         application = await self.client.application_info()
+        # setup_hook runs before IDENTIFY. Request privileged content only when
+        # the app's developer has enabled it; slash commands remain usable otherwise.
+        self.client._connection._intents.message_content = bool(application.flags.gateway_message_content or application.flags.gateway_message_content_limited)
+        self.threads.install()
         # Team apps have one explicit team owner; membership alone is not authority.
         self.owner = application.team.owner_id if application.team else application.owner.id
-        group = app_commands.Group(name='robot', description='내 PC의 Mr.Robot 에이전트')
+        group = app_commands.Group(name='robot', description='내 PC의 Mr.Robot 에이전트', guild_only=True, default_permissions=discord.Permissions(administrator=True))
 
-        @group.command(name='ask', description='PC 에이전트에게 작업 요청 (소유자 전용)')
+        @group.command(name='ask', description='PC 에이전트에게 작업 요청 (서버 관리자 전용)')
         @app_commands.describe(message='작업 내용', provider='models에서 확인한 공급자 ID', model='모델 ID', effort='추론 강도')
         @app_commands.choices(effort=[app_commands.Choice(name=v, value=v) for v in ('auto', 'low', 'medium', 'high')])
-        async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = 'auto'):
+        async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = ''):
             await self.execute(interaction, 'ask', text=message, providerId=provider, model=model, effort=effort)
 
         @group.command(name='stop', description='이 채널에서 요청한 작업 중지')
@@ -98,6 +125,39 @@ class Bridge:
         @group.command(name='models', description='사용 가능한 공급자와 모델 ID')
         async def models(interaction: discord.Interaction):
             await self.execute(interaction, 'models')
+
+        @group.command(name='access', description='본인 대화의 PC 접근·변경 권한 설정')
+        @app_commands.choices(mode=[app_commands.Choice(name=name, value=value) for value, name in [('read-only', '읽기 전용'), ('ask', '변경 전 확인'), ('workspace', '작업 폴더 허용'), ('full', '전체 PC 허용 · 확인 없이 실행')]])
+        @app_commands.describe(confirm_full='전체 PC 접근과 확인 없는 변경 실행에 동의하면 True')
+        async def access(interaction: discord.Interaction, mode: str, confirm_full: bool = False):
+            await self.execute(interaction, 'access', mode=mode, confirmFull=confirm_full)
+
+        @group.command(name='result', description='긴 작업의 마지막 결과 다시 받기')
+        async def result(interaction: discord.Interaction):
+            await self.execute(interaction, 'result')
+
+        @group.command(name='approval', description='대기 중인 본인 작업의 승인 버튼 받기')
+        async def approval(interaction: discord.Interaction):
+            await self.execute(interaction, 'approval')
+
+        @group.command(name='bind', description='이 채널을 개인 스레드 작업실로 연결·패널 고정')
+        async def bind(interaction: discord.Interaction):
+            await self.threads.bind(interaction)
+
+        @group.command(name='unbind', description='이 채널 작업실 연결 해제 (대화는 유지)')
+        async def unbind(interaction: discord.Interaction):
+            await self.threads.unbind(interaction)
+
+        @group.command(name='sessions', description='내 개인 스레드 목록·보관 해제')
+        async def sessions(interaction: discord.Interaction):
+            await self.threads.show_list(interaction)
+
+        @self.tree.error
+        async def on_command_error(interaction, error):
+            original = getattr(error, 'original', error)
+            text = str(original) if isinstance(original, (PermissionError, RuntimeError)) else 'Discord 권한 또는 연결을 확인하세요. 다시 시도할 수 있습니다.'
+            sender = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+            await sender(discord.utils.escape_mentions(text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
         self.tree.add_command(group)
         # Merge the one owned root command through upsert. Never bulk-sync and
@@ -125,6 +185,20 @@ class Bridge:
                 target.loop.call_soon_threadsafe(target.receive, payload)
 
     def receive(self, value):
+        if value.get('event') == 'thread.state':
+            self.threads.state = value['data']
+            return
+        if value.get('event') == 'workspace.setup':
+            async def provision():
+                try:
+                    result = await self.threads.provision(int(value['guildId']), value['channelName'])
+                    emit(dict(event='workspace.ready', **result))
+                except Exception as error:
+                    text = str(error) if isinstance(error, (PermissionError, RuntimeError)) else '티켓 채널 설정 실패. 봇의 채널·스레드 관리 권한을 확인하세요.'
+                    emit(dict(event='workspace.error', message=text))
+            task = self.loop.create_task(provision())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            return
         future = self.pending.get(value.get('id'))
         if future and not future.done():
             if 'error' in value:
@@ -132,7 +206,7 @@ class Bridge:
             else:
                 future.set_result(value.get('result'))
         elif value.get('event') == 'approval':
-            interaction = self.active.get(str(value.get('channelId')))
+            interaction = self.active.get(str(value.get('scopeKey')))
             if interaction:
                 task = self.loop.create_task(self.show_approval(interaction, value.get('data', {})))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
@@ -145,38 +219,59 @@ class Bridge:
         await interaction.followup.send(
             'PC 작업 승인 필요\n' + discord.utils.escape_mentions(summary),
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
-            view=Approval(self, interaction.channel_id, request_id))
+            view=Approval(self, interaction.channel_id, request_id, interaction.user.id))
 
     async def request(self, interaction, action, **params):
-        if interaction.user.id != self.owner:
-            raise PermissionError('봇 소유자만 사용할 수 있습니다.')
+        await self.authorize(interaction)
+        if action == 'ask' and hasattr(interaction, 'cancel_epoch') and interaction.cancel_epoch != self.threads.cancel_epochs.get(interaction.channel_id, 0):
+            raise RuntimeError('사용자가 실행 전에 중지한 요청입니다.')
         if len(self.pending) >= 8:
             raise RuntimeError('요청이 많습니다. 잠시 후 다시 시도하세요.')
         request_id = uuid.uuid4().hex
         future = self.loop.create_future()
         self.pending[request_id] = future
-        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), action=action, **params))
+        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), guildId=str(interaction.guild_id), guildAdmin=True, isThread=isinstance(interaction.channel, discord.Thread), action=action, **params))
         try:
-            return await asyncio.wait_for(future, 620 if action == 'ask' else 25)
+            return await future if action == 'ask' else await asyncio.wait_for(future, 25)
         finally:
             self.pending.pop(request_id, None)
 
     async def execute(self, interaction, action, **params):
-        if interaction.user.id != self.owner:
-            await interaction.response.send_message('이 명령은 봇 소유자 전용입니다.', ephemeral=True)
-            return
+        if action == 'stop':
+            await self.authorize(interaction)
+            await self.threads.cancel_queued(interaction.channel_id)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        channel = str(interaction.channel_id)
+        channel = self.scope_key(interaction)
         if action == 'ask' and channel in self.active:
             await interaction.followup.send('처리 중입니다. /robot stop으로 중지할 수 있습니다.', ephemeral=True)
             return
         if action == 'ask':
             self.active[channel] = interaction
+        watch = None
         try:
+            await self.authorize(interaction)
+            if action == 'ask' and interaction.channel_id in self.threads.mutating:
+                raise RuntimeError('스레드 관리 작업 중입니다. 잠시 후 다시 보내세요.')
+            if action == 'ask':
+                async def watch_permissions():
+                    while True:
+                        await asyncio.sleep(30)
+                        try:
+                            await self.authorize(interaction)
+                        except Exception:
+                            emit(dict(event='revoked', scopeKey=channel))
+                            return
+                watch = self.loop.create_task(watch_permissions())
             result = await self.request(interaction, action, **params)
+            await self.authorize(interaction)
+            if action == 'approval' and isinstance(result, dict) and result.get('requestId'):
+                await self.show_approval(interaction, result)
+                return
             text = result.get('text') or result.get('message') if isinstance(result, dict) else None
             text = text or json.dumps(result, ensure_ascii=False, indent=2)
             text = str(text)
+            if interaction.is_expired():
+                return  # /robot result retrieves the Node-hosted latest result.
             if len(text) > 1800:
                 file = discord.File(io.BytesIO(text[:150_000].encode('utf-8')), filename='MrRobot-result.txt')
                 await interaction.followup.send('작업 결과입니다.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
@@ -185,14 +280,18 @@ class Bridge:
         except Exception as error:
             # No raw Discord HTTP/token diagnostics returned to a channel.
             text = str(error) if isinstance(error, (RuntimeError, PermissionError)) else '연결 또는 응답 오류입니다. PC의 플러그인 상태를 확인하세요.'
-            await interaction.followup.send(discord.utils.escape_mentions(text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            if not interaction.is_expired():
+                await interaction.followup.send(discord.utils.escape_mentions(text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         finally:
+            if watch:
+                watch.cancel()
+                await asyncio.gather(watch, return_exceptions=True)
             if action == 'ask':
                 self.active.pop(channel, None)
 
 
 def main():
-    settings = json.loads(sys.stdin.readline(16000))
+    settings = json.loads(sys.stdin.readline(128000))
     root = os.path.abspath(settings['botDirectory'])
     os.chdir(root)
     sys.path.insert(0, root)
@@ -200,9 +299,11 @@ def main():
     original_setup = SecurityBotClient.setup_hook
     original_ready = SecurityBotClient.on_ready
     original_disconnect = SecurityBotClient.on_disconnect if hasattr(SecurityBotClient, 'on_disconnect') else None
+    original_message = getattr(SecurityBotClient, 'on_message', None)
 
     async def setup(client):
         try:
+            client._mr_robot_thread_state = settings.get('threadState')
             bridge = Bridge(client)
             client._mr_robot_bridge = bridge
             await bridge.setup()
@@ -214,16 +315,29 @@ def main():
     async def ready(client):
         await original_ready(client)
         bridge = client._mr_robot_bridge
-        emit({'event': 'ready', 'owner': str(bridge.owner)})
+        configured = client.config.get('server_name', '')
+        candidates = [guild for guild in client.guilds if guild.name == configured] if configured else list(client.guilds)
+        if not candidates and len(client.guilds) == 1:
+            candidates = list(client.guilds)
+        bridge.allowed_guilds = {candidates[0].id} if len(candidates) == 1 else set()
+        emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
 
     async def disconnected(client):
         emit({'event': 'disconnected'})
+        if hasattr(client, '_mr_robot_bridge'):
+            await client._mr_robot_bridge.threads.disconnected()
         if original_disconnect:
             await original_disconnect(client)
+
+    async def message(client, value):
+        await client._mr_robot_bridge.threads.on_message(value)
+        if original_message:
+            await original_message(client, value)
 
     SecurityBotClient.setup_hook = setup
     SecurityBotClient.on_ready = ready
     SecurityBotClient.on_disconnect = disconnected
+    SecurityBotClient.on_message = message
     # Original single-instance lock, tray, news and KTX GUI are preserved.
     runpy.run_path(os.path.join(root, 'main.py'), run_name='__main__')
 

@@ -18,6 +18,8 @@ export interface ToolExecutorOptions {
 }
 
 export interface ToolExecutionScope {
+  /** Process-local bridge grant, supplied by server code, never model input. */
+  trustedPermissionOverride?: boolean;
   /** Selected workspace resolved by the host, never by model-supplied params. */
   workspaceRoot?: string;
   /** Tool names covered by a host-side aggregate approval for this run only. */
@@ -56,7 +58,7 @@ export class ToolExecutor {
     const def = toolByName(name);
     if (!def) {
       if (this.opts.runPluginTool) {
-        const mode = effectiveMode(this.opts.safety().mode, permissionCap);
+        const mode = effectiveMode(scope?.trustedPermissionOverride && this.opts.safety().mode !== 'read-only' ? 'full' : this.opts.safety().mode, permissionCap);
         const destructive = this.opts.pluginToolDestructive?.(name) ?? true;
         let destructiveApproved = !destructive || mode === 'full';
         let approvalSource: PluginExecutionContext['approvalSource'] = destructive
@@ -90,7 +92,7 @@ export class ToolExecutor {
       return JSON.stringify({ error: `unknown tool: ${name}` });
     }
 
-    const mode = effectiveMode(this.opts.safety().mode, permissionCap);
+    const mode = effectiveMode(scope?.trustedPermissionOverride && this.opts.safety().mode !== 'read-only' ? 'full' : this.opts.safety().mode, permissionCap);
     if (def.destructive && mode === 'read-only') {
       return JSON.stringify({ error: `${name} is blocked by read-only permission mode` });
     }

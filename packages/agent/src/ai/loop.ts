@@ -146,6 +146,8 @@ export interface RunOptions {
   reasoningEffort?: ReasoningEffort;
   context?: string;
   permissionMode?: PermissionMode;
+  /** Server-only Discord grant; ordinary RPC input cannot set this. */
+  trustedPermissionOverride?: boolean;
   /** null disables routing; a value applies a conversation-specific scenario. */
   routing?: RoutingPresetSettings | null;
   workspacePath?: string;
@@ -549,6 +551,7 @@ export class AgentLoop {
             try {
               if (!allowedTools.some((tool) => tool.name === call.name)) toolContent = JSON.stringify({ error: `${call.name} is not available inside this solver sandbox` });
               else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, runSignal, {
+                trustedPermissionOverride: options.trustedPermissionOverride,
                 workspaceRoot: options.workspacePath,
                 approvedPluginTools,
               });
@@ -955,6 +958,7 @@ export class AgentLoop {
             content = JSON.stringify({ error: 'same tool call repeated; change the approach or finish with the available evidence' });
           } else {
             content = await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, runSignal, {
+              trustedPermissionOverride: options.trustedPermissionOverride,
               workspaceRoot: options.workspacePath,
             });
             madeToolProgress = true;

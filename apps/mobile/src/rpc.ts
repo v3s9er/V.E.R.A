@@ -186,7 +186,7 @@ export class MrRobotClient {
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('연결되어 있지 않습니다.'));
     const id = this.reqId++;
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = method === 'chat.start' ? undefined : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`응답 시간 초과: ${method}`));
       }, timeoutMs);

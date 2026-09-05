@@ -24,7 +24,7 @@ let socket: any;
 server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   const req = JSON.parse(raw.toString());
   if (req.method === 'chat.start') {
-    assert.equal(req.params.permissionMode, 'ask'); assert.equal(req.params.tokenPolicy, 'adaptive');
+    assert.equal(req.params.permissionMode, 'full'); assert.equal(req.params.tokenPolicy, 'audit-only');
     runId = req.id;
     ws.send(JSON.stringify({ id: 0, event: 'chat.confirm', data: { conversationId: 'test-conversation', requestId: 'approval-1', summary: 'Test command' } }));
     return;
@@ -33,9 +33,9 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
     assert.equal(req.params.requestId, 'approval-1');
     ws.send(JSON.stringify({ id: runId, ok: true, result: { text: 'Test finished' } }));
   }
-  ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'ask' } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
+  ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: () => [] }, { spawn: (() => fake) as any });
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: () => [], permissionCeiling: () => 'full' }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -57,20 +57,39 @@ try {
   enabled = false; await assert.rejects(commands.get('discord.start')!()); enabled = true;
   await commands.get('discord.start')!();
   assert.equal(JSON.stringify(replies).includes('fixture-token'), false, 'credentials never enter Python pipe');
-  emit({ event: 'ready', owner: '123456789012345678' });
+  emit({ event: 'ready', owner: '123456789012345678', guilds: ['222222222222222222'] });
   emit({ id: 'denied', userId: '999999999999999999', channelId: '111111111111111111', action: 'ask', text: 'No' });
   await waitFor(() => replies.some(r => r.id === 'denied')); assert.ok(replies.find(r => r.id === 'denied').error);
-  const identity = { userId: '123456789012345678', channelId: '111111111111111111' };
+  const identity = { userId: '333333333333333333', channelId: '111111111111111111', guildId: '222222222222222222', guildAdmin: true };
+  emit({ ...identity, id: 'foreign', guildId: '444444444444444444', action: 'status' });
+  await waitFor(() => replies.some(r => r.id === 'foreign')); assert.ok(replies.find(r => r.id === 'foreign').error);
+  emit({ ...identity, id: 'unconfirmed', action: 'access', mode: 'full' });
+  await waitFor(() => replies.some(r => r.id === 'unconfirmed')); assert.ok(replies.find(r => r.id === 'unconfirmed').error);
+  emit({ ...identity, id: 'full', action: 'access', mode: 'full', confirmFull: true });
+  await waitFor(() => replies.some(r => r.id === 'full')); assert.equal(replies.find(r => r.id === 'full').result.permission, 'full');
   emit({ ...identity, id: 'ask', action: 'ask', text: '한글 명령' });
   await waitFor(() => replies.some(r => r.event === 'approval'));
+  emit({ ...identity, userId: '555555555555555555', id: 'other-admin', action: 'approve', requestId: 'approval-1', approve: true });
+  await waitFor(() => replies.some(r => r.id === 'other-admin')); assert.ok(replies.find(r => r.id === 'other-admin').error);
   emit({ ...identity, id: 'wrong', action: 'approve', requestId: 'wrong', approve: true });
   await waitFor(() => replies.some(r => r.id === 'wrong')); assert.ok(replies.find(r => r.id === 'wrong').error);
   emit({ ...identity, id: 'approve', action: 'approve', requestId: 'approval-1', approve: true });
   await waitFor(() => replies.some(r => r.id === 'ask')); assert.equal(replies.find(r => r.id === 'ask').result.text, 'Test finished');
   assert.equal(commands.get('discord.status')!().busy, false);
+  emit({ ...identity, id: 'result', action: 'result' });
+  await waitFor(() => replies.some(r => r.id === 'result')); assert.equal(replies.find(r => r.id === 'result').result.text, 'Test finished');
+  const setup = commands.get('discord.workspace.setup')!({ channelName: 'ai_talk' });
+  assert.equal(setup.workspace.state, 'pending');
+  assert.ok(replies.some(r => r.event === 'workspace.setup' && r.channelName === 'ai_talk'));
+  emit({ event: 'workspace.ready', guildId: '999999999999999999', channelId: identity.channelId, panelId: '777777777777777777', pinned: true });
+  assert.equal(commands.get('discord.status')!().workspace.state, 'pending', 'unregistered guild cannot bind workspace');
+  emit({ event: 'workspace.ready', guildId: identity.guildId, channelId: identity.channelId, panelId: '777777777777777777', pinned: true });
+  await waitFor(() => commands.get('discord.status')!().workspace.state === 'ready');
+  assert.equal((storage.get('threadState') as any).bindings[identity.guildId], identity.channelId);
+  assert.ok(replies.some(r => r.event === 'thread.state'));
   enabled = false; events.get('plugins.changed')!();
   assert.ok(revoked > 0); assert.equal(commands.get('discord.status')!().running, false);
-  console.log('Discord integration tests passed: owner gate, private credential, RPC events, approval binding, completion, disable/revoke');
+  console.log('Discord tests passed: registered guild administrator, explicit full permission, per-user approval isolation, unlimited RPC, results, disable/revoke');
 } finally {
   await plugin.deactivate!(ctx);
   for (const t of timers) clearTimeout(t);
