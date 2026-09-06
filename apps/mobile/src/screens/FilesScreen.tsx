@@ -1,5 +1,7 @@
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { secureFileCall, uploadSecureFile, downloadSecureFile, enrollFileKey } from '../secureFiles';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, AppState, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -72,6 +74,9 @@ const fetchJsonWithTimeout = async <T,>(
 };
 
 export function FilesScreen({ pc }: { pc: SavedPc }) {
+  const [scanner, setScanner] = useState(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const scanBusy = useRef(false);
   const [path, setPath] = useState('');
   const [items, setItems] = useState<SharedFileEntry[]>([]);
   const [pcs, setPcs] = useState<SavedPc[]>([]);
@@ -160,13 +165,7 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
     refreshAbortRef.current = controller;
     if (mountedRef.current) { setRefreshing(true); if (!preserveNotice) setNotice(''); }
     try {
-      const endpoint = mode === 'shared'
-        ? `/api/files?path=${encodeURIComponent(path)}`
-        : `/api/workspaces/files?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(path)}`;
-      const requestUrl = `${baseOf(pc)}${endpoint}`;
-      const response = await fetch(requestUrl, { headers: pcAuthenticatedHeaders(pc, requestUrl), redirect: 'error', signal: controller.signal });
-      const body = await response.json() as { items?: SharedFileEntry[]; error?: string };
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      const body = await secureFileCall(pc, { op: 'list', path, workspaceId: mode === 'workspace' ? workspaceId : undefined }, controller.signal);
       const storedPcs = await loadPcs();
       if (!controller.signal.aborted && refreshGenerationRef.current === generation && mountedRef.current) {
         setItems(body.items ?? []);
@@ -231,23 +230,13 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
         throw new Error(`모바일 파일 전송은 최대 ${formatSize(MAX_MOBILE_TRANSFER_BYTES)}까지 지원합니다.`);
       }
       if (AppState.currentState !== 'active') throw new Error(cancelNotice('background'));
-      const targetPath = [path, file.name].filter(Boolean).join('/');
       if (mountedRef.current) setBusy(file.name);
-      const endpoint = mode === 'shared'
-        ? `/api/files/upload?path=${encodeURIComponent(targetPath)}`
-        : `/api/workspaces/upload?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(targetPath)}`;
-      const uploadUrl = `${baseOf(pc)}${endpoint}`;
-      const task = FileSystem.createUploadTask(uploadUrl, file.uri, {
-        httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: pcAuthenticatedHeaders(pc, uploadUrl, { 'content-type': file.mimeType ?? 'application/octet-stream' }),
-      });
-      transfer = { id: operationId, cancel: () => task.cancelAsync(), tempUris: pickedCacheUri ? [pickedCacheUri] : [] };
+      const controller = new AbortController();
+      transfer = { id: operationId, cancel: () => controller.abort(), tempUris: pickedCacheUri ? [pickedCacheUri] : [] };
       activateTransfer(transfer, PHONE_TRANSFER_TIMEOUT_MS);
-      const result = await task.uploadAsync();
+      await uploadSecureFile(pc, file.uri, file.name, controller.signal);
       releaseTransfer(transfer);
-      if (!result) throw new Error(cancelNotice(transfer.cancelReason));
-      if (result.status < 200 || result.status >= 300) throw new Error(`업로드 실패 (HTTP ${result.status})`);
-      if (mountedRef.current && operationIdRef.current === operationId) setNotice(`${file.name} → ${pc.name} 전송 완료 · AI 토큰 0`);
+      if (mountedRef.current && operationIdRef.current === operationId) { setMode('shared'); setPath('.mobile-inbox'); setNotice(file.name + ' → PC 암호화 공유함 전송 완료 · AI 토큰 0'); }
       await refresh(true);
     } catch (error) {
       if (mountedRef.current && operationIdRef.current === operationId) setNotice(transfer?.cancelReason ? cancelNotice(transfer.cancelReason) : error instanceof Error ? error.message : String(error));
@@ -276,18 +265,12 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
       if (!await Sharing.isAvailableAsync()) throw new Error('이 기기에서는 파일 저장·공유 화면을 열 수 없습니다.');
       if (AppState.currentState !== 'active') throw new Error(cancelNotice('background'));
       local = `${FileSystem.cacheDirectory}${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeFileName(item.name)}`;
-      const endpoint = mode === 'shared'
-        ? `/api/files/download?path=${encodeURIComponent(item.path)}`
-        : `/api/workspaces/download?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(item.path)}`;
-      const downloadUrl = `${baseOf(pc)}${endpoint}`;
-      const task = FileSystem.createDownloadResumable(downloadUrl, local, { headers: pcAuthenticatedHeaders(pc, downloadUrl) });
-      transfer = { id: operationId, cancel: () => task.cancelAsync(), tempUris: [local] };
+      const controller = new AbortController();
+      transfer = { id: operationId, cancel: () => controller.abort(), tempUris: [local] };
       activateTransfer(transfer, PHONE_TRANSFER_TIMEOUT_MS);
-      const result = await task.downloadAsync();
+      await downloadSecureFile(pc, item.path, local, mode === 'workspace' ? workspaceId : undefined, controller.signal);
       releaseTransfer(transfer);
-      if (!result) throw new Error(cancelNotice(transfer.cancelReason));
-      if (result.status < 200 || result.status >= 300) throw new Error(`다운로드 실패 (HTTP ${result.status})`);
-      await Sharing.shareAsync(result.uri, { dialogTitle: `${item.name} 저장 또는 공유` });
+      await Sharing.shareAsync(local, { dialogTitle: item.name + ' 저장 또는 공유' });
       if (mountedRef.current && operationIdRef.current === operationId) setNotice(`${pc.name} → 모바일 다운로드 완료 · AI 토큰 0`);
     } catch (error) {
       if (mountedRef.current && operationIdRef.current === operationId) setNotice(transfer?.cancelReason ? cancelNotice(transfer.cancelReason) : error instanceof Error ? error.message : String(error));
@@ -388,6 +371,20 @@ export function FilesScreen({ pc }: { pc: SavedPc }) {
       <View style={styles.syncRow}>{otherPcs.map((target) => <TouchableOpacity key={target.id} style={[styles.syncBtn, controlsLocked && styles.controlDisabled]} onPress={() => void syncWithPc(target)} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.syncText}>{busy === `sync:${target.id}` ? '동기화 중…' : `↻ ${target.name} 작업 동기화`}</Text></TouchableOpacity>)}</View>
     </View>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.sourceTabs}><TouchableOpacity style={[styles.sourceBtn, mode === 'shared' && styles.sourceBtnOn, controlsLocked && styles.controlDisabled]} onPress={() => { setMode('shared'); setPath(''); }} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.sourceText}>기기 공유함</Text></TouchableOpacity>{workspaces.map((workspace) => <TouchableOpacity key={workspace.id} style={[styles.sourceBtn, mode === 'workspace' && workspaceId === workspace.id && styles.sourceBtnOn, controlsLocked && styles.controlDisabled]} onPress={() => { setMode('workspace'); setWorkspaceId(workspace.id); setPath(''); }} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.sourceText}>{workspace.name}</Text></TouchableOpacity>)}</ScrollView>
+    <Modal visible={scanner} onRequestClose={() => setScanner(false)}>
+      <CameraView style={{ flex: 1 }} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={({ data }) => {
+        if (scanBusy.current) return;
+        scanBusy.current = true;
+        void enrollFileKey(pc, data).then(() => { setScanner(false); setNotice('파일 종단간 암호화 등록 완료'); void refresh(); })
+          .catch(error => { setScanner(false); setNotice(error instanceof Error ? error.message : '등록 실패'); })
+          .finally(() => { scanBusy.current = false; });
+      }} />
+      <TouchableOpacity style={styles.smallBtn} onPress={() => setScanner(false)}><Text style={styles.smallText}>닫기</Text></TouchableOpacity>
+    </Modal>
+    <TouchableOpacity style={styles.smallBtn} disabled={controlsLocked} onPress={() => { void (async () => {
+      const allowed = cameraPermission?.granted || (await requestCameraPermission()).granted;
+      if (allowed) setScanner(true); else setNotice('파일 암호화 QR 등록에는 카메라 권한이 필요합니다.');
+    })(); }}><Text style={styles.smallText}>🔒 PC 파일 암호화 QR 등록</Text></TouchableOpacity>
     <View style={styles.toolbar}>
       {path ? <TouchableOpacity style={[styles.smallBtn, controlsLocked && styles.controlDisabled]} onPress={parent} disabled={controlsLocked} accessibilityState={{ disabled: controlsLocked }}><Text style={styles.smallText}>‹ 상위</Text></TouchableOpacity> : null}
       <View style={styles.pathWrap}><Text style={styles.path}>{pc.name} / {path || (mode === 'shared' ? '공유함' : workspaces.find((item) => item.id === workspaceId)?.name ?? '작업 폴더')}</Text></View>

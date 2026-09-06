@@ -348,7 +348,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     const qrEpoch = qrEpochRef.current;
     const build = async (): Promise<void> => {
       const payload = remoteOrigin && remoteHandoff?.pin
-        ? JSON.stringify({ app: 'mr-robot', version: 3, host: remoteOrigin, hosts: [...new Set([remoteOrigin])], protocol: 'https', port: 443, pin: remoteHandoff.pin })
+        ? JSON.stringify({ app: 'mr-robot', version: 3, host: remoteOrigin, hosts: [...new Set([remoteOrigin])], protocol: 'https', port: 443, pin: remoteHandoff.pin, expiresAt: remoteHandoff.expiresAt })
         : pairing?.host !== '127.0.0.1'
           ? pairing?.qrPayload
           : undefined;

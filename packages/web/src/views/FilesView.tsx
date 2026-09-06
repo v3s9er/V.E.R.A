@@ -1,3 +1,4 @@
+import { SecureFileEnroll } from '../components/SecureFileEnroll';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { pcOrigin, type SavedPc } from '../pcs';
 import type { SyncMergeResult, WorkspaceInfo } from '@mr-robot/shared';
@@ -287,6 +288,7 @@ export function FilesView({ activePc, pcs }: { activePc: SavedPc; pcs: SavedPc[]
     ? '두 PC의 작업 상태를 양방향으로 직접 동기화하는 중입니다…'
     : 'PC 간에 파일을 직접 전송하는 중입니다…';
   return <div className="device-files stack">
+    <SecureFileEnroll key={activePc.id} request={(path, init) => request(activePc, path, init)} />
     <section className="files-hero panel"><div><span className="eyebrow">TOKENLESS TRANSFER</span><h2>파일 전송·작업 폴더</h2><p>모바일·노트북 사이에서 AI를 호출하지 않고 원본 파일과 작업 상태를 직접 주고받습니다.</p></div>
       <div className="files-overview"><div className="files-kpis"><span><b>{folderCount}</b> 폴더</span><span><b>{fileCount}</b> 파일</span><span><b>0</b> AI 토큰</span></div><div className="files-sync">{otherPcs.map((pc) => <button key={pc.id} className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void sync(pc)}>{busy === `sync:${pc.id}` ? '동기화 중…' : `↻ ${pc.name} 작업 동기화`}</button>)}</div></div>
     </section>

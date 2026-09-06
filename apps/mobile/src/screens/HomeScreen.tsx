@@ -72,14 +72,14 @@ export function HomeScreen({
 
   return (
     <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right }]}>
-      {!keyboardVisible && <View style={[styles.header, compact && styles.headerCompact, { paddingTop: Math.max(insets.top, 12) }]}>
+      {!keyboardVisible && <View style={[styles.header, compact && styles.headerCompact, tab === 'chat' && styles.headerChat, { paddingTop: Math.max(insets.top, 12) }]}>
         <View style={styles.headerText}>
-          <Text style={styles.pcName} numberOfLines={1}>
+          <Text style={[styles.pcName, tab === 'chat' && styles.pcNameChat]} numberOfLines={1}>
             실행 PC · {pc.name}
           </Text>
-          <Text style={styles.pcAddr} numberOfLines={1}>
+          {tab !== 'chat' && <Text style={styles.pcAddr} numberOfLines={1}>
             {connectionOrigins(pc)[0] ?? '보안 접속 주소 없음'}
-          </Text>
+          </Text>}
         </View>
         <TouchableOpacity
           style={[styles.switchBtn, compact && styles.switchBtnCompact]}
@@ -180,6 +180,8 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   headerCompact: { paddingHorizontal: 12 },
+  headerChat: { paddingBottom: 4, borderBottomWidth: 0 },
+  pcNameChat: { fontSize: 12, color: colors.dim },
   headerText: { flex: 1, minWidth: 0 },
   pcName: { color: colors.text, fontSize: 16, fontWeight: '700' },
   pcAddr: { color: colors.faint, fontSize: 12, marginTop: 2 },

@@ -7,25 +7,28 @@ import type { MrRobotPlugin } from './loader.js';
 import type { PluginContext } from './context.js';
 import type { PermissionMode } from '@mr-robot/shared';
 import { DiscordSessions } from './discord-sessions.js';
+import { assertDiscordModelAllowed, discordModelAllowed, parseDiscordModelCeiling } from './discord-model-policy.js';
 
 export interface DiscordHost {
   port(): number;
   enabled(): boolean;
   issue(): { token: string; id: string };
   revoke(id: string): void;
-  models(): unknown;
+  models(providerId?: string): unknown;
   permissionCeiling(): PermissionMode;
 }
-interface Settings { botDirectory: string; pythonPath: string; autoStart: boolean }
-const defaults: Settings = { botDirectory: '', pythonPath: '', autoStart: false };
+interface Settings { botDirectory: string; pythonPath: string; autoStart: boolean; mode: 'standalone' | 'legacy' }
+const defaults: Settings = { botDirectory: '', pythonPath: '', autoStart: false, mode: 'standalone' };
 const PREFIX = '__MR_ROBOT_DISCORD__';
 export function validateDiscordSettings(value: unknown): Settings {
   const v = value as Partial<Settings>;
   if (!v || typeof v.botDirectory !== 'string' || typeof v.pythonPath !== 'string'
     || !isAbsolute(v.botDirectory) || !isAbsolute(v.pythonPath)) throw new Error('봇 폴더와 Python 실행 파일의 절대 경로를 입력하세요.');
-  if (!existsSync(join(v.botDirectory, 'bot', 'client.py')) || !existsSync(join(v.botDirectory, 'main.py'))
-    || !existsSync(v.pythonPath)) throw new Error('기존 봇 소스 또는 Python 실행 파일을 찾을 수 없습니다.');
-  return { botDirectory: resolve(v.botDirectory), pythonPath: resolve(v.pythonPath), autoStart: v.autoStart === true };
+  const mode = v.mode ?? 'standalone';
+  if (mode !== 'standalone' && mode !== 'legacy') throw new Error('지원하지 않는 Discord 실행 모드입니다.');
+  if (!existsSync(join(v.botDirectory, 'config.json')) || !existsSync(v.pythonPath)) throw new Error('연결정보 config.json 또는 Python 실행 파일을 찾을 수 없습니다.');
+  if (mode === 'legacy' && (!existsSync(join(v.botDirectory, 'bot', 'client.py')) || !existsSync(join(v.botDirectory, 'main.py')))) throw new Error('함께 실행 모드에는 기존 시큐리티봇 소스가 필요합니다. 독립 모드는 연결정보만 필요합니다.');
+  return { botDirectory: resolve(v.botDirectory), pythonPath: resolve(v.pythonPath), autoStart: v.autoStart === true, mode };
 }
 
 /** Outbound Discord gateway -> private stdio -> host-scoped loopback client. */
@@ -50,7 +53,11 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
   let approval: { requestId: string; conversationId: string; summary?: string } | undefined;
   const results = new Map<string, unknown>();
   const pending = new Map<number, { resolve(v: any): void; reject(e: Error): void; timer?: NodeJS.Timeout }>();
-  const config = () => ({ ...defaults, ...ctx.storage.get<Settings>('config') });
+  // Preserve an existing news/KTX installation until the owner selects standalone.
+  const config = (): Settings => {
+    const saved = ctx.storage.get<Settings>('config');
+    return { ...defaults, ...saved, mode: saved ? saved.mode ?? 'legacy' : defaults.mode };
+  };
   const status = () => ({ running: !!child, ready, owner, busy, error: lastError, workspace, config: config() });
   const send = (data: unknown) => {
     if (child?.stdin.writable && child.stdin.writableLength < 1_000_000) child.stdin.write(JSON.stringify(data) + '\n');
@@ -88,6 +95,28 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (!ready || message.guildAdmin !== true || !guilds.includes(String(message.guildId))
       || ![message.userId, message.channelId].every(id => /^\d{15,22}$/.test(String(id)))) throw new Error('등록된 Discord 서버의 관리자 인증이 필요합니다. DM에서는 사용할 수 없습니다.');
     const channel = `${message.guildId}:${message.channelId}:${message.userId}`;
+    const userScope = `${message.guildId}:${message.userId}`;
+    const savedLimits = ctx.storage.get<Record<string, string>>('modelLimits');
+    const limits = savedLimits === undefined ? {} : savedLimits;
+    if (!limits || typeof limits !== 'object' || Array.isArray(limits)) throw new Error('모델 정책 저장소가 손상되었습니다. PC에서 복구하세요.');
+    if (message.action === 'model-limit') {
+      // Independently guarded on the host; slash visibility is not authorization.
+      if (message.guildAdmin !== true) throw new Error('모델 제한 변경은 서버 관리자만 할 수 있습니다.');
+      if (!/^\d{15,22}$/.test(String(message.targetUserId))) throw new Error('대상 서버 사용자를 선택하세요.');
+      const target = `${message.guildId}:${message.targetUserId}`;
+      if (message.ceiling === 'show') {
+        const ceiling = parseDiscordModelCeiling(Object.hasOwn(limits, target) ? limits[target] : 'unlimited');
+        return { modelCeiling: ceiling, message: `대상 사용자 모델 상한: ${ceiling} · 서버 내 모든 티켓에 적용` };
+      }
+      const ceiling = parseDiscordModelCeiling(message.ceiling);
+      if (busy && activeChannel.startsWith(`${message.guildId}:`) && activeChannel.endsWith(`:${message.targetUserId}`)) throw new Error('대상 사용자의 실행을 먼저 중지하세요. 실행 도중에는 모델 상한을 변경할 수 없습니다.');
+      if (ceiling !== 'unlimited' && Object.keys(limits).length >= 256 && !Object.hasOwn(limits, target)) throw new Error('모델 정책 저장소가 가득 찼습니다. 불필요한 제한을 해제하세요.');
+      const next = { ...limits };
+      if (ceiling === 'unlimited') delete next[target]; else next[target] = ceiling;
+      ctx.storage.set('modelLimits', next);
+      return { modelCeiling: ceiling, message: `대상 사용자 모델 상한을 ${ceiling === 'unlimited' ? '제한 없음' : ceiling + ' 이하'}으로 저장했습니다. 이 서버의 기존·새 티켓과 직접 명령에 적용됩니다. 제한 시 미분류 모델은 차단됩니다.` };
+    }
+    const modelCeiling = parseDiscordModelCeiling(Object.hasOwn(limits, userScope) ? limits[userScope] : 'unlimited');
     threads.assertOwner(message);
     const threadCommand = threads.command(message, busy ? activeChannel : '');
     if (threadCommand) {
@@ -104,14 +133,23 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       if (Object.keys(preferences).length >= 64 && !preferences[channel]) throw new Error('설정 저장소가 가득 찼습니다.');
       if (!['auto', 'low', 'medium', 'high'].includes(message.effort)) throw new Error('추론은 auto/low/medium/high 중 선택하세요.');
       if (typeof message.model !== 'string' || message.model.length > 200 || typeof message.providerId !== 'string' || message.providerId.length > 200) throw new Error('모델/공급자 설정이 잘못되었습니다.');
+      assertDiscordModelAllowed(modelCeiling, message.model);
       preferences[channel] = { providerId: message.providerId, model: message.model, effort: message.effort };
       ctx.storage.set('preferences', preferences);
       return { message: '이 대화의 모델·추론 설정을 저장했습니다.' };
     }
-    if (message.action === 'models') return host.models();
+    if (message.action === 'models') {
+      const providerId = typeof message.providerId === 'string' && message.providerId.length <= 200 ? message.providerId : undefined;
+      const catalog = await host.models(providerId);
+      if (!Array.isArray(catalog)) throw new Error('모델 목록 응답이 올바르지 않습니다.');
+      if (providerId) return catalog.filter(model => discordModelAllowed(modelCeiling, model));
+      // Keep providers discoverable even when their configured default is above the cap.
+      return catalog.map(provider => ({ ...provider, model: discordModelAllowed(modelCeiling, provider.model) ? provider.model : '', modelCeiling }));
+    }
     if (message.action === 'result') return results.get(channel) ?? { message: '아직 완료된 결과가 없습니다. /robot status로 실행 상태를 확인하세요.' };
-    if (message.action === 'status') return { ready, busy: busy && channel === activeChannel, preference, permission, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `권한: ${permission} · 모델: ${preference.model || 'PC 기본 모델'} · 추론: ${preference.effort || 'auto'} · 토큰 제한 없음. PC 읽기 전용 잠금: ${host.permissionCeiling() === 'read-only' ? '켜짐' : '꺼짐'}` };
+    if (message.action === 'status') return { ready, busy: busy && channel === activeChannel, preference, permission, modelCeiling, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `권한: ${permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'} · 토큰 제한 없음. PC 읽기 전용 잠금: ${host.permissionCeiling() === 'read-only' ? '켜짐' : '꺼짐'}` };
     if (message.action === 'access') {
+      if (message.guildAdmin !== true) throw new Error('PC 접근 권한 변경은 서버 관리자만 할 수 있습니다.');
       if (busy && channel === activeChannel) throw new Error('작업 중에는 권한을 바꿀 수 없습니다. 먼저 /robot stop을 사용하세요.');
       if (!['read-only', 'ask', 'workspace', 'full'].includes(message.mode)) throw new Error('지원하지 않는 권한입니다.');
       if (message.mode === 'full' && message.confirmFull !== true) throw new Error('전체 PC 접근과 확인 없는 변경 실행을 허용하려면 confirm_full을 True로 선택하세요.');
@@ -139,6 +177,18 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     const commandGeneration = generation;
     busy = true; activeChannel = channel;
     try {
+      let providerId = message.providerId || preference.providerId;
+      let model = message.model || preference.model;
+      if (modelCeiling !== 'unlimited') {
+        const catalog = await host.models();
+        if (!Array.isArray(catalog)) throw new Error('모델 설정을 확인할 수 없습니다.');
+        const provider = providerId ? catalog.find(p => p.providerId === providerId) : catalog.find(p => p.isDefault) ?? catalog[0];
+        if (!provider) throw new Error('허용된 공급자·모델을 /robot model에서 선택하세요.');
+        providerId = provider.providerId;
+        model ||= provider.model;
+        assertDiscordModelAllowed(modelCeiling, model);
+        if (commandGeneration !== generation) throw new Error('Discord 연결이 변경되어 요청이 취소되었습니다.');
+      }
       if (!conversations[channel]) {
         if (Object.keys(conversations).length >= 64) throw new Error('Discord 대화 채널 한도(64)에 도달했습니다.');
         const result = await rpc('conversations.create', { title: 'Discord', permissionMode: permission, tokenPolicy: 'audit-only' });
@@ -148,8 +198,9 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       activeConversation = conversations[channel]!;
       const result = await rpc('chat.start', {
         conversationId: activeConversation, text: message.text, permissionMode: permission, tokenPolicy: 'audit-only',
-        ...((message.providerId || preference.providerId) ? { providerId: message.providerId || preference.providerId } : {}),
-        ...((message.model || preference.model) ? { providerModel: message.model || preference.model } : {}),
+        discordModelCeiling: modelCeiling,
+        ...(providerId ? { providerId } : {}),
+        ...(model ? { providerModel: model } : {}),
         reasoningEffort: ['auto', 'low', 'medium', 'high'].includes(message.effort) ? message.effort : preference.effort || 'auto',
       }, 0);
       if (commandGeneration === generation) {
@@ -198,7 +249,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       const auth = await rpc('auth', { secret: grant.token });
       if (!auth?.ok || auth.isAdmin || auth.permissionCap !== 'full' || !auth.canUseAuditOnly) throw new Error('Discord 전용 실행 권한을 확인하지 못했습니다.');
       if (current !== generation) throw new Error('시작이 취소되었습니다.');
-      child = runtime.spawn(settings.pythonPath, ['-u', runner], { cwd: settings.botDirectory, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+      child = runtime.spawn(settings.pythonPath, ['-u', runner], { cwd: dirname(runner), shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' } });
       child.stdin.on('error', () => {});
       child.stderr.resume(); // Never persist bot credentials or arbitrary Python exception text.
       let buffer = '';
@@ -231,7 +282,11 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
             owner = String(message.owner); ready = guilds.some((id: string) => ctx.storage.get<string[]>('allowedGuildIds')?.includes(id)); continue;
           }
           if (message.event === 'disconnected') { ready = false; if (busy) void rpc('chat.cancel', { conversationId: activeConversation }).catch(() => {}); continue; }
-          if (message.event === 'error') { lastError = 'Discord 로그인/명령 등록 실패. 봇 토큰·서버 권한·Python 의존성을 확인하세요.'; continue; }
+          if (message.event === 'error') {
+            const safeErrors: Record<string, string> = { duplicate: '기존 시큐리티봇 또는 Discord 플러그인이 실행 중입니다. 먼저 종료하거나 함께 실행 모드를 사용하세요.', config: 'config.json의 bot_token 연결정보를 읽을 수 없습니다.', mode: 'Discord 실행 모드가 올바르지 않습니다.' };
+            lastError = safeErrors[String(message.code)] ?? 'Discord 로그인/명령 등록 실패. 봇 토큰·서버 권한·Python 의존성을 확인하세요.';
+            continue;
+          }
           if (typeof message.id !== 'string' || message.id.length > 64) continue;
           void command(message).then((result) => { if (current === generation) send({ id: message.id, result }); }, (error) => {
             if (current === generation) send({ id: message.id, error: error instanceof Error ? error.message : '작업 실패' });
@@ -239,15 +294,15 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         }
       });
       child.once('error', () => { if (current === generation) { lastError = 'Discord Python 실행 실패'; stop(); } });
-      child.once('exit', () => { if (current === generation) { lastError = 'Discord 봇이 종료되었습니다. 중복 실행 여부를 확인하세요.'; stop(); } });
-      send({ botDirectory: settings.botDirectory, threadState: threads.state() });
+      child.once('exit', () => { if (current === generation) { lastError ||= 'Discord 봇이 종료되었습니다. 중복 실행 여부를 확인하세요.'; stop(); } });
+      send({ botDirectory: settings.botDirectory, mode: settings.mode, threadState: threads.state() });
       ctx.setTimeout(() => { if (current === generation && !ready) { lastError = 'Discord 로그인 시간이 초과되었습니다. 봇 토큰과 네트워크를 확인하세요.'; stop(); } }, 45_000);
       return status();
     } catch (error) { stop(); throw error; }
     finally { starting = false; }
   }
   return {
-    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.2.0', kind: 'integration', enabledByDefault: false,
+    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.4.1', kind: 'integration', enabledByDefault: false,
       description: '등록 서버 관리자 전용 /robot. 권한 선택, 누적 토큰 제한 없는 실행, 승인·중지 지원.', permissions: ['network.client'] },
     activate(context) {
       ctx = context;
@@ -268,7 +323,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         return status();
       }, { ...opts, destructive: true });
       ctx.registerCommand('discord.config.get', () => config(), opts);
-      ctx.registerCommand('discord.config.set', (value) => { stop(); const settings = validateDiscordSettings(value); ctx.storage.set('config', settings); return settings; }, opts);
+      ctx.registerCommand('discord.config.set', (value) => { const settings = validateDiscordSettings(value); if (busy) throw new Error('작업을 중지한 뒤 연결 설정을 변경하세요.'); stop(); ctx.storage.set('config', settings); return settings; }, opts);
       ctx.registerCommand('discord.start', start, { ...opts, destructive: true });
       ctx.registerCommand('discord.stop', () => { paused = true; return stop(); }, opts);
       ctx.on('plugins.changed', () => { if (!host.enabled()) stop(); });

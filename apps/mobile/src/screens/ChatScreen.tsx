@@ -1,3 +1,4 @@
+import { uploadSecureFile } from '../secureFiles';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -107,6 +108,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [showAccess, setShowAccess] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
   const [showTokenPolicy, setShowTokenPolicy] = useState(false);
+  const [showChatOptions, setShowChatOptions] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [savingReasoning, setSavingReasoning] = useState(false);
@@ -116,7 +118,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [permissionNotice, setPermissionNotice] = useState('');
   const configurationSaveInFlightRef = useRef(false);
   const conversationRef = useRef<ConversationDetail | null>(null);
-  const uploadTaskRef = useRef<FileSystem.UploadTask | null>(null);
+  const uploadTaskRef = useRef<{ cancelAsync(): Promise<void> } | null>(null);
   const uploadStopReason = useRef<'user' | 'timeout' | null>(null);
   const mountedRef = useRef(true);
   const listRef = useRef<FlatList<UiMsg>>(null);
@@ -740,17 +742,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
   const attachFile = async (): Promise<void> => {
     const workspace = workspaces.find((item) => item.id === conversation?.workspaceId) ?? workspaces.find((item) => item.isDefault);
-    if (!workspace || uploading) { setShowWorkspaces(true); return; }
+    if (uploading) return;
     const picked = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
     if (picked.canceled) return;
     const file = picked.assets[0]; const relativePath = `.mr-robot-uploads/${Date.now()}-${file.name.replace(/[\\/:*?"<>|]/g, '_')}`;
     setUploading(true);
     uploadStopReason.current = null;
-    const uploadUrl = `${httpBaseForPc(pc)}/api/workspaces/upload?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(relativePath)}`;
-    const task = FileSystem.createUploadTask(uploadUrl, file.uri, {
-      httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      headers: pcAuthenticatedHeaders(pc, uploadUrl, { 'content-type': file.mimeType ?? 'application/octet-stream' }),
-    });
+    const controller = new AbortController();
+    const task = { cancelAsync: async () => { controller.abort(); } };
     uploadTaskRef.current = task;
     const timeout = setTimeout(() => {
       if (uploadTaskRef.current !== task) return;
@@ -758,16 +757,15 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       void task.cancelAsync().catch(() => undefined);
     }, 120_000);
     try {
-      const result = await task.uploadAsync();
-      if (!result) throw new Error(uploadStopReason.current === 'timeout' ? '파일 업로드 시간이 초과되었습니다.' : '파일 업로드를 중지했습니다.');
-      if (result.status < 200 || result.status >= 300) throw new Error(`업로드 실패 (HTTP ${result.status})`);
-      if (mountedRef.current) setInput((value) => `${value}${value ? '\n' : ''}[첨부 파일: ${workspace.path}\\${relativePath.replaceAll('/', '\\')}]`);
+      const result = await uploadSecureFile(pc, file.uri, file.name, controller.signal);
+      if (mountedRef.current) setInput((value) => value + (value ? '\n' : '') + '[첨부 파일: ' + result.absolutePath + ']');
     } catch (error) {
       if (mountedRef.current) setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: uploadStopReason.current === 'user' ? '파일 업로드를 중지했습니다.' : uploadStopReason.current === 'timeout' ? '파일 업로드 시간이 초과되었습니다.' : error instanceof Error ? error.message : String(error) }]);
     } finally {
       clearTimeout(timeout);
       if (uploadTaskRef.current === task) uploadTaskRef.current = null;
       uploadStopReason.current = null;
+      if (FileSystem.cacheDirectory && file.uri.startsWith(FileSystem.cacheDirectory)) await FileSystem.deleteAsync(file.uri, { idempotent: true }).catch(() => undefined);
       if (mountedRef.current) setUploading(false);
     }
   };
@@ -874,33 +872,13 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
-      {!keyboardVisible && <View style={styles.modeBar}>
-        <TouchableOpacity style={[styles.modeBtn, commandMode === 'pc' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void switchCommandMode('pc')}><Text style={[styles.modeText, commandMode === 'pc' && styles.modeTextOn]}>PC 기본 명령</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.modeBtn, commandMode === 'scenario' && styles.modeBtnOn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => setShowScenarios(true)}><Text style={[styles.modeText, commandMode === 'scenario' && styles.modeTextOn]}>단일·복합 트리</Text></TouchableOpacity>
-      </View>}
-      {!keyboardVisible && <ScrollView horizontal style={styles.conversationBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationBarContent} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity style={[styles.newChat, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.newChatText}>＋</Text></TouchableOpacity>
-          {conversations.map((c) => (
-            <TouchableOpacity key={c.id} style={[styles.conversationChip, conversation?.id === c.id && styles.conversationChipOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void loadConversation(c.id)} onLongPress={() => void togglePin(c)}>
-              <Text style={styles.conversationChipText} numberOfLines={1}>{c.pinned ? '📌 ' : ''}{c.title}</Text>
-            </TouchableOpacity>
-          ))}
-      </ScrollView>}
-      {!keyboardVisible && <ScrollView horizontal style={styles.controlBar} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlBarContent} keyboardShouldPersistTaps="handled">
-        <TouchableOpacity style={[styles.effortBtn, !conversation?.routingPresetId && conversation?.providerId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
-          <Text style={styles.effortText} numberOfLines={1}>
-            {conversation?.providerId
-              ? `🤖 단일 모델 · ${providers.find((provider) => provider.id === conversation.providerId)?.label ?? '모델'} · ${conversation.providerModel ?? '기본'}`
-              : '🤖 단일 모델 선택'}
-          </Text>
+      <View style={styles.chatHeader}>
+        <TouchableOpacity style={styles.chatHeading} accessibilityRole="button" accessibilityLabel="대화 목록과 추가 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}>
+          <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversation?.title || '새 대화'} ⌄</Text>
+          {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, conversation?.routingPresetId && styles.effortBtnOn, configurationLocked && styles.disabledBtn]} onPress={() => setShowScenarios(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>🧩 {routingPresets.find((preset) => preset.id === conversation?.routingPresetId)?.name ?? '복합 트리 선택'}</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowWorkspaces(true)} disabled={configurationLocked}><Text style={styles.effortText} numberOfLines={1}>📁 {workspaces.find((workspace) => workspace.id === conversation?.workspaceId)?.name ?? workspaces.find((workspace) => workspace.isDefault)?.name ?? '작업 폴더'}</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowAccess(true)} disabled={configurationLocked}><Text style={styles.effortText}>🔐 {conversation?.permissionMode === 'read-only' ? '읽기' : conversation?.permissionMode === 'workspace' ? '폴더' : conversation?.permissionMode === 'full' ? '전체' : '확인'}</Text></TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="대화 토큰 정책" style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} onPress={() => setShowTokenPolicy(true)} disabled={configurationLocked}><Text style={styles.effortText}>◈ {QUESTION_LABELS[conversation?.tokenPolicy ?? 'adaptive']}</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.effortText}>{conversation?.pinned ? '📌' : '고정'}</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.effortBtn, configurationLocked && styles.disabledBtn]} disabled={configurationLocked} onPress={() => void archiveConversation()}><Text style={styles.effortText}>보관</Text></TouchableOpacity>
-      </ScrollView>}
+        <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="새 대화" disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.toolBtnText}>＋</Text></TouchableOpacity>
+      </View>
       {loadError ? <View style={styles.loadError} accessibilityLiveRegion="assertive"><View style={styles.loadErrorCopy}><Text style={styles.loadErrorTitle}>대화 정보를 불러오지 못했습니다</Text><Text style={styles.loadErrorText} numberOfLines={2}>{loadError}</Text></View><TouchableOpacity style={styles.loadRetryBtn} onPress={() => void refreshInitialData()} accessibilityRole="button" accessibilityLabel="대화 다시 불러오기"><Text style={styles.loadRetryText}>재시도</Text></TouchableOpacity></View> : null}
       <FlatList
         ref={listRef}
@@ -970,7 +948,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             onContentSizeChange={() => scheduleComposerKeyboardSync([0, 80])}
           />
           <View style={styles.composerToolbar}>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="입력창 모델 선택" style={[styles.composerSelectBtn, styles.composerModelBtn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
+              <Text style={styles.composerSelectText} numberOfLines={1}>{conversation?.routingPresetId ? '복합 트리' : conversation?.providerModel || providers.find(p => p.id === conversation?.providerId)?.model || '모델 선택'} ⌄</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel={`대화 액세스 실제 적용 ${permissionLabel}${permissionCappedByDevice ? ', 기기 상한으로 제한됨' : ''}`}
@@ -980,7 +960,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               onPress={() => { setPermissionNotice(''); setShowAccess(true); }}
               disabled={configurationLocked}
             >
-              <Text style={styles.composerSelectText}>🔐 {permissionLabel}{permissionCappedByDevice ? '·상한' : ''}⌄</Text>
+              <Text style={styles.composerSelectText} numberOfLines={1}>권한 {permissionLabel}{permissionCappedByDevice ? '·상한' : ''}⌄</Text>
             </TouchableOpacity>
             <TouchableOpacity
               accessibilityRole="button"
@@ -991,12 +971,13 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               onPress={() => setShowReasoning(true)}
               disabled={reasoningLocked}
             >
-              <Text style={styles.composerSelectText}>{savingReasoning ? '추론 저장 중…' : `추론 ${selectedReasoningEffort}⌄`}</Text>
+              <Text style={styles.composerSelectText} numberOfLines={1}>{savingReasoning ? '저장 중…' : `추론 ${selectedReasoningEffort}⌄`}</Text>
             </TouchableOpacity>
+          </View>
+          <View style={styles.composerActionRow}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
             <View style={styles.composerToolbarSpacer} />
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="입력창 질문 토큰 예산" style={styles.composerSelectBtn} onPress={() => setShowTokenPolicy(true)} disabled={configurationLocked}>
-              <Text style={styles.composerSelectText}>예산 {QUESTION_LABELS[conversation?.tokenPolicy ?? 'adaptive']}⌄</Text>
-            </TouchableOpacity>
             {!busy && (
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
                 <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
@@ -1007,6 +988,25 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         {busy && <View style={styles.busyActions}><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>추가 명령 끼워넣기</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text></TouchableOpacity></View>}
         {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
+
+      <Modal visible={showChatOptions} transparent animationType="slide" onRequestClose={() => setShowChatOptions(false)} accessibilityViewIsModal>
+        <View style={[styles.optionsBackdrop, { paddingBottom: Math.max(12, insets.bottom), paddingTop: Math.max(12, insets.top) }]}>
+          <View style={styles.optionsSheet}>
+            <View style={styles.optionsHeading}><Text style={styles.modalTitle}>대화 설정</Text><TouchableOpacity accessibilityLabel="추가 설정 닫기" onPress={() => setShowChatOptions(false)} style={styles.composerIconBtn}><Text style={styles.toolBtnText}>×</Text></TouchableOpacity></View>
+            <ScrollView keyboardShouldPersistTaps="handled" style={styles.optionsScroll}>
+              <Text style={styles.optionsSection}>실행 환경</Text>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowWorkspaces(true); }}><Text style={styles.optionsLabel}>작업 폴더</Text><Text style={styles.optionsValue} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || '선택 안 함'} ›</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowScenarios(true); }}><Text style={styles.optionsLabel}>모델 시나리오</Text><Text style={styles.optionsValue} numberOfLines={1}>{routingPresets.find(p => p.id === conversation?.routingPresetId)?.name || '단일 모델'} ›</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} accessibilityLabel="대화 토큰 정책" disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowTokenPolicy(true); }}><Text style={styles.optionsLabel}>질문 예산</Text><Text style={styles.optionsValue}>{QUESTION_LABELS[conversation?.tokenPolicy ?? 'adaptive']} ›</Text></TouchableOpacity>
+              <Text style={styles.optionsSection}>현재 대화</Text>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.optionsLabel}>{conversation?.pinned ? '대화 고정 해제' : '대화 고정'}</Text><Text style={styles.optionsValue}>⌖</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); void archiveConversation(); }}><Text style={styles.optionsLabel}>보관함으로 이동</Text><Text style={styles.optionsValue}>›</Text></TouchableOpacity>
+              <Text style={styles.optionsSection}>최근 대화</Text>
+              {conversations.map(c => <TouchableOpacity key={c.id} style={[styles.optionsRow, c.id === conversation?.id && styles.optionsRowOn]} disabled={savingConfiguration} onPress={() => { setShowChatOptions(false); void loadConversation(c.id); }}><Text style={styles.optionsLabel} numberOfLines={1}>{c.pinned ? '⌖ ' : ''}{c.title}</Text><Text style={styles.optionsValue}>{c.id === conversation?.id ? '✓' : '›'}</Text></TouchableOpacity>)}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={showModels} transparent animationType="fade" onRequestClose={() => setShowModels(false)} accessibilityViewIsModal>
         <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
@@ -1231,11 +1231,26 @@ const styles = StyleSheet.create({
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
   inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
   inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
-  composerCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.inputBg, padding: 7, gap: 5 },
-  composerToolbar: { minHeight: 40, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+  composerCard: { borderWidth: 1, borderColor: colors.border, borderRadius: 22, backgroundColor: colors.inputBg, padding: 8, gap: 2 },
+  composerToolbar: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  chatHeader: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  chatHeading: { flex: 1, minWidth: 0 },
+  chatHeadingTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  chatHeadingDetail: { color: colors.faint, fontSize: 11, marginTop: 3 },
+  composerActionRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  composerModelBtn: { flex: 1, minWidth: 0, maxWidth: undefined },
+  optionsBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,.55)', paddingHorizontal: 12 },
+  optionsSheet: { maxHeight: '88%', backgroundColor: colors.card, borderRadius: 24, borderWidth: 1, borderColor: colors.border, padding: 16 },
+  optionsHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  optionsScroll: { flexShrink: 1 },
+  optionsSection: { color: colors.faint, fontSize: 11, fontWeight: '700', marginTop: 18, marginBottom: 6 },
+  optionsRow: { minHeight: 48, paddingHorizontal: 10, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 14, borderRadius: 12 },
+  optionsRowOn: { backgroundColor: 'rgba(124,92,255,.12)' },
+  optionsLabel: { color: colors.text, fontSize: 13, flexShrink: 1 },
+  optionsValue: { color: colors.dim, fontSize: 12, marginLeft: 'auto', flexShrink: 1, maxWidth: '58%' },
   composerToolbarSpacer: { flex: 1, minWidth: 2 },
-  composerIconBtn: { width: 40, height: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.025)' },
-  composerSelectBtn: { minHeight: 40, maxWidth: 150, justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, backgroundColor: 'rgba(255,255,255,.025)', paddingHorizontal: 9 },
+  composerIconBtn: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
+  composerSelectBtn: { minHeight: 40, maxWidth: 140, flexShrink: 1, justifyContent: 'center', borderRadius: 9, backgroundColor: 'transparent', paddingHorizontal: 7 },
   composerSelectError: { borderColor: 'rgba(248,113,113,.6)', backgroundColor: 'rgba(248,113,113,.08)' },
   composerSelectText: { color: colors.dim, fontSize: 10.5, fontWeight: '800' },
   composerSettingError: { color: colors.err, fontSize: 10.5, lineHeight: 15, paddingHorizontal: 3 },
@@ -1250,8 +1265,8 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 6,
     fontSize: 14.5,
-    minHeight: 52,
-    maxHeight: 140,
+    minHeight: 44,
+    maxHeight: 120,
   },
   sendBtn: { minHeight: 40, backgroundColor: colors.accent, borderRadius: radius.sm, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
   cancelBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },

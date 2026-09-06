@@ -41,7 +41,9 @@ check('opening the keyboard follows the latest message and list size changes pre
 check('keyboard entry mode frees vertical space without covering the composer',
   home.includes('{!keyboardVisible && <View style={[styles.header')
   && home.includes('{!keyboardVisible && <View style={[styles.tabbar')
-  && chat.includes('{!keyboardVisible && <View style={styles.modeBar}')
+  && chat.includes('{!keyboardVisible && <Text style={styles.chatHeadingDetail}')
+  && !chat.includes('style={styles.modeBar}')
+  && !chat.includes('style={styles.controlBar}')
   && chat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)'));
 check('composer measures real keyboard occlusion and lifts only by the uncovered overlap',
   chat.includes('composerRef.current?.measureInWindow')
@@ -79,7 +81,7 @@ check('an exact failed retry replaces only the failed tail while a start-dispatc
   && chat.includes('if (startingConversationRef.current === currentConversation.id) return;')
   && chat.includes('startingConversationRef.current = currentConversation.id;')
   && chat.includes('setMessages((items) => appendPendingAttempt(items, text));'));
-const mobilePermissionControl = chat.indexOf('onPress={() => setShowAccess(true)}');
+const mobilePermissionControl = chat.indexOf('setPermissionNotice(\'\'); setShowAccess(true);');
 const mobileTokenPolicyControl = chat.indexOf('accessibilityLabel="대화 토큰 정책"');
 check('per-conversation token policy follows permission and is run-locked, rollback-safe, and administrator-gated',
   mobilePermissionControl >= 0

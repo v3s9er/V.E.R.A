@@ -165,7 +165,15 @@ type SmallJson = {
   assertion?: unknown;
 };
 
+class RemoteUnavailableError extends Error {}
+
 async function readSmallJson(response: Response): Promise<SmallJson> {
+  // The protected tool portal deliberately returns a JSON 503 probe marker.
+  // Only a non-JSON upstream failure is retryable; validate JSON markers below.
+  if (response.status >= 500 && !(response.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new RemoteUnavailableError(`터널 원본이 아직 연결되지 않았습니다. (HTTP ${response.status})`);
+  }
   const advertised = Number(response.headers.get('content-length') ?? 0);
   if (Number.isFinite(advertised) && advertised > 16 * 1024) throw new Error('외부 확인 응답이 너무 큽니다.');
   if (!response.body) throw new Error('외부 확인 응답 본문이 없습니다.');
@@ -1334,6 +1342,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           verifiedAt = checkedAt;
           lastError = `외부 주소 확인 실패: ${error instanceof Error ? error.message : String(error)}`;
           emitStatus();
+          if (error instanceof RemoteUnavailableError) throw error;
           throw new Error(lastError);
         }
       };
@@ -1346,7 +1355,18 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         clearAccessReverify();
         const attempt = (async (): ReturnType<typeof verify> => {
           try {
-            const result = await verify();
+            // A registered connector can precede Cloudflare's origin routing readiness.
+            // Retry only upstream 5xx, never failed Access checks or invalid JSON.
+            let result: Awaited<ReturnType<typeof verify>> | undefined;
+            for (let retry = 0; retry < 4; retry++) {
+              try { result = await verify(); break; }
+              catch (error) {
+                if (!(error instanceof RemoteUnavailableError) || retry === 3 || verificationGeneration !== operationGeneration) throw error;
+                await new Promise<void>(resolve => ctx.setTimeout(resolve, 2000));
+                if (verificationGeneration !== operationGeneration) throw new Error('원격 연결 시작이 취소되었습니다.');
+              }
+            }
+            if (!result) throw new Error('원격 링크 검증 실패');
             if (verificationGeneration === operationGeneration) scheduleAccessReverify(verificationGeneration);
             return result;
           } catch (error) {

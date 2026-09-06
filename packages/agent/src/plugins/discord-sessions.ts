@@ -31,6 +31,7 @@ export class DiscordSessions {
       delete state.bindings[m.guildId]; save(); return result({ message: '연결을 해제했습니다. 기존 대화는 삭제하지 않았습니다.' });
     }
     if (m.action === 'thread.register') {
+      if (m.allowAi !== true) throw new Error('티켓 발급에는 allow_ai 역할 확인이 필요합니다.');
       if (state.bindings[m.guildId] !== m.channelId || !snowflake(m.threadId) || m.threadId === m.channelId) throw new Error('연결된 채널의 새 스레드만 등록할 수 있습니다.');
       if (state.sessions[m.threadId]) throw new Error('이미 등록된 스레드입니다.');
       if (Object.keys(state.sessions).length >= 64 || Object.values(state.sessions).filter(s => s.ownerId === m.userId && s.guildId === m.guildId).length >= 20) throw new Error('대화 목록이 가득 찼습니다. 불필요한 스레드를 삭제하세요.');

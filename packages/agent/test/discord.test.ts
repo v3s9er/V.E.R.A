@@ -21,9 +21,11 @@ const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
 await new Promise<void>(resolve => server.once('listening', resolve));
 let runId: number | undefined;
 let socket: any;
+let lastRun: any;
 server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   const req = JSON.parse(raw.toString());
   if (req.method === 'chat.start') {
+    lastRun = req.params;
     assert.equal(req.params.permissionMode, 'full'); assert.equal(req.params.tokenPolicy, 'audit-only');
     runId = req.id;
     ws.send(JSON.stringify({ id: 0, event: 'chat.confirm', data: { conversationId: 'test-conversation', requestId: 'approval-1', summary: 'Test command' } }));
@@ -35,7 +37,8 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   }
   ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: () => [], permissionCeiling: () => 'full' }, { spawn: (() => fake) as any });
+const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra', 'unknown', 'sol'];
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => 'full' }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -50,12 +53,21 @@ const waitFor = async (predicate: () => boolean) => {
 };
 const emit = (value: unknown) => fake.stdout.write('__MR_ROBOT_DISCORD__' + JSON.stringify(value) + '\n');
 try {
-  mkdirSync(join(dir, 'bot')); writeFileSync(join(dir, 'bot', 'client.py'), ''); writeFileSync(join(dir, 'main.py'), '');
+  writeFileSync(join(dir, 'config.json'), '{"bot_token":"test-only"}');
   assert.throws(() => validateDiscordSettings({ botDirectory: '.', pythonPath: 'python' }));
+  assert.equal(validateDiscordSettings({ botDirectory: dir, pythonPath: process.execPath }).mode, 'standalone', 'config-only standalone needs no old bot source');
+  assert.throws(() => validateDiscordSettings({ botDirectory: dir, pythonPath: process.execPath, mode: 'legacy' }));
+  assert.throws(() => validateDiscordSettings({ botDirectory: dir, pythonPath: process.execPath, mode: 'unknown' }));
   await plugin.activate!(ctx);
+  storage.set('config', { botDirectory: dir, pythonPath: process.execPath, autoStart: false });
+  assert.equal(commands.get('discord.config.get')!().mode, 'legacy', 'old installations preserve news/KTX unless owner switches');
   await commands.get('discord.config.set')!({ botDirectory: dir, pythonPath: process.execPath, autoStart: false });
   enabled = false; await assert.rejects(commands.get('discord.start')!()); enabled = true;
   await commands.get('discord.start')!();
+  assert.equal(replies[0].mode, 'standalone');
+  assert.equal(JSON.stringify(replies).includes('test-only'), false, 'Discord credentials are read locally, not sent in boot payload');
+  assert.throws(() => commands.get('discord.config.set')!({ botDirectory: dir, pythonPath: 'missing' }));
+  assert.equal(commands.get('discord.status')!().running, true, 'invalid settings must not kill running plugin');
   assert.equal(JSON.stringify(replies).includes('fixture-token'), false, 'credentials never enter Python pipe');
   emit({ event: 'ready', owner: '123456789012345678', guilds: ['222222222222222222'] });
   emit({ id: 'denied', userId: '999999999999999999', channelId: '111111111111111111', action: 'ask', text: 'No' });
@@ -67,8 +79,33 @@ try {
   await waitFor(() => replies.some(r => r.id === 'unconfirmed')); assert.ok(replies.find(r => r.id === 'unconfirmed').error);
   emit({ ...identity, id: 'full', action: 'access', mode: 'full', confirmFull: true });
   await waitFor(() => replies.some(r => r.id === 'full')); assert.equal(replies.find(r => r.id === 'full').result.permission, 'full');
+  let requestSerial = 0;
+  const request = async (params: any) => {
+    const id = `policy-${++requestSerial}`; emit({ ...identity, ...params, id });
+    await waitFor(() => replies.some(r => r.id === id)); return replies.find(r => r.id === id);
+  };
+  for (const action of ['access', 'model-limit']) {
+    assert.ok((await request({ action, guildAdmin: false, mode: 'full', confirmFull: true, targetUserId: identity.userId, ceiling: 'unlimited' })).error, 'non-admin policy mutation denied by host');
+  }
+  assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'sol' })).result.modelCeiling, 'sol');
+  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 5));
+  assert.equal((await request({ action: 'models' })).result[0].model, '', 'above-cap configured default not offered');
+  assert.equal((await request({ action: 'status', channelId: '666666666666666666' })).result.modelCeiling, 'sol', 'new channels cannot reset per-user cap');
+  assert.equal((await request({ action: 'status', userId: '555555555555555555' })).result.modelCeiling, 'unlimited', 'other users isolated');
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-6-astra', effort: 'auto' })).error);
+  assert.ok((await request({ action: 'ask', text: 'blocked explicit', model: 'gpt-6-astra' })).error);
+  assert.ok((await request({ action: 'ask', text: 'blocked default' })).error);
+  assert.equal(lastRun, undefined, 'rejected requests never invoke the agent');
+  assert.ok((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'invented' })).error);
+  assert.equal((storage.get('modelLimits') as any)[`${identity.guildId}:${identity.userId}`], 'sol', 'policy persisted and invalid update did not widen it');
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-sol', effort: 'auto' })).result);
   emit({ ...identity, id: 'ask', action: 'ask', text: '한글 명령' });
   await waitFor(() => replies.some(r => r.event === 'approval'));
+  assert.equal(lastRun.discordModelCeiling, 'sol');
+  assert.equal(lastRun.providerModel, 'gpt-5.6-sol');
+  assert.ok((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'astra' })).error, 'in-flight policy change rejected');
+  assert.throws(() => commands.get('discord.config.set')!({ botDirectory: dir, pythonPath: process.execPath }));
+  assert.equal(commands.get('discord.status')!().busy, true, 'mode change must not interrupt active work');
   emit({ ...identity, userId: '555555555555555555', id: 'other-admin', action: 'approve', requestId: 'approval-1', approve: true });
   await waitFor(() => replies.some(r => r.id === 'other-admin')); assert.ok(replies.find(r => r.id === 'other-admin').error);
   emit({ ...identity, id: 'wrong', action: 'approve', requestId: 'wrong', approve: true });
@@ -76,6 +113,11 @@ try {
   emit({ ...identity, id: 'approve', action: 'approve', requestId: 'approval-1', approve: true });
   await waitFor(() => replies.some(r => r.id === 'ask')); assert.equal(replies.find(r => r.id === 'ask').result.text, 'Test finished');
   assert.equal(commands.get('discord.status')!().busy, false);
+  assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'astra' })).result.modelCeiling, 'astra');
+  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 6));
+  assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'show' })).result.modelCeiling, 'astra');
+  assert.ok((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'unlimited' })).result);
+  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog);
   emit({ ...identity, id: 'result', action: 'result' });
   await waitFor(() => replies.some(r => r.id === 'result')); assert.equal(replies.find(r => r.id === 'result').result.text, 'Test finished');
   const setup = commands.get('discord.workspace.setup')!({ channelName: 'ai_talk' });

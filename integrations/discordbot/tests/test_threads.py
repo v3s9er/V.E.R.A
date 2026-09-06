@@ -14,7 +14,7 @@ from bridge import Bridge
 
 class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.bridge = NS(authorize=AsyncMock(), execute=AsyncMock(), request=AsyncMock(), active={}, client=NS(intents=NS(message_content=True)))
+        self.bridge = NS(authorize=AsyncMock(), authorize_ticket=AsyncMock(), execute=AsyncMock(), request=AsyncMock(), active={}, client=NS(intents=NS(message_content=True)))
         self.manager = ThreadManager(self.bridge, {'bindings': {'1': '2'}, 'sessions': {'4': {'guildId': '1', 'parentId': '2', 'ownerId': '3', 'name': 'mine', 'archived': False}}})
         self.status = NS(edit=AsyncMock())
         self.channel = NS(id=4, send=AsyncMock(return_value=self.status))
@@ -115,6 +115,22 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.request.call_args.args[1], 'thread.register')
         self.assertIn('Docs', self.bridge.request.call_args.kwargs['name'])
         thread.delete.assert_not_awaited()
+
+    async def test_ticket_role_denial_prevents_discord_thread_creation(self):
+        self.bridge.authorize_ticket.side_effect = PermissionError('allow_ai')
+        context = NS(response=NS(defer=AsyncMock()), channel=NS(create_thread=AsyncMock()))
+        with self.assertRaisesRegex(PermissionError, 'allow_ai'):
+            await self.manager.create(context)
+        context.channel.create_thread.assert_not_awaited()
+
+    async def test_revoked_role_before_registration_rolls_back_new_thread(self):
+        thread = NS(id=7, add_user=AsyncMock(), delete=AsyncMock())
+        parent = NS(create_thread=AsyncMock(return_value=thread))
+        context = NS(guild_id=1, channel_id=2, user=NS(id=3, display_name='Tester'), channel=parent, response=NS(defer=AsyncMock()))
+        self.bridge.request.side_effect = [[], PermissionError('allow_ai')]
+        with self.assertRaisesRegex(PermissionError, 'allow_ai'):
+            await self.manager.create(context)
+        thread.delete.assert_awaited_once()
 
     async def test_busy_delete_does_not_delete_thread(self):
         context = NS(guild_id=1, channel_id=4, user=NS(id=3), channel=NS(delete=AsyncMock()), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))

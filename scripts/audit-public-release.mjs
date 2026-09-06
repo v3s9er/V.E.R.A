@@ -66,6 +66,7 @@ const secretPatterns = [
   ['Google API key', /\bAIza[0-9A-Za-z_-]{30,}\b/g, false],
   ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, false],
   ['Slack token', /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g, false],
+  ['Discord bot token', /\b(?:[MNO][A-Za-z0-9_-]{22,30}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}|mfa\.[A-Za-z0-9_-]{80,})\b/g, false],
   ['DPAPI runtime payload', /dpapi:v1(?::|\/)[A-Za-z0-9+/=]{16,}/g, false],
   ['Cloudflare Access service secret', /\bcfast_[A-Za-z0-9]{48}\b/g, false],
   ['JWT or Cloudflare Tunnel credential', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, false],

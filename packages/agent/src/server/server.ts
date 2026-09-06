@@ -46,6 +46,7 @@ import { createOrcaPlugin } from '../plugins/orca.js';
 import { createCalendarPlugin } from '../plugins/calendar.js';
 import { createTailscalePlugin } from '../plugins/tailscale.js';
 import { createDiscordPlugin } from '../plugins/discord.js';
+import { assertDiscordModelAllowed, parseDiscordModelCeiling } from '../plugins/discord-model-policy.js';
 import { createDockerPlugin } from '../plugins/docker.js';
 import { createCtfPlugin } from '../plugins/ctf.js';
 import { createMcpPlugin } from '../plugins/mcp.js';
@@ -78,7 +79,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.7';
+export const VERSION = '0.4.11';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -707,7 +708,9 @@ export class AgentServer {
     },
     revoke: (id) => { this.discordLinkIds.delete(id); try { this.config.revokeDeviceLink(id); } finally { this.invalidateDeviceLink(id); } },
     permissionCeiling: () => this.config.settings.safety.mode === 'read-only' ? 'read-only' : 'full',
-    models: () => this.config.providers.map((provider) => ({ providerId: provider.id, name: provider.label, model: provider.model })),
+    models: (providerId) => providerId
+      ? this.providersModels(providerId).then(models => [...new Set(models)].filter(model => typeof model === 'string' && model.length <= 200).slice(0, 1000))
+      : this.registry.list().map(provider => ({ providerId: provider.id, name: provider.label, model: provider.model, isDefault: provider.isDefault, supportedReasoning: provider.supportedReasoning })),
   });
   private readonly webCryptoObserverPlugin = createWebCryptoObserverPlugin({
     policyProvider: {
@@ -2382,7 +2385,8 @@ export class AgentServer {
       const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : conversation.workspaceId;
       const workspace = this.config.workspaces.find((item) => item.id === workspaceId)
         ?? this.config.workspaces.find((item) => item.isDefault);
-      const routingPresetId = typeof body.routingPresetId === 'string' ? body.routingPresetId : conversation.routingPresetId;
+      // Discord model selection must not inherit a PC-edited routing preset.
+      const routingPresetId = client.state.auth?.trustedDiscord ? undefined : typeof body.routingPresetId === 'string' ? body.routingPresetId : conversation.routingPresetId;
       const conversationRouting = routingPresetId ? this.config.routingForPreset(routingPresetId) : null;
       if (routingPresetId && !conversationRouting) throw new Error('이 대화의 모델 시나리오가 삭제되었습니다. 다른 시나리오를 선택하세요.');
       const effectivePermissionMode = effectiveMode(
@@ -2428,6 +2432,9 @@ export class AgentServer {
           text,
           {
             signal: session.signal(),
+            beforeModelCall: client.state.auth?.trustedDiscord
+              ? ({ model }) => assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), model)
+              : undefined,
             onText: (delta) => sendRunEvent('chat.delta', { conversationId, text: delta }),
             onTool: (info) => sendRunEvent('chat.tool', { conversationId, ...info }),
             onStatus: (status) => {

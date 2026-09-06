@@ -543,7 +543,7 @@ function recoveryTimestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
-function atomicWriteUtf8(file: string, value: string): void {
+export function atomicWriteUtf8(file: string, value: string): void {
   const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   let descriptor: number | undefined;
   try {

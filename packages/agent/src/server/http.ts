@@ -22,6 +22,7 @@ import { mrRobotHome } from '../config.js';
 import { authPrincipal, webSocketTicketBinding, WsUpgradeTicketAdmissionError, type AuthContext, type WsUpgradeTickets } from './ws.js';
 import { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress, tailscaleInterfaceAddresses } from './transport.js';
 import { FileTransferAdmission, FileTransferAdmissionError, type FileTransferLease } from './transfer-admission.js';
+import { SecureFiles } from './secure-files.js';
 import {
   CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE,
   CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
@@ -1274,12 +1275,14 @@ export function createHttpApi(
   const requireWorkspaceFileAccess = (write: boolean) => (req: Request, res: Response, next: NextFunction): void => {
     const token = String(req.header('x-mr-robot-token') ?? '');
     const auth = host.authenticate(token);
+    if (auth?.linkId && secureChannel().protected(auth.linkId)) { res.status(426).json({ error: '이 기기는 보안 파일 전송을 사용해야 합니다. 앱을 업데이트하세요.' }); return; }
     if (auth && host.fileAccess(token, write)) { res.locals.mrRobotAuth = auth; next(); return; }
     res.status(403).json({ error: write ? '이 기기에는 작업 폴더 쓰기 권한이 없습니다.' : '이 기기에는 작업 폴더 읽기 권한이 없습니다.' });
   };
   const requireSharedFileAccess = (write: boolean) => (req: Request, res: Response, next: NextFunction): void => {
     const token = String(req.header('x-mr-robot-token') ?? '');
     const auth = host.authenticate(token);
+    if (auth?.linkId && secureChannel().protected(auth.linkId)) { res.status(426).json({ error: '이 기기는 보안 파일 전송을 사용해야 합니다. 앱을 업데이트하세요.' }); return; }
     if (auth && host.sharedFileAccess(token, write)) { res.locals.mrRobotAuth = auth; next(); return; }
     res.status(403).json({ error: write ? '이 기기에는 기기 간 공유 폴더 쓰기 권한이 없습니다.' : '이 기기에는 기기 간 공유 폴더 읽기 권한이 없습니다.' });
   };
@@ -1325,6 +1328,22 @@ export function createHttpApi(
     if (grant.length < 32 || grant.length > 256) throw new Error('원본 PC의 1회성 전송 권한이 올바르지 않습니다.');
     return grant;
   };
+
+  let secureFiles: SecureFiles | undefined;
+  const secureChannel = () => secureFiles ??= new SecureFiles(mrRobotHome(), host, resolveConfinedPath);
+  app.post('/api/secure-files/invite', requireAdmin, (req, res) => {
+    if (!isLoopback(remoteOf(req)) || req.header('cf-ray') || req.header('x-forwarded-for')) { res.status(403).json({ error: '파일 암호화 QR은 PC 로컬 화면에서만 만들 수 있습니다.' }); return; }
+    try { res.setHeader('Cache-Control', 'no-store'); res.json(secureChannel().invite()); } catch { res.status(400).json({ error: '보안 저장소 또는 등록 한도를 확인하세요.' }); }
+  });
+  app.post('/api/secure-files/reset', requireAdmin, (req, res) => {
+    if (!isLoopback(remoteOf(req)) || req.header('cf-ray') || req.header('x-forwarded-for')) { res.sendStatus(403); return; }
+    secureChannel().reset(); res.json({ ok: true });
+  });
+  app.post('/api/secure-files/channel', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try { res.json(secureChannel().handle(req.body)); }
+    catch { res.status(403).json({ error: '보안 파일 인증 실패. PC의 새 파일 암호화 QR을 등록하세요.' }); }
+  });
 
   app.get('/api/workspaces', requireAuth, (_req, res) => res.json(host.workspacesList()));
   app.get('/api/workspaces/files', requireWorkspaceFileAccess(false), (req, res) => {
@@ -1404,6 +1423,7 @@ export function createHttpApi(
 
   app.post('/api/transfers/grant', requireAuth, (req, res) => {
     try {
+      if (requestAuth(res).linkId && secureChannel().protected(requestAuth(res).linkId!)) throw new Error('보안 파일 기기는 암호화 채널을 사용하세요.');
       const token = String(req.header('x-mr-robot-token') ?? '');
       const kind = String(req.body?.kind ?? '');
       if (kind === 'file') {
@@ -1429,6 +1449,8 @@ export function createHttpApi(
     let transfer: ReturnType<typeof transferAbort> | undefined;
     let lease: FileTransferLease | undefined;
     try {
+      const requestingDevice = host.authenticate(String(req.header('x-mr-robot-token') ?? ''));
+      if (requestingDevice?.linkId && secureChannel().protected(requestingDevice.linkId)) throw new Error('보안 파일 기기는 암호화 채널을 사용하세요.');
       const file = sharedPath(req.query.path);
       const stat = statSync(file);
       if (!stat.isFile()) throw new Error('다운로드할 파일이 아닙니다.');
@@ -1439,6 +1461,7 @@ export function createHttpApi(
       const principal = auth && host.sharedFileAccess(token, false)
         ? authPrincipal(auth)
         : consumeTransferGrant(req, 'file', path).principal;
+      if (principal.startsWith('device:') && secureChannel().protected(principal.slice(7))) throw new Error('보안 파일 기기는 암호화 채널을 사용하세요.');
       lease = transferAdmission.acquire(principal, stat.size);
       transfer = transferAbort(req, res, activeTransfers);
       const name = basename(file).replace(/[\r\n"]/g, '_');

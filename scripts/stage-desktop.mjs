@@ -46,7 +46,7 @@ copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
-for (const name of ['bridge.py', 'thread_sessions.py', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));
+for (const name of ['bridge.py', 'standalone.py', 'legacy_adapter.py', 'thread_sessions.py', 'requirements.txt', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));
 // Keep the live window and tray on the exact same full icon as Android.
 copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'icon.png'));
 // main.mjs uses ws for native Cloudflare Access headers on WSS upgrades.
@@ -58,6 +58,6 @@ const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: '0.4.7', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
+  name: 'mr-robot-desktop', version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

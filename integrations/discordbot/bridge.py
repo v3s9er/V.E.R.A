@@ -1,13 +1,12 @@
-"""Mr.Robot adapter for the existing local Vesper bot. No secrets in this file.
+"""Mr.Robot Discord plugin protocol. No secrets in this file.
 
-Run only via the Discord Agent plugin; the existing GUI/news/KTX bot stays intact.
+Run only via the Discord Agent plugin. Standalone needs connection config only.
 The PC credential never leaves the Node host. Discord identity comes from Gateway.
 """
 import asyncio
 import io
 import json
 import os
-import runpy
 import sys
 import threading
 import uuid
@@ -20,6 +19,29 @@ PREFIX = '__MR_ROBOT_DISCORD__'
 _output_lock = threading.Lock()
 _bridge = None
 _reader_started = False
+
+
+def allowed_guilds_from_store(guilds, configured_name, state_path):
+    """Share the host's local allowlist; membership/invitation alone is not consent."""
+    joined = {guild.id for guild in guilds}
+    try:
+        with open(state_path, encoding='utf-8-sig') as stream:
+            state = json.load(stream)
+        if not isinstance(state, dict):
+            return set()
+        if 'allowedGuildIds' in state:
+            ids = state['allowedGuildIds']
+            if not isinstance(ids, list):
+                return set()
+            return joined.intersection(int(value) for value in ids if isinstance(value, str) and value.isascii() and value.isdigit() and 15 <= len(value) <= 22)
+    except FileNotFoundError:
+        pass  # Legacy first-run bootstrap; the Node host separately pins the guild.
+    except (OSError, ValueError, TypeError):
+        return set()  # Corrupt/unreadable configuration must never widen access.
+    candidates = [guild for guild in guilds if guild.name == configured_name] if configured_name else list(guilds)
+    if not candidates and len(guilds) == 1:
+        candidates = list(guilds)
+    return {candidates[0].id} if len(candidates) == 1 else set()
 
 
 def emit(value):
@@ -61,6 +83,10 @@ class Approval(discord.ui.View):
     async def reject(self, interaction, button):
         await self.settle(interaction, False)
 
+    @discord.ui.button(label='작업 중지', style=discord.ButtonStyle.secondary)
+    async def stop_work(self, interaction, button):
+        await self.bridge.execute(interaction, 'stop')
+
 
 class Bridge:
     def __init__(self, client):
@@ -72,6 +98,7 @@ class Bridge:
         self.tree = app_commands.CommandTree(client)
         self.reader_started = False
         self.allowed_guilds = set()
+        self.authorization_path = os.path.join(os.environ.get('MR_ROBOT_HOME', os.path.join(os.path.expanduser('~'), '.mr-robot')), 'plugins', 'discord-agent.json')
         self.threads = ThreadManager(self, getattr(client, '_mr_robot_thread_state', None))
 
     @staticmethod
@@ -79,6 +106,8 @@ class Bridge:
         return f'{interaction.guild_id}:{interaction.channel_id}:{interaction.user.id}'
 
     async def authorize(self, interaction):
+        if hasattr(self, 'authorization_path'):
+            self.refresh_allowed_guilds()
         if interaction.guild_id not in self.allowed_guilds or not interaction.guild:
             raise PermissionError('등록된 Discord 서버에서만 사용할 수 있습니다. DM은 지원하지 않습니다.')
         if hasattr(self, 'threads'):
@@ -92,6 +121,18 @@ class Bridge:
         if member.id == guild.owner_id or any(role.permissions.administrator for role in roles if role.id in role_ids or role.id == guild.id):
             return
         raise PermissionError('Discord 서버의 관리자(Administrator) 권한이 필요합니다.')
+
+    async def authorize_ticket(self, interaction):
+        # Ticket eligibility is additional to PC authority, never an admin bypass.
+        await self.authorize(interaction)
+        guild = await self.client.fetch_guild(interaction.guild_id)
+        member = await guild.fetch_member(interaction.user.id)
+        roles = await guild.fetch_roles()
+        if not any(role.name == 'allow_ai' and role.id in member._roles for role in roles):
+            raise PermissionError('티켓을 열려면 서버 관리자가 allow_ai 역할을 먼저 부여해야 합니다.')
+
+    def refresh_allowed_guilds(self):
+        self.allowed_guilds = allowed_guilds_from_store(self.client.guilds, self.client.config.get('server_name', ''), self.authorization_path)
 
     async def setup(self):
         global _bridge, _reader_started
@@ -126,11 +167,19 @@ class Bridge:
         async def models(interaction: discord.Interaction):
             await self.execute(interaction, 'models')
 
-        @group.command(name='access', description='본인 대화의 PC 접근·변경 권한 설정')
+        @group.command(name='access', description='서버 관리자 전용: 본인 대화의 PC 접근 권한 설정')
+        @app_commands.checks.has_permissions(administrator=True)
         @app_commands.choices(mode=[app_commands.Choice(name=name, value=value) for value, name in [('read-only', '읽기 전용'), ('ask', '변경 전 확인'), ('workspace', '작업 폴더 허용'), ('full', '전체 PC 허용 · 확인 없이 실행')]])
         @app_commands.describe(confirm_full='전체 PC 접근과 확인 없는 변경 실행에 동의하면 True')
         async def access(interaction: discord.Interaction, mode: str, confirm_full: bool = False):
             await self.execute(interaction, 'access', mode=mode, confirmFull=confirm_full)
+
+        @group.command(name='model-limit', description='서버 관리자 전용: 사용자별 모델 상한 설정·조회')
+        @app_commands.checks.has_permissions(administrator=True)
+        @app_commands.describe(user='제한할 서버 사용자', ceiling='상위 모델 차단 · 서버 내 모든 티켓에 적용')
+        @app_commands.choices(ceiling=[app_commands.Choice(name=label, value=value) for value, label in [('show', '현재 상한 조회'), ('spark', 'spark 이하'), ('mini', 'mini 이하'), ('luna', 'luna 이하'), ('terra', 'terra 이하'), ('sol', 'sol 이하'), ('astra', 'astra 이하'), ('unlimited', '제한 해제 · 모든 공급자')]])
+        async def model_limit(interaction: discord.Interaction, user: discord.Member, ceiling: str):
+            await self.execute(interaction, 'model-limit', targetUserId=str(user.id), ceiling=ceiling)
 
         @group.command(name='result', description='긴 작업의 마지막 결과 다시 받기')
         async def result(interaction: discord.Interaction):
@@ -151,6 +200,14 @@ class Bridge:
         @group.command(name='sessions', description='내 개인 스레드 목록·보관 해제')
         async def sessions(interaction: discord.Interaction):
             await self.threads.show_list(interaction)
+
+        @group.command(name='controls', description='이 티켓의 중지·권한·모델 메뉴를 맨 아래로 가져오기')
+        async def controls(interaction: discord.Interaction):
+            await self.threads.show_controls(interaction)
+
+        @group.command(name='model', description='이 티켓의 공급자·모델·추론 드롭다운 열기')
+        async def model_picker(interaction: discord.Interaction):
+            await self.threads.show_models(interaction)
 
         @self.tree.error
         async def on_command_error(interaction, error):
@@ -186,7 +243,7 @@ class Bridge:
 
     def receive(self, value):
         if value.get('event') == 'thread.state':
-            self.threads.state = value['data']
+            self.threads.update_state(value['data'])
             return
         if value.get('event') == 'workspace.setup':
             async def provision():
@@ -223,6 +280,17 @@ class Bridge:
 
     async def request(self, interaction, action, **params):
         await self.authorize(interaction)
+        if {'id', 'userId', 'channelId', 'guildId', 'guildAdmin', 'allowAi', 'isThread', 'action'} & params.keys():
+            raise PermissionError('인증 필드는 요청에서 변경할 수 없습니다.')
+        ticket_authorized = False
+        if action == 'thread.register':
+            await self.authorize_ticket(interaction)
+            ticket_authorized = True
+        if action == 'model-limit':
+            # Resolve live membership, not an arbitrary ID submitted by a client.
+            target = await interaction.guild.fetch_member(int(params.get('targetUserId', '0')))
+            if target.bot:
+                raise PermissionError('봇 계정에는 사용자 모델 정책을 설정할 수 없습니다.')
         if action == 'ask' and hasattr(interaction, 'cancel_epoch') and interaction.cancel_epoch != self.threads.cancel_epochs.get(interaction.channel_id, 0):
             raise RuntimeError('사용자가 실행 전에 중지한 요청입니다.')
         if len(self.pending) >= 8:
@@ -230,7 +298,7 @@ class Bridge:
         request_id = uuid.uuid4().hex
         future = self.loop.create_future()
         self.pending[request_id] = future
-        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), guildId=str(interaction.guild_id), guildAdmin=True, isThread=isinstance(interaction.channel, discord.Thread), action=action, **params))
+        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), guildId=str(interaction.guild_id), guildAdmin=True, allowAi=ticket_authorized, isThread=isinstance(interaction.channel, discord.Thread), action=action, **params))
         try:
             return await future if action == 'ask' else await asyncio.wait_for(future, 25)
         finally:
@@ -291,55 +359,24 @@ class Bridge:
 
 
 def main():
-    settings = json.loads(sys.stdin.readline(128000))
-    root = os.path.abspath(settings['botDirectory'])
-    os.chdir(root)
-    sys.path.insert(0, root)
-    from bot.client import SecurityBotClient
-    original_setup = SecurityBotClient.setup_hook
-    original_ready = SecurityBotClient.on_ready
-    original_disconnect = SecurityBotClient.on_disconnect if hasattr(SecurityBotClient, 'on_disconnect') else None
-    original_message = getattr(SecurityBotClient, 'on_message', None)
-
-    async def setup(client):
-        try:
-            client._mr_robot_thread_state = settings.get('threadState')
-            bridge = Bridge(client)
-            client._mr_robot_bridge = bridge
-            await bridge.setup()
-            await original_setup(client)
-        except Exception:
-            emit({'event': 'error'})
-            raise
-
-    async def ready(client):
-        await original_ready(client)
-        bridge = client._mr_robot_bridge
-        configured = client.config.get('server_name', '')
-        candidates = [guild for guild in client.guilds if guild.name == configured] if configured else list(client.guilds)
-        if not candidates and len(client.guilds) == 1:
-            candidates = list(client.guilds)
-        bridge.allowed_guilds = {candidates[0].id} if len(candidates) == 1 else set()
-        emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
-
-    async def disconnected(client):
-        emit({'event': 'disconnected'})
-        if hasattr(client, '_mr_robot_bridge'):
-            await client._mr_robot_bridge.threads.disconnected()
-        if original_disconnect:
-            await original_disconnect(client)
-
-    async def message(client, value):
-        await client._mr_robot_bridge.threads.on_message(value)
-        if original_message:
-            await original_message(client, value)
-
-    SecurityBotClient.setup_hook = setup
-    SecurityBotClient.on_ready = ready
-    SecurityBotClient.on_disconnect = disconnected
-    SecurityBotClient.on_message = message
-    # Original single-instance lock, tray, news and KTX GUI are preserved.
-    runpy.run_path(os.path.join(root, 'main.py'), run_name='__main__')
+    from standalone import RuntimeFailure
+    try:
+        settings = json.loads(sys.stdin.readline(128000))
+        mode = settings.get('mode', 'standalone')
+        if mode == 'standalone':
+            from standalone import run
+        elif mode == 'legacy':
+            from legacy_adapter import run
+        else:
+            raise RuntimeFailure('mode')
+        run(settings, Bridge, emit)
+    except RuntimeFailure as error:
+        emit({'event': 'error', 'code': str(error)})
+        raise SystemExit(1) from None
+    except Exception:
+        # Never expose config contents, Discord token or arbitrary tracebacks.
+        emit({'event': 'error', 'code': 'startup'})
+        raise SystemExit(1) from None
 
 
 if __name__ == '__main__':

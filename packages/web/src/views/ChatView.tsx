@@ -152,6 +152,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [workspaceAdding, setWorkspaceAdding] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [composerError, setComposerError] = useState('');
+  const [showComposerSettings, setShowComposerSettings] = useState(false);
   const [executionConfigSaving, setExecutionConfigSaving] = useState(false);
   const [voiceAck, setVoiceAck] = useState('');
   const [initialized, setInitialized] = useState(false);
@@ -867,30 +868,35 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               <input aria-label="대화 이름" className="conversation-title-input" value={selected.title} onChange={(e) => setSelected({ ...selected, title: e.target.value })} onBlur={() => void updateConversation({ title: selected.title })} />
               <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? (status || '작업 준비 중') : activeModeLabel}</span>
             </div>
-            <div className="chat-quick-controls">
-              {activePc && executionPcs.length > 0 && <Select
-                className="execution-pc-select"
-                aria-label="실행 PC"
-                title="명령과 파일 작업을 실행할 PC"
-                value={activePc.id}
-                onChange={(event) => onSwitchExecutionPc?.(event.target.value)}
-                disabled={busy || executionConfigSaving || executionPcs.length < 2}
-              >
-                {executionPcs.map((pc) => <option key={pc.id} value={pc.id}>실행 PC · {pc.name}</option>)}
-              </Select>}
-              <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => {
-                const target = selectedRef.current;
-                if (!target) return;
-                const routingPresetId = event.target.value || null;
-                const nextProvider = routingPresetId ? undefined : selectedProvider ?? defaultProvider;
-                void updateExecutionConfig({
-                  routingPresetId,
-                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider),
-                });
-              }} disabled={executionControlsDisabled}>
-                <option value="">단일 모델</option>
-                {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
-              </Select>
+            <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
+              <span className="context-trigger-icon">◎</span><span><b>작업 폴더</b><small>{selectedWorkspace?.name ?? '폴더 선택'}</small></span><em>⌄</em>
+            </button>
+            <button type="button" className={`icon-action ${selected.pinned ? 'active' : ''}`} title={selected.pinned ? '대화 고정 해제' : '대화 고정'} aria-label={selected.pinned ? '대화 고정 해제' : '대화 고정'} onClick={() => void pinConversation(selected)} disabled={busy}>⌖</button>
+          </header>
+          {contextOpen && <section className="chat-context-panel" aria-label="대화 컨텍스트 설정">
+            <div className="context-panel-head"><div><b>이 대화의 실행 컨텍스트</b><span>모델이 볼 작업 범위와 실행 권한을 대화별로 저장합니다.</span></div><button type="button" onClick={() => setContextOpen(false)} aria-label="컨텍스트 닫기">×</button></div>
+            <div className="context-settings-grid">
+              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
+            </div>
+            <p className="context-help">{selectedTokenPolicy.detail} 실제 사용량은 대화 기록과 설정의 텔레메트리에서 확인할 수 있습니다.</p>
+            <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
+          </section>}
+        </>}
+
+        <div className="chat-scroll" ref={scroller}>
+          {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
+          {hiddenMessageCount > 0 && <button type="button" className="chat-history-more" onClick={() => setVisibleMessageLimit((count) => count + 160)}>이전 메시지 {Math.min(160, hiddenMessageCount)}개 더 보기</button>}
+          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
+        </div>
+
+        <div ref={composerBar} className="chat-inputbar composer-minimal">
+          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
+          {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
+          {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
+          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+          <div className="chat-actions">
+            <div className="composer-options" aria-label="대화 실행 설정">
+{selected && <div className="composer-model-controls">
               <Select
                 className="model-select"
                 aria-label="대화 모델"
@@ -921,59 +927,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   {(providerModels[provider.id] ?? [provider.model]).map((model) => <option key={model} value={modelChoiceValue(provider.id, model)}>{model}</option>)}
                 </optgroup>)}
               </Select>
-              <div className="chat-policy-controls">
-                <Select
-                  className="permission-select"
-                  aria-label="대화 권한"
-                  title="이 대화가 PC에서 실행할 수 있는 작업 범위"
-                  value={selectedAccess.value}
-                  onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })}
-                  disabled={executionControlsDisabled}
-                >
-                  {ACCESS.map((access) => <option key={access.value} value={access.value} disabled={!permissionWithinCap(access.value, client.permissionCap)}>{access.label}</option>)}
-                </Select>
-                <Select
-                  className="token-policy-select"
-                  aria-label="대화 토큰 정책"
-                  title={selectedTokenPolicy.detail}
-                  value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}
-                  onChange={(event) => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })}
-                  disabled={executionControlsDisabled || !client.canUseAuditOnly}
-                >
-                  {TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value !== 'audit-only').map((policy) => <option key={policy.value} value={policy.value}>{policy.label}</option>)}
-                </Select>
-              </div>
-            </div>
-            <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
-              <span className="context-trigger-icon">◎</span><span><b>컨텍스트</b><small>{selectedWorkspace?.name ?? '폴더 없음'} · {selectedAccess.short} · {selectedTokenPolicy.short}</small></span><em>⌄</em>
-            </button>
-            <button type="button" className={`icon-action ${selected.pinned ? 'active' : ''}`} title={selected.pinned ? '대화 고정 해제' : '대화 고정'} aria-label={selected.pinned ? '대화 고정 해제' : '대화 고정'} onClick={() => void pinConversation(selected)} disabled={busy}>⌖</button>
-          </header>
-          {contextOpen && <section className="chat-context-panel" aria-label="대화 컨텍스트 설정">
-            <div className="context-panel-head"><div><b>이 대화의 실행 컨텍스트</b><span>모델이 볼 작업 범위와 실행 권한을 대화별로 저장합니다.</span></div><button type="button" onClick={() => setContextOpen(false)} aria-label="컨텍스트 닫기">×</button></div>
-            <div className="context-settings-grid">
-              <label className="context-field"><span>추론 강도</span><Select aria-label="컨텍스트 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>{availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}</Select></label>
-              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
-              <label className="context-field access-field"><span>액세스 권한</span><Select aria-label="컨텍스트 액세스 권한" value={selectedAccess.value} onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })} disabled={executionControlsDisabled}>{ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · PC에서 기기 상향 필요' : ''}</option>; })}</Select><small className="context-help"><b>{selectedAccess.detail}</b> {permissionLimitedByDevice ? `이 대화의 저장값은 ${requestedPermissionMode}이지만 현재 기기에서는 ${selectedAccess.label}까지만 적용됩니다. ` : ''}연결 기기에 설정된 권한 상한보다 넓게 실행할 수 없습니다.</small></label>
-            </div>
-            <p className="context-help">{selectedTokenPolicy.detail} 실제 사용량은 대화 기록과 설정의 텔레메트리에서 확인할 수 있습니다.</p>
-            <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
-          </section>}
-        </>}
-
-        <div className="chat-scroll" ref={scroller}>
-          {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
-          {hiddenMessageCount > 0 && <button type="button" className="chat-history-more" onClick={() => setVisibleMessageLimit((count) => count + 160)}>이전 메시지 {Math.min(160, hiddenMessageCount)}개 더 보기</button>}
-          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
-        </div>
-
-        <div ref={composerBar} className="chat-inputbar">
-          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
-          {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
-          {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
-          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
-          <div className="chat-actions">
-            <div className="composer-options" aria-label="대화 실행 설정">
+            </div>}
               <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
                 <span className="composer-control-icon" aria-hidden="true">◇</span>
                 <span className="composer-control-label">권한</span>
@@ -988,22 +942,59 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   {availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}
                 </Select>
               </label>
-              {selected?.compactedMessages ? <span className="compaction-note">이전 메시지 {selected.compactedMessages}개 압축됨</span> : null}
-              <label className="composer-select-control" title={selectedTokenPolicy.detail}>
+              <button type="button" className="composer-more" aria-label="추가 실행 설정" title="실행 PC · 프리셋 · 질문 예산" aria-haspopup="dialog" onClick={() => setShowComposerSettings(true)}>⋯</button>
+            </div>
+            <div className="composer-send-actions">
+            <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />
+            <Button className="composer-icon-button" aria-label={uploading ? '업로드 취소' : '파일 첨부'} title="파일 첨부" variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '×' : '＋'}</Button>
+            <Button className="composer-icon-button" aria-label={listening ? '음성 듣기 중지' : '음성 입력'} title="음성 입력" variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '■' : '🎙'}</Button>
+            {busy && <Button onClick={() => void send()} disabled={!input.trim() || executionConfigSaving}>명령 끼워넣기</Button>}
+            {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <Modal open={showComposerSettings} onClose={() => setShowComposerSettings(false)} title="대화 실행 설정">
+        {selected && <div className="composer-settings-sheet">
+          <p>자주 바꾸지 않는 설정은 여기에 모았어요. 변경 사항은 이 대화에 저장됩니다.</p>
+          <label className="composer-settings-field"><span>실행 컴퓨터</span>              {activePc && executionPcs.length > 0 && <Select
+                className="execution-pc-select"
+                aria-label="실행 PC"
+                title="명령과 파일 작업을 실행할 PC"
+                value={activePc.id}
+                onChange={(event) => onSwitchExecutionPc?.(event.target.value)}
+                disabled={busy || executionConfigSaving || executionPcs.length < 2}
+              >
+                {executionPcs.map((pc) => <option key={pc.id} value={pc.id}>실행 PC · {pc.name}</option>)}
+              </Select>}
+</label>
+          <label className="composer-settings-field"><span>모델 시나리오</span>              <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => {
+                const target = selectedRef.current;
+                if (!target) return;
+                const routingPresetId = event.target.value || null;
+                const nextProvider = routingPresetId ? undefined : selectedProvider ?? defaultProvider;
+                void updateExecutionConfig({
+                  routingPresetId,
+                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider),
+                });
+              }} disabled={executionControlsDisabled}>
+                <option value="">단일 모델</option>
+                {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
+              </Select>
+<small>선택하지 않으면 입력창에서 고른 단일 모델로 실행합니다.</small></label>
+                        <label className="composer-select-control" title={selectedTokenPolicy.detail}>
                 <span className="composer-control-label">질문 예산</span>
                 <Select className="composer-control-select" aria-label="입력창 질문 토큰 예산" value={selectedTokenPolicy.value} onChange={event => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })} disabled={executionControlsDisabled || !client.canUseAuditOnly}>
                   {TOKEN_POLICIES.map(policy => <option key={policy.value} value={policy.value}>{policy.value === 'audit-only' ? '무제한' : policy.short}</option>)}
                 </Select>
               </label>
-            </div>
-            <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />
-            <Button variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '업로드 취소' : '＋ 파일'}</Button>
-            <Button variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '듣는 중…' : '🎙 음성'}</Button>
-            {busy && <Button onClick={() => void send()} disabled={!input.trim() || executionConfigSaving}>명령 끼워넣기</Button>}
-            {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
-          </div>
-        </div>
-      </section>
+
+          <p>{selectedTokenPolicy.detail}</p>
+          {selected.compactedMessages ? <small>이전 메시지 {selected.compactedMessages}개 압축됨</small> : null}
+          <div className="modal-actions"><Button onClick={() => setShowComposerSettings(false)}>완료</Button></div>
+        </div>}
+      </Modal>
 
       {conversationMenu && <div ref={conversationMenuRef} className="conversation-context-menu" role="menu" aria-label={`${conversationMenu.conversation.title} 대화 메뉴`} style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
         const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];

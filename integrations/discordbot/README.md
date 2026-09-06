@@ -1,16 +1,26 @@
 # Discord Agent plugin
 
-The optional first-party plugin connects an existing local Vesper/security bot
-to the normal Mr.Robot agent. It imports the existing `bot.client` implementation
-and runs its original `main.py`: news polling, duplicate storage, tray and KTX GUI
-remain local and are not copied into the public repository.
+The optional first-party plugin connects Discord to the normal Mr.Robot agent.
+**Standalone mode** reads only `bot_token` and `server_name` from a local
+`config.json`. It does not import the security bot, execute its `main.py`, or need
+its GUI/news/KTX dependencies. Connection settings stay in their original file,
+read-only; no token is copied into the plugin store, command line or installer.
+
+**Compatibility mode** optionally hosts the original security bot and the AI
+adapter on one Discord client. Only `legacy_adapter.py` depends on that source.
+Use this mode for news/KTX and AI together, not two simultaneous bot processes.
+Existing configurations retain compatibility mode to avoid silently losing news
+features. New configurations default to standalone; existing users can select it.
 
 ## Setup
 
-1. Install the existing bot's Python requirements (including discord.py 2.6+).
-2. Close the standalone bot to avoid its single-instance lock.
-3. Enable **Discord Agent** in Mr.Robot Plugins; supply the bot source directory
-   and the absolute Python executable path, then choose **Save & Connect**.
+1. Install `python -m pip install -r integrations/discordbot/requirements.txt`.
+   Only compatibility mode also needs the original bot's dependencies.
+2. Close the existing security bot before switching connection ownership.
+3. Enable **Discord Agent** in Mr.Robot Plugins; select **Standalone**, supply
+   the directory containing `config.json` and the absolute Python executable
+   path, then choose **Save & Connect**. A config-only folder is sufficient;
+   the existing security bot folder can also be used without running its code.
 4. The existing bot must already belong to your Discord server. Its application
    needs application-command installation permission. `/robot` is upserted
    without deleting existing commands. Global command propagation may take time.
@@ -49,10 +59,55 @@ Queue limits are 16 total/4 per thread; session limits are 64 total/20 per user.
 
 ## Security and limits
 
+### User model ceilings (Discord Agent 1.4.0)
+
+Server administrators can run `/robot model-limit user:@member ceiling:sol`
+or choose `astra`, `show` (inspect), or `unlimited` (remove the restriction).
+The policy is stored privately per guild/user, not per channel; opening/deleting
+tickets or restarting the bot does not reset it. Other users/guilds are isolated.
+Changes are refused while the target user's run is active. No limits are assigned
+automatically to existing users.
+
+The explicit application ordering is `spark < mini < luna < terra < sol < astra`.
+Exact model IDs are gpt-5.3-codex-spark, gpt-5.4-mini, gpt-5.6-luna,
+gpt-5.6-terra, gpt-5.6-sol, gpt-6-astra. This is an administration policy, not
+a benchmark ranking. Unknown IDs/aliases and other vendors (including Claude)
+are denied for limited users rather than guessed into a tier. `unlimited`
+restores all configured providers. Adding future model IDs requires an explicit
+policy update.
+
+Catalogs and saved/direct selections are checked by the Node host. Limited
+requests resolve their provider/default explicitly. Every actual provider call
+through Mr.Robot's loop is checked again, including API/native execution and
+fallback providers. Discord runs do not inherit PC routing presets. Policy
+errors never silently upgrade or rewrite a user's chosen model.
+
+Both `/robot access` and `/robot model-limit` require live server Administrator
+membership; UI visibility alone is insufficient. Full PC access still needs
+explicit confirmation and cannot override the PC's global read-only lock.
+The existing administrator-only bot usage policy is unchanged. Administrators
+may edit their own limits. This is not a spend-security boundary against a user
+already authorized to run arbitrary PC commands or against model selection
+inside a third-party native CLI/plugin; those programs remain separate trust
+boundaries. No provider credentials are sent to Discord.
+
+### Recent-message controls (0.4.8)
+
+Every plain-chat receipt and final answer carries the ticket controls. Only the
+old controls are removed, not message content; old Views are disposed. Use
+`/robot controls` to bring the toolbar down or `/robot model` for the paged
+provider/model picker. Discovery uses the registered provider's model-list API,
+not arbitrary URLs. No PC credentials or provider keys reach Discord/Python.
+Access changes still require the existing checks and full-access confirmation.
+Stopping cancels a run; it is not pause/resume.
+
 - Only administrators of the locally registered Discord server are accepted.
   Live server membership and Administrator roles are checked on every request;
   application ownership alone and Manage Guild do not grant access. DMs fail closed.
-- No public listener, router port or tunnel. Message Content Intent is needed for plain chat.
+- No public listener, router port or tunnel. Standalone reserves the old bot's
+  loopback-only single-instance port (47823); it closes incoming probes without
+  reading or executing data. An occupied port fails closed, even for an unrelated
+  local program. Message Content Intent is needed for plain chat.
 - Slash replies are ephemeral; plain-chat replies stay inside the private thread. All replies disable mentions. Discord
   still processes this content: do not send credentials or sensitive documents.
 - A fresh execution device credential stays in the Node host, never in Python
@@ -64,10 +119,31 @@ Queue limits are 16 total/4 per thread; session limits are 64 total/20 per user.
   an unexpired approval prompt. These are isolated per requesting administrator.
 - One active request, up to 64 scoped conversations, no generic chat RPC deadline,
   bounded pipe/results, and automatic cancellation on connection loss.
-- Disabling/stopping the plugin also stops the managed existing bot. Launch the
-  original bot separately if you want news/KTX without the agent integration.
+- In standalone mode, disabling/stopping stops only the independent AI client;
+  existing bot files/configuration are untouched. In compatibility mode, stopping
+  also stops the managed security bot; hot-detaching AI while that GUI keeps
+  running is not implemented. Launch the original separately after stopping if
+  you want news/KTX alone.
+- An OS account lease prevents duplicate plugin clients across config folders
+  and is released when the process exits/crashes. The original bot's loopback
+  lock also prevents known legacy/standalone duplicates on this PC. This cannot
+  detect the same token running on another PC or an unrelated Discord client.
 - Runtime config, bot tokens, IDs, logs, databases and local absolute paths are
   intentionally not distributed. This generic adapter is the only bundled source.
 
-Use is subject to Discord and model-provider terms. Python and the existing bot
-are external local dependencies, not embedded in the Windows installer.
+Use is subject to Discord and model-provider terms. Python and discord.py remain
+external dependencies. The Windows installer bundles all generic plugin modules
+and requirements, but no credentials or original security bot source. Existing
+admin checks, ticket ownership and Mr.Robot execution/approval controls apply in
+both modes.
+
+### Ticket issuance: allow_ai
+
+Server administrators must manually create the exact role `allow_ai` and assign
+it to ticket requesters. The role is checked live before opening the form,
+creating a private thread, and registering it with the PC host. Missing, renamed
+or removed roles deny new tickets, including for server owners/administrators.
+The plugin never creates or grants this role automatically. Existing tickets are
+not deleted when the role is removed. Existing Administrator-only bot usage and
+PC access/model-policy management remain unchanged: `allow_ai` is an additional
+ticket condition, not permission to control a PC or a bypass for ordinary members.

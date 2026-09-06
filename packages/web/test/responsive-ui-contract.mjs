@@ -65,7 +65,7 @@ requireAll(chat, [
   'A different conversation owns a different scroll position',
   'scroll.scrollTop = scroll.scrollHeight;',
   'new ResizeObserver(() =>',
-  'ref={composerBar} className="chat-inputbar"',
+  'ref={composerBar} className="chat-inputbar composer-minimal"',
   'aria-label="에이전트 명령"',
   'queueMicrotask(() => conversationMenuTriggerRef.current?.focus());',
 ], 'composer resizing does not preserve visible chat content');
@@ -79,8 +79,9 @@ requireAll(chat, [
   "PC 앱의 설정 → 권한 및 안전/모바일 연결",
   'className="composer-select-control composer-reasoning"',
   'aria-label="입력창 추론 강도"',
-  'aria-label="컨텍스트 액세스 권한"',
+  'className="composer-model-controls"',
 ], 'conversation access and reasoning are not compact composer dropdowns');
+if (chat.includes('className="chat-policy-controls"') || chat.includes('aria-label="컨텍스트 액세스 권한"')) throw new Error('duplicate chat execution settings returned outside composer');
 
 requireAll(css, [
   '.composer-options { min-width: 0;',
@@ -97,9 +98,9 @@ requireAll(css, [
   '@media (max-width: 620px) {\n  .chat-policy-controls {\n    grid-template-columns: 1fr;',
 ], 'adjacent permission and token-policy selectors can overflow a compact chat header');
 requireAll(chat, [
-  'className="chat-policy-controls"',
-  'aria-label="대화 권한"',
-  'aria-label="대화 토큰 정책"',
+  'className="composer-options"',
+  'aria-label="입력창 액세스 권한"',
+  'aria-label="입력창 질문 토큰 예산"',
 ], 'permission and per-conversation token policy controls are not grouped together');
 
 requireAll(css, [

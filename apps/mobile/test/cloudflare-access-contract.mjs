@@ -11,6 +11,7 @@ const app = read('App.tsx');
 const pcList = read('src/screens/PcListScreen.tsx');
 const files = read('src/screens/FilesScreen.tsx');
 const chat = read('src/screens/ChatScreen.tsx');
+const secureFiles = read('src/secureFiles.ts');
 const androidApplication = read('android/app/src/main/java/com/mrrobot/mobile/MainApplication.kt');
 const dependencyPatch = read('../../scripts/patch-expo-file-system-security.mjs');
 const installedLegacyFileSystem = read('node_modules/expo-file-system/android/src/main/java/expo/modules/filesystem/legacy/FileSystemLegacyModule.kt');
@@ -99,7 +100,8 @@ check('blocked Access redirects are explained without weakening fail-closed requ
   && pcs.includes('보안을 위해 리다이렉트는 따라가지 않았습니다.'));
 check('credential-bearing native fetches reject redirects', pcs.includes("redirect: 'error'")
   && rpc.includes("redirect: 'error'")
-  && (files.match(/redirect: 'error'/g) ?? []).length >= 3);
+  && (files.match(/redirect: 'error'/g) ?? []).length >= 2
+  && secureFiles.includes("method: 'POST', redirect: 'error'"));
 check('WSS upgrade uses React Native custom headers', rpc.includes('new ReactNativeWebSocket(url, protocols, { headers: accessHeaders })'));
 check('native OkHttp WebSocket redirects are disabled before React Native starts', androidApplication.includes('WebSocketModule.setCustomClientBuilder')
   && androidApplication.includes('followRedirects(false)')
@@ -109,13 +111,18 @@ check('streaming Expo FileSystem upload/download redirects are disabled without 
   && dependencyPatch.includes('followSslRedirects(false)')
   && installedLegacyFileSystem.includes('followRedirects(false)')
   && installedLegacyFileSystem.includes('followSslRedirects(false)')
-  && files.includes('FileSystem.createUploadTask')
-  && files.includes('FileSystem.createDownloadResumable'));
+  && secureFiles.includes('uploadSecureFile')
+  && secureFiles.includes('downloadSecureFile')
+  && secureFiles.includes('128 * 1024'));
 check('Android compiles the patched expo-file-system source instead of the unmodified prebuilt Maven artifact', mobilePackage.expo?.autolinking?.android?.buildFromSource?.includes('expo-file-system') === true);
 check('Expo dependency upgrades fail installation instead of silently losing redirect hardening', dependencyPatch.includes('throw new Error')
   && dependencyPatch.includes('refusing to install without redirect hardening'));
-check('file transfers reject every redirect response before reporting success or sharing', (files.match(/result\.status < 200 \|\| result\.status >= 300/g) ?? []).length >= 2
-  && chat.includes('result.status < 200 || result.status >= 300'));
+check('encrypted file transfers reject redirect/non-success before decryption and sharing',
+  secureFiles.includes('if (!response.ok) throw new Error')
+  && secureFiles.indexOf('if (!response.ok)') < secureFiles.indexOf('const packet = await response.json()')
+  && files.includes('await downloadSecureFile(')
+  && files.includes('await uploadSecureFile(')
+  && chat.includes('await uploadSecureFile('));
 check('plaintext WebSocket rejects bound Access credentials', rpc.includes("Object.keys(accessHeaders).length && parsed.protocol !== 'wss:'"));
 check('manual registration accepts both Access values', pcList.includes('optionalCloudflareAccess(accessClientId, accessClientSecret)')
   && pcList.includes('secureTextEntry'));
@@ -133,8 +140,10 @@ check('successful QR enrollment drops the credential-bearing payload from React 
   && pcList.indexOf('setDetectedPayload(null);', pcList.indexOf('if (connected)')) > pcList.indexOf('if (connected)'));
 check('manual connection and automatic reconnect both pass Access credentials and origin binding', pcList.includes('pc.cloudflareAccessOrigin')
   && app.includes('pc.cloudflareAccessOrigin'));
-check('file APIs use the shared authenticated header builder', (files.match(/pcAuthenticatedHeaders\(/g) ?? []).length >= 7);
-check('chat attachment upload uses the shared authenticated header builder', chat.includes('headers: pcAuthenticatedHeaders(pc,'));
+check('file APIs use the shared exact-origin authenticated header builder', files.includes('pcAuthenticatedHeaders(pc,')
+  && secureFiles.includes('pcAuthenticatedHeaders(pc, url,')
+  && secureFiles.includes("delete headers['x-mr-robot-token']"));
+check('chat attachment upload uses the encrypted shared client', chat.includes('await uploadSecureFile(pc,'));
 check('mobile screens contain no remaining direct bearer-only header literal', !files.includes("headers: { 'x-mr-robot-token'")
   && !chat.includes("headers: { 'content-type': file.mimeType")
   && !pcList.includes("headers: { 'x-mr-robot-token'"));

@@ -40,6 +40,9 @@ function explainConnectionError(value: unknown): string {
   if (/1회성|자동 보안 등록|자동 등록 세션/.test(detail) && /만료|이미 사용|새 QR|승인하지 않았/.test(detail)) {
     return detail;
   }
+  if (/UnknownHostException|Unable to resolve host|No address associated|ENOTFOUND|EAI_AGAIN/i.test(detail)) {
+    return 'QR은 인식됐지만 주소를 찾을 수 없습니다. 임시 퀵링크가 종료·변경됐거나 휴대폰 DNS 연결에 문제가 있을 수 있습니다. PC의 현재 HTTPS 주소로 새 QR을 만들고 다시 스캔하세요. 지속 연결에는 고정 도메인 연결을 사용하세요.';
+  }
   if (/\b(?:401|403)\b|access|unauthori[sz]ed|forbidden/i.test(detail)) {
     return `보안 인증이 거부됐습니다. 연결 코드와 Cloudflare Access 두 값을 확인하세요. (${detail})`;
   }

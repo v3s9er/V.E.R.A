@@ -104,22 +104,21 @@ const desktopReasoningControl = chat.indexOf('className="composer-select-control
 if (desktopComposerInput < 0 || desktopReasoningControl < desktopComposerInput
   || !chat.includes('aria-label="입력창 추론 강도"')
   || !chat.includes('disabled={executionControlsDisabled}')) throw new Error('desktop reasoning selector is not accessible, composer-local, or locked during a run or settings save');
-if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g) ?? []).length < 2
+if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g) ?? []).length !== 1
   || !chat.includes('selectedRef.current = optimistic')
   || !chat.includes('executionConfigSavingRef.current = true')
   || !chat.includes('rollbackMatchingFields')
   || !chat.includes('Object.is(currentRecord[key], patchRecord[key])')
   || !chat.includes('if (executionConfigSavingRef.current)')) throw new Error('desktop execution settings do not share rollback-safe persistence and a synchronous send lock');
-const desktopPermissionSelect = chat.indexOf('aria-label="대화 권한"');
-const desktopTokenPolicySelect = chat.indexOf('aria-label="대화 토큰 정책"');
+const desktopPermissionSelect = chat.indexOf('aria-label="입력창 액세스 권한"');
+const desktopTokenPolicySelect = chat.indexOf('aria-label="입력창 질문 토큰 예산"');
 if (desktopPermissionSelect < 0 || desktopTokenPolicySelect < desktopPermissionSelect
-  || !chat.includes('className="chat-policy-controls"')
+  || !chat.includes('className="composer-options"')
   || !css.includes('.chat-policy-controls { grid-column: 1 / -1; min-width: 0; display: grid;')
   || !chat.includes("tokenPolicy?: ConversationTokenPolicy;")
   || !chat.includes("tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive'")
-  || !chat.includes("value={client.canUseAuditOnly ? selected.tokenPolicy ?? 'adaptive' : 'adaptive'}")
+  || !chat.includes("value={selectedTokenPolicy.value}")
   || !chat.includes('disabled={executionControlsDisabled || !client.canUseAuditOnly}')
-  || !chat.includes("TOKEN_POLICIES.filter((policy) => client.canUseAuditOnly || policy.value !== 'audit-only')")
   || !chat.includes('적응형 · 품질 우선')
   || !chat.includes('무제한 · 감사만')
   || !chat.includes('대화 기록과 설정의 텔레메트리에서 확인')) {
@@ -217,7 +216,7 @@ if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"')
   || !mobileChat.includes('onLayout={() => { if (stickToBottom.current)')
   || !mobileChat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
 if (!mobileManifest.includes('android:usesCleartextTraffic="false"') || !mobileAppConfig.includes('"usesCleartextTraffic": false')) throw new Error('Android release can regress to sending device credentials over cleartext HTTP');
-if (!mobileChat.includes('controlBar') || !mobileChat.includes('🤖 단일 모델 선택') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
+if (!mobileChat.includes('accessibilityLabel="입력창 모델 선택"') || !mobileChat.includes('style={styles.composerToolbar}') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
 if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes('provider?.supportedReasoning')
@@ -276,7 +275,7 @@ if (mobileScanHandler.includes('exchangePin') || !mobileAppConfig.includes('"bar
 if (!mobilePcList.includes('PAIRING_PIN_PATTERN.test(pin)')
   || !mobilePcList.includes("slice(0, 12)")
   || !mobilePcList.includes('6자리 PIN 또는 외출용으로 발급한 12자리')) throw new Error('mobile manual pairing does not accept both local and travel one-time codes');
-if (!mobileChat.includes('FileSystem.createUploadTask') || !mobileChat.includes('cancelAttachment') || !mobileChat.includes('120_000')) throw new Error('mobile chat attachment upload lacks cancel, timeout, or lifecycle cleanup');
+if (!mobileChat.includes('uploadSecureFile') || !mobileChat.includes('controller.abort()') || !mobileChat.includes('cancelAttachment') || !mobileChat.includes('120_000')) throw new Error('mobile encrypted attachment upload lacks cancel, timeout, or lifecycle cleanup');
 if (!app.includes('!client.isAdmin') || !app.includes('관리 제한')) throw new Error('paired-device admin scope is not visible in the workspace header');
 if (!settings.includes('const canManage = client.isAdmin') || !settings.includes('access-scope-banner') || !settings.includes('disabled={locked}')) throw new Error('settings do not expose and enforce paired-device read-only management scope');
 if (!settings.includes('readOnly={!canManage}') || !settings.includes('disabled={!canManage || !selectedRoutingPreset}')) throw new Error('routing graph and preset apply remain mutable for paired non-admin devices');

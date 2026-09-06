@@ -101,6 +101,8 @@ export class ModelBudgetExceededError extends Error {
 }
 
 export interface LoopCallbacks {
+  /** Trusted host policy, checked before every actual provider invocation. */
+  beforeModelCall?(source: { providerId: string; model: string }): void;
   onText?(delta: string): void;
   onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string }): void;
   /** Ask the human to approve a destructive tool call (safety mode: confirm). */
@@ -321,6 +323,7 @@ export class AgentLoop {
     let consecutiveNoProgressRounds = 0;
 
     const budgetedChat = async (actualProvider: AiProvider, request: ChatRequest): Promise<ProviderResult> => {
+      cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
       const boundedRequest: ChatRequest = {
         ...request,
         maxTokens: Math.max(1, Math.min(
@@ -372,6 +375,7 @@ export class AgentLoop {
       request: NativeAgentRequest,
     ): Promise<ProviderResult> => {
       if (!actualProvider.runAgent) throw new Error('이 모델은 네이티브 에이전트 실행을 지원하지 않습니다.');
+      cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
       // Native CLIs can fan out internally and often return zero usage. The
       // admission lease therefore reserves all of this run's remaining budget.
       let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
