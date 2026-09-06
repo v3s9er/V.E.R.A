@@ -235,3 +235,44 @@ maximum five minutes / 32 entries / 4 MiB serialized data. Original files are st
 deleted. This is not shared cross-user storage or an E2EE transport. Restricted
 Codex workers reuse verified conversation prefixes for up to 20 turns / 120 seconds
 idle, with native environments disabled on every turn and no copied credentials.
+
+### Direct subscription execution and warm sandboxes
+
+Restricted, single-model Codex tickets using the `audit-only` token policy now
+use one app-server agent turn. Codex manages its own tool loop; Mr.Robot registers
+only the ticket's public-web/artifact/Python capabilities and validates each call.
+There is no extra verifier model, JSON-answer wrapper, or host-driven model call
+after each tool. Selected model and reasoning effort are preserved. Whole-turn
+usage is accounted once; finite/adaptive budgets retain per-model-call metering.
+Claude restricted tickets retain the existing text-worker path. Fully authorized
+Codex/Claude tickets already use native CLI execution; their public answer text
+is now forwarded before process exit. Private reasoning is never forwarded.
+
+The current Codex protocol exposes registered tools through a V8 code-mode
+adapter. This is **not Node or a PC shell**. Environment access is empty on both
+thread and turn; host skills are explicitly disabled and excluded from the
+adapter. Unknown tools, approval requests, native execution events, mismatched
+thread/turn IDs, and duplicate calls terminate the worker. Account authentication
+stays in the owner's CLI, never in a user sandbox or Discord payload.
+
+`isolated_python` lazily prepares the fixed `python:3.12-slim` base image once,
+then runs by immutable local image ID. Each ticket gets its own disposable
+container and `/work` tmpfs. Files survive successive calls; Python globals do
+not. No host directories, Docker socket, credentials, external network, elevated
+capabilities or model-controlled Docker options are supplied. Public internet
+requests still go through the SSRF-checked host broker. Only standard-library
+Python is included; arbitrary dependencies are not installed by model requests.
+
+Limits: four sandbox slots; one code execution per ticket; 256 MiB RAM / one CPU /
+32 processes; 30-second execution; 128 KiB output; two-minute idle expiry. A
+different non-root UID runs a 15-minute daemon-side watchdog, so user code cannot
+disable expiry when the app crashes. Cancellation/error/app shutdown removes the
+container; exported ticket artifacts remain available. Image preparation needs a
+working Docker **Linux** engine. Engine failures do not fall back to host execution.
+
+Verification: `npm run test:discord-fast` runs deterministic policy/lifecycle
+fixtures. `npm run test:codex-installed` uses the installed CLI with a **synthetic
+localhost model endpoint**, not the account or paid API, to check real tool
+dispatch, early answer streaming, private-skill exclusion, inaccessible host
+tools/network/Node globals, reuse, and aggregate usage. Docker-engine integration
+can be run explicitly with `npx tsx packages/agent/test/discord-sandbox-installed.test.ts`.

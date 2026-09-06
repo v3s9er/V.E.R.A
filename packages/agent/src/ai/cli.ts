@@ -8,7 +8,7 @@ import { pooledCodexText } from './cli-text-pool.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
-import type { AiProvider, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
+import type { AiProvider, BrokerAgentRequest, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
 import { terminateProcessTree } from '../computer/shell.js';
 
 const MAX_OUTPUT = 8 * 1024 * 1024;
@@ -275,6 +275,7 @@ interface CliProcessOptions {
   cwd?: string;
   signal?: AbortSignal;
   onStatus?: (status: string) => void;
+  onText?: (text: string) => void;
 }
 
 function runCliProcess(options: CliProcessOptions): Promise<string> {
@@ -290,7 +291,7 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
     let stderr = '';
     const stdoutDecoder = new StringDecoder('utf8');
     const stderrDecoder = new StringDecoder('utf8');
-    const progress = createCliProgress(status => options.onStatus?.(status));
+    const progress = createCliProgress(status => options.onStatus?.(status), options.onText);
     let outputBytes = 0;
     let settled = false;
     let timedOut = false;
@@ -359,6 +360,7 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
  * the only component allowed to mutate the computer through audited tools.
  */
 export class CliProvider implements AiProvider {
+  readonly runBrokerAgent?: (req: BrokerAgentRequest) => Promise<ProviderResult>;
   readonly supportsTools = false;
   readonly supportedReasoning: ReasoningEffort[];
   private modelList?: Promise<string[]>;
@@ -373,6 +375,10 @@ export class CliProvider implements AiProvider {
     private readonly command: string,
     private readonly extraArgs: string[] = [],
   ) {
+    if (type === 'codex-cli') this.runBrokerAgent = req => pooledCodexText({
+      ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
+      model: this.model, providerId: this.id, req,
+    });
     this.supportedReasoning = type === 'codex-cli'
       ? ['auto', 'low', 'medium', 'high', 'xhigh', 'max']
       : ['auto'];
@@ -491,6 +497,7 @@ export class CliProvider implements AiProvider {
       cwd: req.cwd,
       signal: req.signal,
       onStatus: req.onStatus,
+      onText: req.onText,
     });
     const parsed = this.type === 'claude-cli' ? parseClaudeOutput(raw) : parseCodexOutput(raw);
     return { text: parsed.text, toolCalls: [], usage: parsed.usage };

@@ -118,9 +118,17 @@ export interface NativeAgentRequest {
   reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
   onStatus?: (status: string) => void;
+  onText?: (text: string) => void;
+}
+
+/** Host-owned capability executor. Never constructed from client/model JSON. */
+export interface BrokerAgentRequest extends ChatRequest {
+  executeTool(name: string, input: unknown, signal: AbortSignal): Promise<string>;
 }
 
 export interface AiProvider {
+  /** Native model loop with ONLY host-registered tools, no native environment. */
+  runBrokerAgent?(req: BrokerAgentRequest): Promise<ProviderResult>;
   /** Optional subscription text worker with native tools/environment removed. */
   chatIsolated?(req: ChatRequest): Promise<ProviderResult>;
   readonly id: string;

@@ -5,6 +5,7 @@ const threadId = 'fixture-' + process.pid;
 createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
   if (m.method === 'initialize') return send({ id: m.id, result: {} });
+  if (m.method === 'skills/list') return send({ id: m.id, result: { data: [{ cwd: m.params.cwds[0], skills: [], errors: [] }] } });
   if (m.method === 'thread/start') {
     if (m.params.environments.length || !m.params.ephemeral || m.params.dynamicTools.length) throw Error('boundary failed');
     return send({ id: m.id, result: { thread: { id: threadId }, instructionSources: [] } });

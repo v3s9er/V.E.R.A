@@ -275,8 +275,11 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
           currentRun.approval = { requestId: event.data.requestId, conversationId: currentRun.conversation };
           send({ event: 'approval', scopeKey: channel, data: event.data });
         } else if (['chat.status', 'chat.tool', 'chat.delta'].includes(event.event)) {
+          const firstText = event.event === 'chat.delta' && !currentRun.preview;
           if (event.event === 'chat.delta') currentRun.preview = (currentRun.preview + String(event.data.text ?? '')).slice(-1400);
-          if (Date.now() - currentRun.lastProgress < 2500) return;
+          // First answer should not wait behind a recent status update. Keep
+          // subsequent edits throttled for Discord's rate limits.
+          if (!firstText && Date.now() - currentRun.lastProgress < 2500) return;
           currentRun.lastProgress = Date.now();
           send({ event: 'progress', scopeKey: channel, text: currentRun.preview || (event.event === 'chat.tool' ? `도구 실행: ${String(event.data.name).slice(0, 80)}` : String(event.data.status ?? '모델 응답 생성 중').slice(0, 160)), elapsed: Math.floor((Date.now() - currentRun.startedAt) / 1000) });
         }

@@ -338,9 +338,36 @@ export class AgentLoop {
       };
       let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
       let settled = false;
+      // One subscription turn can perform multiple internal model calls. Keep
+      // finite/adaptive budgets on the existing per-call metered protocol.
+      const directBroker = options.isolation && options.tokenPolicy === 'audit-only'
+        && executionMode === 'single' && actualProvider.runBrokerAgent;
       try {
-        callLease = cb.reserveModelCall?.('api', providerCallMaximumTokens(boundedRequest));
-        const result = options.isolation && actualProvider.chatIsolated ? await actualProvider.chatIsolated(boundedRequest) : await actualProvider.chat(boundedRequest);
+        callLease = cb.reserveModelCall?.(directBroker ? 'native' : 'api', directBroker ? Number.MAX_SAFE_INTEGER : providerCallMaximumTokens(boundedRequest));
+        const result = directBroker ? await actualProvider.runBrokerAgent!({
+          ...boundedRequest,
+          executeTool: async (name, input, signal) => {
+            signal.throwIfAborted();
+            try { cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model }); }
+            catch (error) { fatalAbort.abort(error); throw error; }
+            if (!tools.some(t => t.name === name)) throw new Error('사용자 권한에 없는 도구입니다.');
+            const signature = toolSignature(name, input);
+            const count = (repeatedCalls.get(signature) ?? 0) + 1;
+            repeatedCalls.set(signature, count);
+            if (count > 2) throw new Error('같은 도구 요청이 반복되었습니다. 다른 접근을 사용하거나 현재 결과로 마무리하세요.');
+            cb.onTool?.({ name, input, status: 'start' });
+            try {
+              const output = await options.isolation!.execute(name, input, signal);
+              signal.throwIfAborted();
+              cb.onTool?.({ name, input, status: 'done' });
+              cb.noteModelProgress?.('tool');
+              return output;
+            } catch (error) {
+              cb.onTool?.({ name, input, status: 'error' });
+              throw error;
+            }
+          },
+        }) : options.isolation && actualProvider.chatIsolated ? await actualProvider.chatIsolated(boundedRequest) : await actualProvider.chat(boundedRequest);
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;
         const reportedTokens = addRecordedTokens(result.usage.promptTokens, result.usage.completionTokens);
@@ -632,6 +659,7 @@ export class AgentLoop {
         if (!actualProvider?.runAgent) return undefined;
         const actualEffort = effortFor(actualProvider);
         cb.onStatus?.(`네이티브 에이전트 실행 · ${actualProvider.label} · ${options.workspacePath}`);
+        let streamed = '';
         const result = await budgetedNativeAgent(actualProvider, {
           prompt: identifiedSystem(prompt, actualProvider),
           cwd: options.workspacePath!,
@@ -639,8 +667,9 @@ export class AgentLoop {
           reasoningEffort: actualEffort,
           signal: runSignal,
           onStatus: cb.onStatus,
+          onText: text => { streamed += text; cb.onText?.(text); },
         });
-        return { result, provider: actualProvider, effort: actualEffort };
+        return { result, provider: actualProvider, effort: actualEffort, streamed };
       };
       let nativeCall = await runNative(originalPrompt);
       if (!nativeCall) {
@@ -674,7 +703,8 @@ export class AgentLoop {
         actualNativeEffort = nativeCall.effort;
       }
       turns.push({ role: 'assistant', content: native.text });
-      cb.onText?.(native.text);
+      const streamed = nativeCall?.streamed ?? '';
+      if (native.text.startsWith(streamed) && native.text.length > streamed.length) cb.onText?.(native.text.slice(streamed.length));
       return {
         text: native.text,
         turns,

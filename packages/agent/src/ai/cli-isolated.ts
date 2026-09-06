@@ -38,10 +38,22 @@ export const CODEX_TEXT_CONFIG: Record<string, unknown> = {
   mcp_servers: {}, 'apps._default.enabled': false, 'agents.enabled': false,
   project_doc_max_bytes: 0, web_search: 'disabled',
   developer_instructions: '',
-  ...Object.fromEntries(['shell_tool', 'shell_snapshot', 'unified_exec', 'plugins', 'remote_plugin', 'hooks', 'apps', 'memories', 'multi_agent', 'multi_agent_v2', 'browser_use', 'browser_use_external', 'computer_use', 'view_image', 'image_generation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'code_mode', 'code_mode_host', 'sleep_tool', 'goals', 'tool_suggest'].map(name => [`features.${name}`, false])),
+  ...Object.fromEntries(['shell_tool', 'shell_snapshot', 'unified_exec', 'plugins', 'remote_plugin', 'hooks', 'apps', 'memories', 'multi_agent', 'multi_agent_v2', 'browser_use', 'browser_use_external', 'computer_use', 'view_image', 'image_generation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'code_mode_host', 'sleep_tool', 'goals', 'tool_suggest'].map(name => [`features.${name}`, false])),
+  'features.code_mode.enabled': false,
   'features.skip_host_skill_discovery': true,
 };
-function toml(value: unknown): string { return typeof value === 'object' ? '{}' : JSON.stringify(value); }
+/** thread/start config uses nested JSON tables, unlike CLI dotted -c keys. */
+export const CODEX_BROKER_CONFIG = { ...CODEX_TEXT_CONFIG, 'features.code_mode_host': true, 'features.code_mode.enabled': true, 'features.code_mode.excluded_tool_namespaces': ['skills'] };
+export function codexThreadConfig(broker = false): Record<string, unknown> {
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(broker ? CODEX_BROKER_CONFIG : CODEX_TEXT_CONFIG)) {
+    const parts = key.split('.'); let target = result;
+    for (const part of parts.slice(0, -1)) target = target[part] ??= {};
+    target[parts.at(-1)!] = value;
+  }
+  return result;
+}
+function toml(value: unknown): string { return Array.isArray(value) ? JSON.stringify(value) : typeof value === 'object' ? '{}' : JSON.stringify(value); }
 export function codexTextArgs(overrides: Record<string, unknown> = {}): string[] {
   return ['app-server', '--listen', 'stdio://', ...Object.entries({ ...CODEX_TEXT_CONFIG, ...overrides }).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`])];
 }

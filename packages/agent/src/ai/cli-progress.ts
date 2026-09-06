@@ -15,8 +15,9 @@ export function cliProgress(event: Record<string, any>): string | undefined {
   if (event.type === 'assistant' && Array.isArray(event.message?.content) && event.message.content.some((part: any) => part.type === 'tool_use')) return '도구를 실행하고 있습니다';
 }
 
-export function createCliProgress(onStatus: (status: string) => void): (text: string) => void {
+export function createCliProgress(onStatus: (status: string) => void, onText?: (text: string) => void): (text: string) => void {
   let buffer = '', dropping = false, previous = '';
+  const answers = new Map<string, string>();
   return text => {
     for (const part of text.split(/(?<=\n)/)) {
       if (!dropping) buffer += part;
@@ -24,8 +25,20 @@ export function createCliProgress(onStatus: (status: string) => void): (text: st
       if (!part.endsWith('\n')) continue;
       if (!dropping) {
         try {
-          const status = cliProgress(JSON.parse(buffer));
+          const event = JSON.parse(buffer);
+          const status = cliProgress(event);
           if (status && status !== previous) { previous = status; onStatus(status); }
+          const item = event.item;
+          const text = item?.type === 'agent_message' && item.phase !== 'commentary' && typeof item.text === 'string'
+            ? item.text
+            : event.type === 'assistant' && Array.isArray(event.message?.content)
+              ? event.message.content.filter((p: any) => p.type === 'text' && typeof p.text === 'string').map((p: any) => p.text).join('\n') : undefined;
+          if (onText && text) {
+            const id = String(item?.id ?? event.message?.id ?? 'answer');
+            const prior = answers.get(id) ?? '';
+            if (text.startsWith(prior) && text.length > prior.length) onText(text.slice(prior.length));
+            if (answers.size < 64 || answers.has(id)) answers.set(id, text);
+          }
         } catch { /* Non-JSON logs are not progress or model reasoning. */ }
       }
       buffer = ''; dropping = false;

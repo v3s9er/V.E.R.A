@@ -29,6 +29,16 @@ feed(JSON.stringify({ type: 'item.started', item: { type: 'command_execution', c
 assert.deepEqual(output, ['파일을 확인했어요', '명령을 실행하고 있습니다']);
 assert.equal(cliProgress({ type: 'item.completed', item: { type: 'reasoning', text: 'PRIVATE_THINKING' } }), '요청을 분석하고 있습니다');
 assert.equal(cliProgress({ type: 'content_block_delta', delta: { thinking: 'PRIVATE_THINKING' } }), undefined);
+const streamedAnswers: string[] = [];
+const nativeFeed = createCliProgress(() => {}, text => streamedAnswers.push(text));
+for (const event of [
+  { type: 'item.completed', item: { id: 'a', type: 'reasoning', text: 'PRIVATE_THINKING' } },
+  { type: 'item.updated', item: { id: 'b', type: 'agent_message', text: 'hello' } },
+  { type: 'item.completed', item: { id: 'b', type: 'agent_message', text: 'hello world' } },
+  { type: 'item.completed', item: { id: 'b', type: 'agent_message', text: 'hello world' } },
+  { type: 'assistant', message: { id: 'c', content: [{ type: 'thinking', thinking: 'PRIVATE' }, { type: 'text', text: 'Claude answer' }] } },
+]) nativeFeed(JSON.stringify(event) + '\n');
+assert.deepEqual(streamedAnswers, ['hello', ' world', 'Claude answer']);
 assert.equal(parseCodexOutput(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'PRIVATE_THINKING' } })).text, '');
 const claude = parseClaudeOutput('{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"PRIVATE"}]}}\n{"type":"result","result":"완료","usage":{"input_tokens":12,"output_tokens":3}}\n');
 assert.equal(claude.text, '완료'); assert.equal(claude.usage.promptTokens, 12);

@@ -1980,6 +1980,8 @@ export class AgentServer {
   async stop(): Promise<void> {
     const { closeTextWorkers } = await import('../ai/cli-text-pool.js');
     closeTextWorkers();
+    const { closeDiscordSandboxes } = await import('./discord-sandbox.js');
+    await closeDiscordSandboxes();
     this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
     await this.revokeToolPortalAuthority('Mr.Robot Agent가 종료되었습니다.');
