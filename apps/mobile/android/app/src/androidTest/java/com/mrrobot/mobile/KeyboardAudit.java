@@ -10,6 +10,7 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.TextView;
 import java.io.FileOutputStream;
 
 /** Device-level regression audit of the actual RN screen and Android IME. */
@@ -35,6 +36,13 @@ public class KeyboardAudit extends Instrumentation {
         }
         return null;
     }
+    private TextView findReply(View v) {
+        if (v instanceof TextView && ((TextView)v).getText().toString().endsWith("VISIBLE_REPLY_END")) return (TextView)v;
+        if (v instanceof ViewGroup) for (int i = 0; i < ((ViewGroup)v).getChildCount(); i++) {
+            TextView found = findReply(((ViewGroup)v).getChildAt(i)); if (found != null) return found;
+        }
+        return null;
+    }
     private void pause(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { throw new RuntimeException(e); } }
     private int imeBottom() {
         final int[] result = {0};
@@ -53,6 +61,17 @@ public class KeyboardAudit extends Instrumentation {
                 int line = input.getLayout().getLineForOffset(input.getSelectionEnd());
                 int cursorBottom = at[1] + input.getTotalPaddingTop() + input.getLayout().getLineBottom(line) - input.getScrollY();
                 if (cursorBottom > keyboardTop + 2 || cursorBottom > visible.bottom + 2) failure[0] = stage + ": insertion cursor clipped";
+            }
+            if (!landscape) {
+                TextView reply = findReply(activity.getWindow().getDecorView());
+                if (reply == null) failure[0] = stage + ": streamed reply missing";
+                else {
+                    int[] replyAt = new int[2]; reply.getLocationOnScreen(replyAt);
+                    Rect replyVisible = new Rect(); reply.getGlobalVisibleRect(replyVisible);
+                    int replyBottom = replyAt[1] + reply.getHeight();
+                    evidence.append("replyBottom=").append(replyBottom).append(" inputTop=").append(at[1]).append('\n');
+                    if (replyVisible.height() < 10 || replyBottom > at[1] || replyBottom > replyVisible.bottom + 3) failure[0] = stage + ": latest reply clipped instead of following";
+                }
             }
             View send = findSend(activity.getWindow().getDecorView());
             if (send == null) failure[0] = stage + ": send control missing";

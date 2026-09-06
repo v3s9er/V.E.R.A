@@ -35,7 +35,8 @@ check('chat relies on native Android resize while retaining iOS keyboard insets'
   && chat.includes("automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}"));
 check('opening the keyboard follows the latest message and list size changes preserve bottom following',
   chat.includes('if (!keyboardVisible || !stickToBottom.current) return;')
-  && chat.includes('listRef.current?.scrollToEnd({ animated: true })')
+  && chat.includes('listRef.current?.scrollToOffset({ offset: 0, animated: true })')
+  && chat.includes('data={[...messages].reverse()}')
   && chat.includes('onContentSizeChange={() => { if (stickToBottom.current)')
   && chat.includes('onLayout={() => { if (stickToBottom.current)'));
 check('keyboard entry mode frees vertical space without covering the composer',

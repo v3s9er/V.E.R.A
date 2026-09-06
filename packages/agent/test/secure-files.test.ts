@@ -15,6 +15,7 @@ const host: any = {
  sharedFileAccess: (_: string, isWrite: boolean) => !revoked && (!isWrite || write),
  fileAccess: (_: string, isWrite: boolean) => !isWrite,
  workspacesList: () => [{ id: 'workspace', path: join(dir, 'workspace') }],
+ chatFileRoot: (_: string, id: string, path: string) => id === 'conversation' && path === join(dir, 'workspace', '한국어.pdf') ? join(dir, 'workspace') : undefined,
 };
 try {
  mkdirSync(join(dir, 'shared')); mkdirSync(join(dir, 'workspace'));
@@ -49,6 +50,11 @@ try {
  const part = call({ op: 'read', path: '한국어.pdf', workspaceId: 'workspace', offset: 0 });
  assert.equal(Buffer.from(part.data, 'hex').toString(), 'fixture pdf contents');
  assert.equal(part.done, true);
+ const chatPart = call({ op: 'read', conversationId: 'conversation', path: join(dir, 'workspace', '한국어.pdf'), offset: 0 });
+ assert.equal(Buffer.from(chatPart.data, 'hex').toString(), 'fixture pdf contents');
+ assert.ok(call({ op: 'read', conversationId: 'other', path: join(dir, 'workspace', '한국어.pdf'), offset: 0 }).error);
+ assert.ok(call({ op: 'read', conversationId: 'conversation', path: join(dir, 'workspace', 'unmentioned.pdf'), offset: 0 }).error);
+ assert.ok(call({ op: 'list', conversationId: 'conversation', path: join(dir, 'workspace', '한국어.pdf') }).error);
  writeFileSync(join(dir, 'workspace', '한국어.pdf'), 'changed');
  assert.ok(call({ op: 'read', path: '한국어.pdf', workspaceId: 'workspace', offset: 0, version: part.version }).error);
  const upload = call({ op: 'upload.begin', size: 3, name: 'phone.txt' });

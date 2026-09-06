@@ -1,5 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
-import { networkInterfaces, hostname as osHostname, platform } from 'node:os';
+import { networkInterfaces, hostname as osHostname, platform, homedir } from 'node:os';
+import { join as joinFilePath } from 'node:path';
+import { chatFileRoot } from './chat-file-access.js';
 import type { AddressInfo } from 'node:net';
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type {
@@ -79,7 +81,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.12';
+export const VERSION = '0.4.13';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -799,6 +801,16 @@ export class AgentServer {
     if (!write) return true;
     const cap = effectiveMode(this.config.settings.safety.mode, auth.permissionCap);
     return cap === 'workspace' || cap === 'full';
+  }
+
+  chatFileRoot(candidate: string, conversationId: string, path: string): string | undefined {
+    if (!this.fileAccess(candidate, false)) return;
+    const auth = this.authenticate(candidate);
+    const conversation = this.conversations.get(conversationId);
+    if (!auth || !conversation) return;
+    const cap = effectiveMode(this.config.settings.safety.mode, effectiveMode(auth.permissionCap, conversation.permissionMode));
+    const workspace = this.workspacesList().find(w => w.id === conversation.workspaceId)?.path;
+    return chatFileRoot(path, conversation.messages, workspace, joinFilePath(homedir(), 'Downloads'), cap === 'full');
   }
 
   /** Shared inbox/outbox writes are isolated to ~/.mr-robot/shared and need ask-or-higher. */

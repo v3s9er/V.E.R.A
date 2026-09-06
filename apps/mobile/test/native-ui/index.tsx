@@ -7,7 +7,13 @@ import type { SavedPc } from '../../src/types';
 const pc: SavedPc = { id: 'ui-test', name: 'UI test PC', host: 'example.invalid', port: 443, protocol: 'https', secret: '', addedAt: 0 };
 const conversation: any = { id: 'fixture', title: 'Native keyboard audit', permissionMode: 'ask', reasoningEffort: 'auto', tokenPolicy: 'adaptive', providerId: 'fixture', providerModel: 'Test model', messages: Array.from({ length: 12 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `UI test message ${i + 1}. No network or AI calls.` })) };
 const client = {
-  authed: true, permissionCap: 'full', on: () => () => undefined,
+  authed: true, permissionCap: 'full', on: (event: string, handler: (data: unknown) => void) => {
+    // Real delta/status delivery while the instrumentation repeatedly opens IME.
+    const timer = event === 'chat.delta' || event === 'chat.status' ? setInterval(() => handler(event === 'chat.delta'
+      ? { conversationId: 'fixture', text: '\nStreaming response after keyboard resize.\nVISIBLE_REPLY_END' }
+      : { conversationId: 'fixture', status: '파일 확인 → 실행 결과 검증 중' }), 1000) : null;
+    return () => { if (timer) clearInterval(timer); };
+  },
   call: async (method: string, params: any = {}) => {
     if (method === 'conversations.list') return [conversation];
     if (method === 'conversations.get' || method === 'conversations.create') return conversation;

@@ -560,6 +560,7 @@ export interface PairingInfo {
 
 /** What the HTTP layer needs from the agent core (implemented by AgentServer). */
 export interface HttpApiHost {
+  chatFileRoot?(secret: string, conversationId: string, path: string): string | undefined;
   authenticate(secret: string): AuthContext | null;
   verifySecret(secret: string): boolean;
   isAdminSecret(secret: string): boolean;
@@ -1361,7 +1362,10 @@ export function createHttpApi(
     let transfer: ReturnType<typeof transferAbort> | undefined;
     let lease: FileTransferLease | undefined;
     try {
-      const { target } = workspacePath(req.query.workspaceId, req.query.path); const stat = statSync(target);
+      const chatRoot = req.query.conversationId ? host.chatFileRoot?.(String(req.header('x-mr-robot-token') ?? ''), String(req.query.conversationId), String(req.query.path ?? '')) : undefined;
+      if (req.query.conversationId && !chatRoot) throw new Error('이 대화의 파일 또는 허용된 폴더가 아닙니다. PC에서 기기 권한과 작업 폴더를 확인하세요.');
+      const target = chatRoot ? resolveConfinedPath(chatRoot, relative(chatRoot, String(req.query.path))) : workspacePath(req.query.workspaceId, req.query.path).target;
+      const stat = statSync(target);
       if (!stat.isFile()) throw new Error('다운로드할 파일이 아닙니다.');
       if (stat.size > MAX_FILE_BYTES) throw new PayloadTooLargeError('다운로드는 파일 하나당 최대 2GB입니다.');
       lease = transferAdmission.acquire(transferPrincipal(res), stat.size);

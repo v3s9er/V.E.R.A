@@ -87,11 +87,13 @@ export class SecureFiles {
     if (!canRead) throw new Error('PC에서 이 기기의 파일 전송 권한을 허용하세요.');
     if (body.op === 'enroll' || body.op === 'hello') return { ok: true, expiresInDays: 90, session: this.epoch };
     if (body.session !== this.epoch) return { error: '파일 연결 세션이 갱신됐습니다.', code: 'SESSION_EXPIRED' };
-    const root = body.workspaceId ? this.host.workspacesList().find(w => w.id === body.workspaceId)?.path : join(this.home, 'shared');
+    const chatRoot = body.conversationId ? this.host.chatFileRoot?.(body.secret, String(body.conversationId), String(body.path ?? '')) : undefined;
+    if (body.conversationId && (!chatRoot || body.op !== 'read')) throw new Error('대화에 첨부된 파일만 받을 수 있습니다. PC에서 기기 권한과 작업 폴더를 확인하세요.');
+    const root = chatRoot ?? (body.workspaceId ? this.host.workspacesList().find(w => w.id === body.workspaceId)?.path : join(this.home, 'shared'));
     if (!root) throw new Error('작업 폴더를 찾을 수 없습니다.');
     if (body.workspaceId && !this.host.fileAccess(body.secret, false)) throw new Error('작업 폴더 읽기 권한이 없습니다.');
     if (body.op === 'list' || body.op === 'read') {
-      const file = this.confined(root, body.path || '');
+      const file = this.confined(root, chatRoot ? relative(chatRoot, body.path) : body.path || '');
       if (body.op === 'list') {
         return { items: readdirSync(file, { withFileTypes: true }).filter(d => !d.isSymbolicLink()).slice(0, 1500).map(d => { const path = this.confined(root, join(String(body.path || ''), d.name)); const stat = statSync(path); return { name: d.name, path: relative(root, path).replaceAll('\\', '/'), size: stat.size, isDirectory: stat.isDirectory(), modifiedAt: stat.mtimeMs }; }) };
       }

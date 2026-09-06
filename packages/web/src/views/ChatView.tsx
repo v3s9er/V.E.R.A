@@ -3,6 +3,7 @@ import type { ChatConfirmRequest, ChatRunState, ConversationDetail, Conversation
 import { useMrRobot } from '../state';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
+import { ChatFiles } from '../components/ChatFiles';
 import { BrandIcon } from '../components/BrandIcon';
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
@@ -137,6 +138,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
+  const [activity, setActivity] = useState<string[]>([]);
+  useEffect(() => setActivity([]), [selected?.id]);
   const [route, setRoute] = useState<RouteInfo | null>(null);
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [conversationMenu, setConversationMenu] = useState<ConversationMenu | null>(null);
@@ -269,6 +272,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     busyRef.current = true;
     runningConversationRef.current = conversation.id;
     setBusy(true);
+    setActivity([]);
     setStatus('모델 선택 중…');
     setRoute(null);
     stickToBottomRef.current = true;
@@ -424,7 +428,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         return copy;
       });
     });
-    const offStatus = client.on('chat.status', (data) => { if (isCurrent(data)) setStatus((data as { status: string }).status ?? ''); });
+    const offStatus = client.on('chat.status', (data) => {
+      if (!isCurrent(data)) return;
+      const next = ((data as { status: string }).status ?? '').slice(0, 1000);
+      setStatus(next);
+      if (next) setActivity(items => items.at(-1) === next ? items : [...items.slice(-19), next]);
+    });
     const offDone = client.on('chat.done', (data) => {
       flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
@@ -471,8 +480,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   useEffect(() => {
     const scroll = scroller.current;
     if (!scroll) return;
+    let interactingUntil = 0;
+    const interaction = (): void => { interactingUntil = Date.now() + 1000; };
+    const wheel = (event: WheelEvent): void => { interaction(); if (event.deltaY < 0) stickToBottomRef.current = false; };
     const rememberPosition = (): void => {
-      stickToBottomRef.current = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 96;
+      const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 96;
+      if (atBottom || Date.now() < interactingUntil) stickToBottomRef.current = atBottom;
     };
     // A different conversation owns a different scroll position. Always open it
     // at the newest message; otherwise the old conversation's scrollTop (often
@@ -484,9 +497,15 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       rememberPosition();
     });
     scroll.addEventListener('scroll', rememberPosition, { passive: true });
+    scroll.addEventListener('wheel', wheel, { passive: true });
+    scroll.addEventListener('pointerdown', interaction, { passive: true });
+    scroll.addEventListener('keydown', interaction);
     return () => {
       window.cancelAnimationFrame(frame);
       scroll.removeEventListener('scroll', rememberPosition);
+      scroll.removeEventListener('wheel', wheel);
+      scroll.removeEventListener('pointerdown', interaction);
+      scroll.removeEventListener('keydown', interaction);
     };
   }, [selected?.id]);
 
@@ -510,11 +529,15 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       });
     });
     observer.observe(composer);
+    if (scroller.current) {
+      observer.observe(scroller.current);
+      for (const child of scroller.current.children) observer.observe(child);
+    }
     return () => {
       observer.disconnect();
       window.cancelAnimationFrame(frame);
     };
-  }, [selected?.id]);
+  }, [selected?.id, messages.length]);
 
   useEffect(() => {
     if (!conversationMenu) return;
@@ -886,11 +909,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         <div className="chat-scroll" ref={scroller}>
           {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
           {hiddenMessageCount > 0 && <button type="button" className="chat-history-more" onClick={() => setVisibleMessageLimit((count) => count + 160)}>이전 메시지 {Math.min(160, hiddenMessageCount)}개 더 보기</button>}
-          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}><div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div><div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div><div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span className="typing">작업을 분석하고 있습니다<span className="dots"><span>.</span><span>.</span><span>.</span></span></span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>{m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? <Spinner size={12} /> : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}</div></div>)}
+          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}>
+            <div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div>
+            <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
+              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{status || '요청을 분석하고 있습니다'}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
+              {m.role === 'assistant' && activePc && selected && <ChatFiles key={`${activePc.id}:${selected.id}:${m.id}`} text={m.content} pc={activePc} conversationId={selected.id} />}
+              {m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? '↳' : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}
+            </div>
+          </div>)}
+          {activity.length > 0 && <details className="chat-activity"><summary>{busy ? '✦ 작업 진행' : '✓ 작업 기록'} · {activity.at(-1)}</summary><ol>{activity.map((entry, index) => <li key={index}>{entry}</li>)}</ol></details>}
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? <Spinner size={13} /> : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
+          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? '✦' : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
@@ -949,7 +980,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             <Button className="composer-icon-button" aria-label={uploading ? '업로드 취소' : '파일 첨부'} title="파일 첨부" variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '×' : '＋'}</Button>
             <Button className="composer-icon-button" aria-label={listening ? '음성 듣기 중지' : '음성 입력'} title="음성 입력" variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '■' : '🎙'}</Button>
             {busy && <Button onClick={() => void send()} disabled={!input.trim() || executionConfigSaving}>명령 끼워넣기</Button>}
-            {busy ? <Button variant="danger" onClick={() => void cancelRun()}>중지</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
+            {busy ? <Button variant="danger" className="composer-icon-button" aria-label="실행 중인 작업 중지" title="작업 중지" onClick={() => void cancelRun()}>■</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
             </div>
           </div>
         </div>

@@ -19,6 +19,7 @@ const host: any = {
  sharedFileAccess: () => !revoked,
  fileAccess: () => !revoked,
  workspacesList: () => [],
+ chatFileRoot: (_: string, conversationId: string, path: string) => conversationId === 'chat-fixture' && path === join(directory, 'shared', '[파일] sample.pdf') ? join(directory, 'shared') : undefined,
 };
 const server = createHttpApi(host, undefined, new Set(), new WsUpgradeTickets()).listen(0, '127.0.0.1');
 await new Promise<void>(resolve => server.once('listening', resolve));
@@ -32,6 +33,12 @@ try {
  const inviteResponse = await post('/api/secure-files/invite', {}, { 'x-mr-robot-token': 'fixture-admin' });
  assert.equal(inviteResponse.status, 200);
  const invite = await inviteResponse.json() as any;
+ writeFileSync(join(directory, 'shared', '[파일] sample.pdf'), 'chat download fixture');
+ const chatQuery = new URLSearchParams({ conversationId: 'chat-fixture', path: join(directory, 'shared', '[파일] sample.pdf') });
+ const chatResponse = await fetch(`${base}/api/workspaces/download?${chatQuery}`, { headers: { 'x-mr-robot-token': 'fixture-admin' } });
+ assert.equal(chatResponse.status, 200); assert.equal(await chatResponse.text(), 'chat download fixture');
+ chatQuery.set('conversationId', 'unrelated');
+ assert.notEqual((await fetch(`${base}/api/workspaces/download?${chatQuery}`, { headers: { 'x-mr-robot-token': 'fixture-admin' } })).status, 200);
  let session: string | undefined;
  const request = (op: Record<string, unknown>) => sealFilePacket(invite.id, invite.key, { ...op, session, secret: 'fixture-device', requestId: randomBytes(16).toString('hex'), time: Date.now() }, 'request');
  const enroll = await post('/api/secure-files/channel', request({ op: 'enroll' }), { 'x-mr-robot-token': 'mr-robot-encrypted-file-v1' });

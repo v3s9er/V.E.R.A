@@ -2,6 +2,15 @@
    Mr.Robot design system — dark glassmorphism
    ============================================================ */
 
+.chat-file-cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; min-width: 0; }
+.chat-file-cards small { flex-basis: 100%; overflow-wrap: anywhere; }
+.chat-file-card { color: #9be4ed; background: #12202b; border: 1px solid #264956; border-radius: 12px; padding: 12px 16px; text-align: left; max-width: 100%; overflow-wrap: anywhere; cursor: pointer; }
+.chat-file-card:disabled { opacity: .5; cursor: wait; }
+.chat-file-card:focus-visible, .chat-activity summary:focus-visible { outline: 2px solid #a698fa; outline-offset: 3px; }
+.chat-activity { margin: 12px 0 16px 44px; font-size: 12px; color: #aeb6c9; overflow-wrap: anywhere; }
+.chat-activity summary { cursor: pointer; padding: 10px; border-radius: 10px; background: #ffffff06; }
+.chat-activity ol { max-height: 180px; overflow-y: auto; padding-left: 28px; }
+.chat-activity li { padding: 5px 8px; white-space: pre-wrap; }
 :root {
   --bg: #0b0f1a;
   --bg-2: #0e1424;

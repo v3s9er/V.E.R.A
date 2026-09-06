@@ -1,4 +1,6 @@
 import { uploadSecureFile } from '../secureFiles';
+import { ChatFiles } from '../components/ChatFiles';
+import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -135,6 +137,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const cancelTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const startingConversationRef = useRef<string | null>(null);
   const stickToBottom = useRef(true);
+  const draggingMessages = useRef(false);
+  const [activity, setActivity] = useState<string[]>([]);
+  const [showActivity, setShowActivity] = useState(false);
   const [unseenMessages, setUnseenMessages] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -162,7 +167,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       // KeyboardAvoidingView follows the interactive iOS keyboard frame. The
       // measured fallback is only for Android keyboards that overlay resize.
       applyComposerKeyboardLift(0);
-      if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false });
+      if (stickToBottom.current) listRef.current?.scrollToOffset({ offset: 0, animated: false });
       return;
     }
     const metrics = Keyboard.metrics();
@@ -182,7 +187,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         const overlap = unliftedBottom - keyboardTopRef.current + 6;
         const maximumSafeLift = Math.max(0, height);
         applyComposerKeyboardLift(Math.min(maximumSafeLift, Math.max(0, overlap)));
-        if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false });
+        if (stickToBottom.current) listRef.current?.scrollToOffset({ offset: 0, animated: false });
       });
     });
   }, [applyComposerKeyboardLift, height]);
@@ -301,6 +306,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setRuns((current) => ({ ...current, ...Object.fromEntries(runList.map((run) => [run.conversationId, run])) }));
     if (pendingConfirm) setConfirm(pendingConfirm);
     setConversation(detail);
+    setActivity([]); setShowActivity(false);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
     const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
     setMessages(active?.running
@@ -379,7 +385,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   useEffect(() => {
     if (!keyboardVisible || !stickToBottom.current) return;
     scheduleComposerKeyboardSync([0, Platform.OS === 'ios' ? 280 : 80]);
-    const timer = setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), Platform.OS === 'ios' ? 280 : 80);
+    const timer = setTimeout(() => listRef.current?.scrollToOffset({ offset: 0, animated: false }), Platform.OS === 'ios' ? 280 : 80);
     return () => clearTimeout(timer);
   }, [keyboardVisible, scheduleComposerKeyboardSync]);
 
@@ -390,7 +396,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   useEffect(() => {
     const scrollIfFollowing = (): void => {
       if (!stickToBottom.current) { setUnseenMessages(true); return; }
-      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+      requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: false }));
     };
     const flushDelta = (): void => {
       if (deltaTimer.current) clearTimeout(deltaTimer.current);
@@ -445,6 +451,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       client.on('chat.status', (data) => {
         const event = data as { conversationId?: string; status?: string };
         if (!event.conversationId) return;
+        if (event.conversationId === activeId.current && event.status) {
+          const line = event.status.slice(0, 1000);
+          setActivity(items => items.at(-1) === line ? items : [...items.slice(-19), line]);
+        }
         if (startingConversationRef.current === event.conversationId) startingConversationRef.current = null;
         setRuns((current) => ({
           ...current,
@@ -512,6 +522,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       return;
     }
     startingConversationRef.current = currentConversation.id;
+    setActivity([]);
     setInput('');
     setRuns((current) => ({ ...current, [currentConversation.id]: { conversationId: currentConversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
     stickToBottom.current = true;
@@ -818,16 +829,18 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const onMessageScroll = (event: NativeSyntheticEvent<NativeScrollEvent>): void => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const following = contentSize.height - contentOffset.y - layoutMeasurement.height < 96;
-    stickToBottom.current = following;
+    const { contentOffset } = event.nativeEvent;
+    const following = contentOffset.y < 96;
+    // Only a real user gesture may disengage following, never a layout/IME resize.
+    if (draggingMessages.current) stickToBottom.current = following;
+    else if (following) stickToBottom.current = true;
     if (following && unseenMessages) setUnseenMessages(false);
   };
 
   const jumpToLatest = (): void => {
     stickToBottom.current = true;
     setUnseenMessages(false);
-    listRef.current?.scrollToEnd({ animated: true });
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
   const singleModelChoices = (includeAutomatic: boolean) => (
@@ -876,8 +889,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
         <Text style={styles.sendText} numberOfLines={shortKeyboardViewport ? 1 : undefined}>{shortKeyboardViewport ? '추가 명령' : '추가 명령 끼워넣기'}</Text>
       </TouchableOpacity>
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}>
-        <Text style={styles.sendText} numberOfLines={shortKeyboardViewport ? 1 : undefined}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.cancelBtn, { width: 48, paddingHorizontal: 8 }, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}>
+        <Text style={styles.sendText} numberOfLines={1}>{activeRun?.cancelling ? '…' : '■'}</Text>
       </TouchableOpacity>
     </View>
   ) : null;
@@ -896,7 +909,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         ref={listRef}
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, messages.length === 0 && styles.emptyContent]}
-        data={messages}
+        inverted
+        data={[...messages].reverse()}
         keyExtractor={(message) => message.id}
         initialNumToRender={18}
         maxToRenderPerBatch={12}
@@ -905,9 +919,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
         onScroll={onMessageScroll}
+        onScrollBeginDrag={() => { draggingMessages.current = true; }}
+        onScrollEndDrag={() => { draggingMessages.current = false; }}
         scrollEventThrottle={80}
-        onLayout={() => { if (stickToBottom.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false })); }}
-        onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false }); }}
+        onLayout={() => { if (stickToBottom.current) requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: false })); }}
+        onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToOffset({ offset: 0, animated: false }); }}
         ListEmptyComponent={(
           <View style={styles.empty}>
             {initialLoading ? <ActivityIndicator color={colors.accent2} accessibilityLabel="대화 불러오는 중" /> : <Text style={styles.emptyIcon}>✦</Text>}
@@ -918,7 +934,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         renderItem={({ item: m }) => (
           <View key={m.id} style={[styles.row, m.role === 'user' && styles.rowUser]}>
             <View style={[styles.bubble, m.role === 'user' && styles.bubbleUser]}>
-              {m.content ? <Text style={styles.bubbleText}>{m.content}</Text> : !m.done ? <ActivityIndicator color={colors.accent2} size="small" /> : null}
+              {m.content ? <Text style={styles.bubbleText}>{m.role === 'assistant' ? chatFileDisplayText(m.content) : m.content}</Text> : !m.done ? <Text style={styles.bubbleText}>{activity.at(-1) || '요청을 확인하고 있습니다…'}</Text> : null}
+              {m.role === 'assistant' && conversation && <ChatFiles text={m.content} pc={pc} conversationId={conversation.id} />}
               {m.error ? <Text style={styles.errorText}>⚠️ {m.error}</Text> : null}
             </View>
             {m.tools.length > 0 && (
@@ -938,7 +955,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       />
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
-      {busy && !shortKeyboardViewport && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
+      {(busy || activity.length > 0) && !shortKeyboardViewport ? <View>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : '✓'}</Text><Text numberOfLines={2} style={styles.runStatusText}>{activity.at(-1) || activeRun?.status || '요청 분석 중'}{activeRun?.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
+        {showActivity && <ScrollView style={{ maxHeight: 140, paddingHorizontal: 18 }} nestedScrollEnabled>{activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}</ScrollView>}
+      </View> : null}
       <View
         ref={composerRef}
         onLayout={() => { if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 80]); }}

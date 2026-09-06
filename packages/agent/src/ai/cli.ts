@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { createCliProgress } from './cli-progress.js';
 import { existsSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
@@ -165,8 +167,13 @@ function tokenCount(value: unknown): number {
 }
 
 export function parseClaudeOutput(raw: string): ParsedCliOutput {
+  // Native runs stream JSONL; only the final result is an answer/usage record.
+  const records = raw.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const result = records.reverse().find(record => record?.type === 'result');
+  if (result) raw = JSON.stringify(result);
   try {
     const parsed = JSON.parse(raw) as {
+      type?: string;
       result?: string;
       totalTokens?: number;
       usage?: {
@@ -184,7 +191,7 @@ export function parseClaudeOutput(raw: string): ParsedCliOutput {
     const reported = input + cacheWrite + cacheRead + output;
     const totalFallback = tokenCount(parsed.totalTokens);
     return {
-      text: typeof parsed.result === 'string' ? parsed.result : raw,
+      text: typeof parsed.result === 'string' ? parsed.result : parsed.type ? '' : raw,
       usage: {
         promptTokens: reported > 0 ? input + cacheWrite + cacheRead : totalFallback,
         completionTokens: output,
@@ -196,12 +203,13 @@ export function parseClaudeOutput(raw: string): ParsedCliOutput {
       },
     };
   } catch {
-    return { text: raw, usage: { promptTokens: 0, completionTokens: 0 } };
+    return { text: records.length ? '' : raw, usage: { promptTokens: 0, completionTokens: 0 } };
   }
 }
 
 export function parseCodexOutput(raw: string): ParsedCliOutput {
   let final = '';
+  let structured = false;
   let promptTokens = 0;
   let completionTokens = 0;
   let cachedPromptTokens = 0;
@@ -209,8 +217,9 @@ export function parseCodexOutput(raw: string): ParsedCliOutput {
   for (const line of raw.split(/\r?\n/)) {
     try {
       const event = JSON.parse(line) as Record<string, any>;
+      structured = true;
       const text = event.item?.text ?? event.message?.content ?? event.text;
-      if (typeof text === 'string' && text.trim()) final = text;
+      if (typeof text === 'string' && text.trim() && (event.item?.type === 'agent_message' && event.item.phase !== 'commentary' || !event.item && ['message', 'message.completed', 'assistant.message'].includes(event.type))) final = text;
       if (event.type === 'turn.completed' || event.type === 'turn_completed' || event.type === 'turn.complete') {
         const usage = event.usage ?? event.turn?.usage ?? {};
         promptTokens += tokenCount(usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens);
@@ -223,7 +232,7 @@ export function parseCodexOutput(raw: string): ParsedCliOutput {
     }
   }
   return {
-    text: final || raw,
+    text: final || (structured ? '' : raw),
     usage: {
       promptTokens,
       completionTokens,
@@ -275,6 +284,9 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
     });
     let stdout = '';
     let stderr = '';
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
+    const progress = createCliProgress(status => options.onStatus?.(status));
     let outputBytes = 0;
     let settled = false;
     let timedOut = false;
@@ -308,9 +320,9 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
         terminateProcessTree(child);
         return;
       }
-      const text = chunk.toString('utf8');
+      const text = stdoutDecoder.write(chunk);
       stdout += text;
-      if (/tool|command|exec|file/i.test(text)) options.onStatus?.('native-agent:working');
+      progress(text);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       outputBytes += chunk.byteLength;
@@ -319,12 +331,14 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
         terminateProcessTree(child);
         return;
       }
-      stderr += chunk.toString('utf8');
+      stderr += stderrDecoder.write(chunk);
     });
     child.stdin?.on('error', () => { /* close/error below owns the outcome */ });
     child.stdin?.end(options.stdin, 'utf8');
     child.once('error', (error) => finish(error));
     child.once('close', (code) => {
+      const tail = stdoutDecoder.end();
+      stdout += tail; stderr += stderrDecoder.end(); progress(tail + '\n');
       if (options.signal?.aborted) finish(new Error('작업이 중지되었습니다.'));
       else if (timedOut) finish(new Error(`[${options.label}] 실행 시간이 ${Math.ceil(options.timeoutMs / 60_000)}분을 초과하여 중지했습니다.`));
       else if (outputExceeded) finish(new Error(`[${options.label}] 출력 한도 ${MAX_OUTPUT / 1024 / 1024}MB를 초과하여 중지했습니다.`));
@@ -408,7 +422,7 @@ export class CliProvider implements AiProvider {
     const args = this.type === 'claude-cli'
       ? [
         '-p', req.prompt,
-        '--output-format', 'json',
+        '--output-format', 'stream-json', '--verbose',
         '--no-session-persistence',
         '--safe-mode',
         '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
@@ -428,7 +442,7 @@ export class CliProvider implements AiProvider {
         ...extras,
       ];
     const invocation = resolveCliInvocation(this.type, this.command);
-    req.onStatus?.(`native-agent:${this.label}:${this.model}`);
+    req.onStatus?.(`${this.label} · ${this.model} — 작업을 시작합니다`);
     const raw = await runCliProcess({
       command: invocation.command,
       args: [...invocation.prefixArgs, ...args],

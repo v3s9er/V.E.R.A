@@ -30,7 +30,7 @@ if (parsedClaudeUsage.text !== 'claude-result'
   || parsedClaudeUsage.usage.reasoningTokens !== 12) throw new Error('Claude CLI usage was not parsed conservatively');
 
 const parsedCodexUsage = parseCodexOutput([
-  JSON.stringify({ type: 'item.completed', item: { text: 'codex-result' } }),
+  JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'codex-result' } }),
   JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 200, cached_input_tokens: 75, output_tokens: 50, output_tokens_details: { reasoning_tokens: 18 } } }),
 ].join('\n'));
 if (parsedCodexUsage.text !== 'codex-result'

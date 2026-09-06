@@ -78,13 +78,13 @@ export async function uploadSecureFile(pc: SavedPc, uri: string, name: string, s
   } finally { handle.close(); }
 }
 
-export async function downloadSecureFile(pc: SavedPc, path: string, uri: string, workspaceId?: string, signal?: AbortSignal): Promise<void> {
+export async function downloadSecureFile(pc: SavedPc, path: string, uri: string, workspaceId?: string, signal?: AbortSignal, conversationId?: string): Promise<void> {
   const file = new File(uri); file.create({ overwrite: false });
   const handle = file.open();
   try {
     let offset = 0, version: string | undefined;
     for (;;) {
-      const part = await secureFileCall(pc, { op: 'read', path, workspaceId, offset, version }, signal);
+      const part = await secureFileCall(pc, { op: 'read', path, workspaceId, conversationId, offset, version }, signal);
       if (!Number.isSafeInteger(part.size) || part.size > LIMIT || part.offset !== offset || (version && part.version !== version)) throw new Error('파일 전송 무결성 오류');
       version = part.version;
       const bytes = hexToBytes(part.data);
