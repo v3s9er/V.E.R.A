@@ -4,16 +4,19 @@ Run only via the Discord Agent plugin. Standalone needs connection config only.
 The PC credential never leaves the Node host. Discord identity comes from Gateway.
 """
 import asyncio
+import base64
 import io
 import json
 import os
 import sys
 import threading
 import uuid
+from types import SimpleNamespace
 
 import discord
 from discord import app_commands
-from thread_sessions import ThreadManager
+from thread_sessions import ThreadManager, MessageContext
+from presentation import result_text, wants_files
 
 PREFIX = '__MR_ROBOT_DISCORD__'
 _output_lock = threading.Lock()
@@ -308,7 +311,8 @@ class Bridge:
         if action == 'stop':
             await self.authorize(interaction)
             await self.threads.cancel_queued(interaction.channel_id)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=action not in ('ask', 'result'), thinking=True)
+        destination = interaction
         channel = self.scope_key(interaction)
         if action == 'ask' and channel in self.active:
             await interaction.followup.send('처리 중입니다. /robot stop으로 중지할 수 있습니다.', ephemeral=True)
@@ -318,6 +322,14 @@ class Bridge:
         watch = None
         try:
             await self.authorize(interaction)
+            if action in ('ask', 'result') and not isinstance(interaction, MessageContext):
+                manager = self.threads if str(interaction.channel_id) in self.threads.state['sessions'] else None
+                destination = MessageContext(SimpleNamespace(guild=interaction.guild, channel=interaction.channel, author=interaction.user), manager)
+                receipt = await interaction.edit_original_response(content='작업 중… 결과는 이 메시지에 표시됩니다.')
+                # A bot-token Message remains editable after interaction expiry.
+                destination.result_message = await interaction.channel.fetch_message(receipt.id)
+                if action == 'ask':
+                    self.active[channel] = destination
             if action == 'ask' and interaction.channel_id in self.threads.mutating:
                 raise RuntimeError('스레드 관리 작업 중입니다. 잠시 후 다시 보내세요.')
             if action == 'ask':
@@ -335,27 +347,60 @@ class Bridge:
             if action == 'approval' and isinstance(result, dict) and result.get('requestId'):
                 await self.show_approval(interaction, result)
                 return
-            text = result.get('text') or result.get('message') if isinstance(result, dict) else None
-            text = text or json.dumps(result, ensure_ascii=False, indent=2)
-            text = str(text)
-            if interaction.is_expired():
-                return  # /robot result retrieves the Node-hosted latest result.
-            if len(text) > 1800:
-                file = discord.File(io.BytesIO(text[:150_000].encode('utf-8')), filename='MrRobot-result.txt')
-                await interaction.followup.send('작업 결과입니다.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-            else:
-                await interaction.followup.send(discord.utils.escape_mentions(text) or '완료했습니다.', ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            text = result_text(result, action)[:150_000]
+            sender = destination.followup.send
+            for offset in range(0, min(len(text), 14400), 1800):
+                await sender(discord.utils.escape_mentions(text[offset:offset + 1800]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            if len(text) > 14400:
+                file = discord.File(io.BytesIO(text.encode('utf-8')), filename='MrRobot-result.txt')
+                try:
+                    await sender('답변이 길어 전체 본문도 파일로 첨부합니다.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                finally:
+                    file.close()
+            if action == 'ask' and isinstance(result, dict) and result.get('ok') is not False and wants_files(params.get('text', '')):
+                await self.send_files(interaction, destination, result.get('files', []))
         except Exception as error:
             # No raw Discord HTTP/token diagnostics returned to a channel.
             text = str(error) if isinstance(error, (RuntimeError, PermissionError)) else '연결 또는 응답 오류입니다. PC의 플러그인 상태를 확인하세요.'
-            if not interaction.is_expired():
-                await interaction.followup.send(discord.utils.escape_mentions(text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            if isinstance(destination, MessageContext) or not interaction.is_expired():
+                await destination.followup.send(discord.utils.escape_mentions('⚠️ ' + text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         finally:
             if watch:
                 watch.cancel()
                 await asyncio.gather(watch, return_exceptions=True)
             if action == 'ask':
                 self.active.pop(channel, None)
+
+    async def send_files(self, interaction, destination, files):
+        for reference in files[:3]:
+            try:
+                async with asyncio.timeout(120):
+                    limit = min(int(interaction.guild.filesize_limit), 25 * 1024 * 1024)
+                    content = bytearray()
+                    version = None
+                    while True:
+                        part = await self.request(interaction, 'file.read', path=reference['path'], offset=len(content), limit=limit, version=version)
+                        chunk = base64.b64decode(part['data'], validate=True)
+                        if part['offset'] != len(content) or part['size'] > limit or len(chunk) > 128 * 1024 or version and version != part['version']:
+                            raise RuntimeError('파일 전송 무결성 검증에 실패했습니다.')
+                        content.extend(chunk)
+                        if len(content) > part['size'] or not chunk and not part['done']:
+                            raise RuntimeError('파일 조각 크기가 올바르지 않습니다.')
+                        version = part['version']
+                        if part['done']:
+                            if len(content) != part['size']:
+                                raise RuntimeError('파일 전송이 완료되지 않았습니다.')
+                            break
+                    await self.authorize(interaction)
+                    await self.request(interaction, 'file.read', path=reference['path'], offset=len(content), limit=limit, version=version)
+                    file = discord.File(io.BytesIO(content), filename=part['name'])
+                    try:
+                        await destination.followup.send('PC 파일을 첨부했습니다. 이 첨부파일은 Discord에 저장됩니다.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                    finally:
+                        file.close()
+            except Exception as error:
+                detail = str(error) if isinstance(error, (RuntimeError, PermissionError)) else '파일 크기·봇의 파일 첨부 권한·연결을 확인하고 다시 요청하세요.'
+                await destination.followup.send(discord.utils.escape_mentions('⚠️ 파일 첨부 실패: ' + detail[:1200]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 def main():

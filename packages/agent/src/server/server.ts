@@ -2,6 +2,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { networkInterfaces, hostname as osHostname, platform, homedir } from 'node:os';
 import { join as joinFilePath } from 'node:path';
 import { chatFileRoot } from './chat-file-access.js';
+import { readDiscordFile } from './discord-files.js';
 import type { AddressInfo } from 'node:net';
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type {
@@ -81,7 +82,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.13';
+export const VERSION = '0.4.14';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -710,6 +711,16 @@ export class AgentServer {
     },
     revoke: (id) => { this.discordLinkIds.delete(id); try { this.config.revokeDeviceLink(id); } finally { this.invalidateDeviceLink(id); } },
     permissionCeiling: () => this.config.settings.safety.mode === 'read-only' ? 'read-only' : 'full',
+    readChatFile: (id, path, offset, limit, version) => {
+      const conversation = this.conversations.get(id);
+      if (!conversation || this.config.settings.safety.mode === 'read-only') throw new Error('파일 접근 권한이 없습니다.');
+      const workspace = (this.workspacesList().find(w => w.id === conversation.workspaceId) ?? this.workspacesList().find(w => w.isDefault))?.path;
+      // The private Discord host calls this only after current scope full-access
+      // validation; the conversation's initial default can predate /robot access.
+      const root = chatFileRoot(path, conversation.messages, workspace, joinFilePath(homedir(), 'Downloads'), true);
+      if (!root) throw new Error('이 대화에서 확인된 작업 폴더 또는 Downloads 파일만 첨부할 수 있습니다. 인증정보 파일은 보낼 수 없습니다.');
+      return readDiscordFile(root, path, offset, limit, version);
+    },
     models: (providerId) => providerId
       ? this.providersModels(providerId).then(models => [...new Set(models)].filter(model => typeof model === 'string' && model.length <= 200).slice(0, 1000))
       : this.registry.list().map(provider => ({ providerId: provider.id, name: provider.label, model: provider.model, isDefault: provider.isDefault, supportedReasoning: provider.supportedReasoning })),

@@ -16,7 +16,7 @@ assert.equal(chatFileRoot(path, messages, undefined, root, true), root);
 assert.equal(chatFileRoot(path, [{ role: 'user', content: text }], undefined, root, true), undefined);
 assert.equal(chatFileRoot(path, [], root, root, true), undefined);
 assert.equal(chatFileRoot(path, messages, root, root, false), root);
-for (const suffix of ['../private.pdf', '.ssh/id_rsa', '.env', 'private.key', 'doc.pdf:secret', 'folder/../../outside.pdf']) {
+for (const suffix of ['../private.pdf', '.ssh/id_rsa', '.env', '.env.', '.ssh /id_rsa', '.azure/credential', '.npmrc', 'private.key.', 'private.key', 'doc.pdf:secret', 'folder/../../outside.pdf']) {
   const candidate = `${root}\\${suffix}`;
   assert.equal(chatFileRoot(candidate, [{ role: 'assistant', content: `[x](<${candidate}>)` }], undefined, root, true), undefined, suffix);
 }

@@ -14,6 +14,7 @@ const storage = new Map<string, unknown>();
 const events = new Map<string, Function>();
 const replies: any[] = [];
 let enabled = true;
+let fileReads = 0, readOnlyLock = false;
 let revoked = 0;
 const fake = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() { return true; } });
 fake.stdin.on('data', chunk => { for (const line of chunk.toString().trim().split('\n')) replies.push(JSON.parse(line)); });
@@ -38,7 +39,7 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
 const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra', 'unknown', 'sol'];
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => 'full' }, { spawn: (() => fake) as any });
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -120,6 +121,15 @@ try {
   assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog);
   emit({ ...identity, id: 'result', action: 'result' });
   await waitFor(() => replies.some(r => r.id === 'result')); assert.equal(replies.find(r => r.id === 'result').result.text, 'Test finished');
+  assert.equal((await request({ action: 'file.read', path: 'fixture', offset: 0, limit: 100 })).result.data, 'ZmlsZQ==');
+  assert.ok((await request({ action: 'file.read', userId: '999999999999999999', path: 'fixture', offset: 0, limit: 100 })).error);
+  assert.ok((await request({ action: 'file.read', guildAdmin: false, path: 'fixture', offset: 0, limit: 100 })).error);
+  readOnlyLock = true;
+  assert.ok((await request({ action: 'file.read', path: 'fixture', offset: 0, limit: 100 })).error);
+  readOnlyLock = false;
+  await request({ action: 'access', mode: 'workspace' });
+  assert.ok((await request({ action: 'file.read', path: 'fixture', offset: 0, limit: 100 })).error);
+  assert.equal(fileReads, 1, 'denied Discord identities/scopes never reach the filesystem');
   const setup = commands.get('discord.workspace.setup')!({ channelName: 'ai_talk' });
   assert.equal(setup.workspace.state, 'pending');
   assert.ok(replies.some(r => r.event === 'workspace.setup' && r.channelName === 'ai_talk'));

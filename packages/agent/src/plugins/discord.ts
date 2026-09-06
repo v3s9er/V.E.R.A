@@ -6,6 +6,7 @@ import { WebSocket } from 'ws';
 import type { MrRobotPlugin } from './loader.js';
 import type { PluginContext } from './context.js';
 import type { PermissionMode } from '@mr-robot/shared';
+import { chatFileLinks } from '@mr-robot/shared';
 import { DiscordSessions } from './discord-sessions.js';
 import { assertDiscordModelAllowed, discordModelAllowed, parseDiscordModelCeiling } from './discord-model-policy.js';
 
@@ -16,6 +17,7 @@ export interface DiscordHost {
   revoke(id: string): void;
   models(providerId?: string): unknown;
   permissionCeiling(): PermissionMode;
+  readChatFile?(conversationId: string, path: string, offset: number, limit: number, version?: string): unknown;
 }
 interface Settings { botDirectory: string; pythonPath: string; autoStart: boolean; mode: 'standalone' | 'legacy' }
 const defaults: Settings = { botDirectory: '', pythonPath: '', autoStart: false, mode: 'standalone' };
@@ -126,6 +128,12 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     }
     const permissions = ctx.storage.get<Record<string, PermissionMode>>('permissions') ?? {};
     const permission = permissions[channel] ?? 'ask';
+    if (message.action === 'file.read') {
+      if (permission !== 'full' || host.permissionCeiling() !== 'full') throw new Error('Discord로 PC 파일을 보내려면 서버 관리자가 이 대화의 PC 접근 권한을 전체 허용으로 설정해야 합니다.');
+      const conversationId = ctx.storage.get<Record<string, string>>('conversations')?.[channel];
+      if (!conversationId || !host.readChatFile) throw new Error('이 대화에서 먼저 파일을 찾아 달라고 요청하세요.');
+      return host.readChatFile(conversationId, String(message.path ?? ''), Number(message.offset), Number(message.limit), typeof message.version === 'string' ? message.version : undefined);
+    }
     const preferences = ctx.storage.get<Record<string, { providerId?: string; model?: string; effort?: string }>>('preferences') ?? {};
     const preference = preferences[channel] ?? {};
     if (message.action === 'settings') {
@@ -146,7 +154,14 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       // Keep providers discoverable even when their configured default is above the cap.
       return catalog.map(provider => ({ ...provider, model: discordModelAllowed(modelCeiling, provider.model) ? provider.model : '', modelCeiling }));
     }
-    if (message.action === 'result') return results.get(channel) ?? { message: '아직 완료된 결과가 없습니다. /robot status로 실행 상태를 확인하세요.' };
+    if (message.action === 'result') {
+      if (results.has(channel)) return results.get(channel);
+      if (busy && activeChannel === channel) return { message: '아직 작업 중입니다. 완료되면 요청한 메시지에 답변을 표시합니다.' };
+      const id = ctx.storage.get<Record<string, string>>('conversations')?.[channel];
+      const saved = id ? await rpc('conversations.get', { id }) : null;
+      const last = Array.isArray(saved?.messages) ? [...saved.messages].reverse().find(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) : undefined;
+      return { message: last ? `마지막 저장된 답변입니다.\n\n${last.content.slice(0, 150_000)}` : '아직 저장된 답변이 없습니다. 이 채널에 작업을 입력해 주세요.' };
+    }
     if (message.action === 'status') return { ready, busy: busy && channel === activeChannel, preference, permission, modelCeiling, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `권한: ${permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'} · 토큰 제한 없음. PC 읽기 전용 잠금: ${host.permissionCeiling() === 'read-only' ? '켜짐' : '꺼짐'}` };
     if (message.action === 'access') {
       if (message.guildAdmin !== true) throw new Error('PC 접근 권한 변경은 서버 관리자만 할 수 있습니다.');
@@ -175,6 +190,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     }
     if (message.action !== 'ask' || typeof message.text !== 'string' || !message.text.trim() || message.text.length > 6000) throw new Error('명령은 1~6000자로 입력하세요.');
     const commandGeneration = generation;
+    results.delete(channel);
     busy = true; activeChannel = channel;
     try {
       let providerId = message.providerId || preference.providerId;
@@ -203,12 +219,15 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         ...(model ? { providerModel: model } : {}),
         reasoningEffort: ['auto', 'low', 'medium', 'high'].includes(message.effort) ? message.effort : preference.effort || 'auto',
       }, 0);
+      const outcome = { ok: result?.ok !== false, text: typeof result?.text === 'string' ? result.text.slice(0, 150_000) : '', ...(result?.error ? { error: String(result.error).slice(0, 1500) } : {}) };
+      const files = outcome.ok && outcome.text ? chatFileLinks(outcome.text).slice(0, 3) : [];
       if (commandGeneration === generation) {
-        results.delete(channel); results.set(channel, { text: String(result?.text ?? result?.error ?? '완료').slice(0, 150_000) });
+        results.delete(channel); results.set(channel, { ...outcome, files });
         if (results.size > 32) results.delete(results.keys().next().value!);
       }
-      return result;
+      return { ...outcome, files };
     } catch (error) {
+      if (commandGeneration === generation) results.set(channel, { ok: false, error: error instanceof Error ? error.message : '작업 전달에 실패했습니다.' });
       if (commandGeneration === generation && activeConversation) await rpc('chat.cancel', { conversationId: activeConversation }).catch(() => {});
       throw error;
     } finally { if (commandGeneration === generation) { busy = false; approval = undefined; activeChannel = ''; activeConversation = ''; } }
@@ -302,7 +321,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     finally { starting = false; }
   }
   return {
-    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.4.1', kind: 'integration', enabledByDefault: false,
+    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.4.2', kind: 'integration', enabledByDefault: false,
       description: '등록 서버 관리자 전용 /robot. 권한 선택, 누적 토큰 제한 없는 실행, 승인·중지 지원.', permissions: ['network.client'] },
     activate(context) {
       ctx = context;

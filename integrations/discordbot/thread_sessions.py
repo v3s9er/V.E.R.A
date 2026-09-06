@@ -262,6 +262,13 @@ class MessageContext:
 
     async def send(self, content=None, **kwargs):
         kwargs.pop('ephemeral', None)
+        message = getattr(self, 'result_message', None)
+        if message is not None and not any(key in kwargs for key in ('file', 'files', 'view')):
+            self.result_message = None
+            try:
+                return await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+            except discord.NotFound:
+                pass  # Deleted receipt: publish a new result in the same channel.
         if self.manager and 'view' not in kwargs:
             return await self.manager.send_controls(self.channel, content, **kwargs)
         return await self.channel.send(content, **kwargs)
@@ -429,7 +436,7 @@ class ThreadManager:
                 await thread.add_user(interaction.user)
                 await self.bridge.request(interaction, 'thread.register', threadId=str(thread.id), name=name)
                 registered = True
-                await self.send_controls(thread, '여기에 작업을 입력하세요. 제어 메뉴는 새 응답 아래로 따라옵니다.\n작업 중 추가 메시지는 순서대로 대기합니다. /robot controls로 메뉴를 다시 꺼낼 수 있습니다. 파일 첨부는 아직 지원하지 않습니다.')
+                await self.send_controls(thread, '여기에 작업을 입력하세요. 제어 메뉴는 새 응답 아래로 따라옵니다.\n작업 중 추가 메시지는 순서대로 대기합니다. /robot controls로 메뉴를 다시 꺼낼 수 있습니다. 전체 PC 권한에서 “PC 파일을 여기 올려줘”라고 요청하면 첨부로 받을 수 있습니다. Discord에서 PC로 올리는 첨부 입력은 아직 지원하지 않습니다.')
             except Exception:
                 if not registered:
                     await thread.delete(reason='Roll back incomplete Mr.Robot session')
@@ -560,9 +567,9 @@ class ThreadManager:
                     continue
                 await self.bridge.authorize(context)
                 await status.edit(content='작업 중 · 최근 메시지 아래의 [작업 중지] 버튼을 누르세요.')
+                context.result_message = status
                 async with context.channel.typing():
                     await self.bridge.execute(context, 'ask', text=text)
-                await status.edit(content='처리 종료 · 결과 또는 오류 안내를 확인하세요.')
             except Exception:
                 try:
                     await status.edit(content='작업 전달 실패 · 연결 및 권한을 확인하세요.')
