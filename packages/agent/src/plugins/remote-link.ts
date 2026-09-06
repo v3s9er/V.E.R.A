@@ -638,6 +638,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
   let executableTrustDiagnostic = '';
   let reachable: boolean | undefined;
   let accessProtected: boolean | undefined;
+  let toolPortalProtected = false;
   let verifiedAt: number | undefined;
   // The saved provider configuration and the process currently serving traffic
   // are deliberately separate. A temporary Quick Tunnel must never overwrite a
@@ -728,7 +729,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
     portalOriginAllowed(url): boolean {
       const running = Boolean(processHandle && processHandle.exitCode === null && !processHandle.killed);
       if (!activeContext || !running || activeConfig?.provider !== 'cloudflare-named'
-        || !publicUrl || reachable !== true || accessProtected !== true
+        || !publicUrl || reachable !== true || accessProtected !== true || !toolPortalProtected
         || !remoteLinkPortalVerificationFresh(verifiedAt)) return false;
       if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')
         || url.pathname !== '/' || url.search || url.hash) return false;
@@ -752,7 +753,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
     manifest: {
       id: PLUGIN_ID,
       name: 'Cloudflare Remote Link',
-      version: '0.4.0',
+      version: '0.4.1',
       kind: 'transport',
       enabledByDefault: false,
       description: 'VPN 없이 임시 Quick Link 또는 사용자 도메인의 고정 HTTPS/WSS Tunnel을 연결합니다.',
@@ -813,10 +814,11 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           beta: temporary,
           reachable: running ? reachable : undefined,
           accessProtected: running && activeProvider === 'cloudflare-named' ? accessProtected : undefined,
+          toolPortalProtected: running && activeProvider === 'cloudflare-named' ? toolPortalProtected : undefined,
           verifiedAt: running ? verifiedAt : undefined,
           warning: temporary
             ? 'Quick Tunnel은 테스트·개발용 임시 주소이며 재시작하면 주소가 바뀝니다. trycloudflare.com 경로에는 사용자 도메인의 Cloudflare WAF·레이트리밋 규칙이 적용되지 않습니다.'
-            : '고정 Tunnel은 주소가 유지되지만 PC, Mr.Robot, cloudflared가 실행 중이어야 접속할 수 있습니다.',
+            : '고정 Tunnel은 주소가 유지되지만 PC, Mr.Robot, cloudflared가 실행 중이어야 접속할 수 있습니다.' + (reachable && !toolPortalProtected ? ' 도구 포털은 외부 차단 상태이며 원격 포털 접근도 허용하지 않습니다. 대화·파일 연결은 별도로 검증합니다.' : ''),
           lastError,
           diagnostics: [executableTrustDiagnostic, diagnostics].filter(Boolean).join('\n') || undefined,
           providers: providerInventory(executable, executableTrustDiagnostic),
@@ -874,6 +876,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         startedAt = undefined;
         reachable = undefined;
         accessProtected = undefined;
+        toolPortalProtected = false;
         verifiedAt = undefined;
         pending?.cancel(new Error('Cloudflare 원격 링크 시작이 취소되었습니다.'));
         if (active) {
@@ -944,6 +947,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         startedAt = undefined;
         reachable = undefined;
         accessProtected = undefined;
+        toolPortalProtected = false;
         verifiedAt = undefined;
 
         const stored = ctx.storage.get<StoredRemoteLinkConfig>('config');
@@ -1100,6 +1104,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             startedAt = undefined;
             reachable = undefined;
             accessProtected = undefined;
+            toolPortalProtected = false;
             verifiedAt = undefined;
             if (code && code !== 0) lastError = `cloudflared가 종료되었습니다. (code=${code})`;
             emitStatus();
@@ -1137,6 +1142,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             && latest.publicUrl === current.publicUrl;
         };
         const checkedAt = Date.now();
+        let verifiedPortal = false;
         try {
           const access = current.provider === 'cloudflare-named' ? accessCredentials(ctx) : undefined;
           if (current.provider === 'cloudflare-named') {
@@ -1205,12 +1211,20 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
                 'CF-Access-Client-Secret': access.clientSecret,
               },
             });
-            const authenticatedPortalBody = await readSmallJson(authenticatedPortal);
-            if (authenticatedPortal.status !== 503
+            // A deliberately WAF-blocked optional portal must not tear down the
+            // separately authenticated mobile/chat tunnel. Keep portal admission
+            // disabled unless its exact authenticated origin marker is proven.
+            if (authenticatedPortal.status === 403) {
+              await authenticatedPortal.body?.cancel().catch(() => undefined);
+            } else {
+              const authenticatedPortalBody = await readSmallJson(authenticatedPortal);
+              if (authenticatedPortal.status !== 503
               || authenticatedPortalBody.app !== 'mr-robot'
               || authenticatedPortalBody.code !== TOOL_PORTAL_ACCESS_PROBE_CODE
               || !/(?:^|,)\s*no-store(?:\s*(?:,|$))/i.test(authenticatedPortal.headers.get('cache-control') ?? '')) {
-              throw new Error(`Access 인증 후 도구 포털 세션 경로가 정확한 Mr.Robot Agent marker를 반환하지 않았습니다. (HTTP ${authenticatedPortal.status})`);
+                throw new Error(`Access 인증 후 도구 포털 세션 경로가 정확한 Mr.Robot Agent marker를 반환하지 않았습니다. (HTTP ${authenticatedPortal.status})`);
+              }
+              verifiedPortal = true;
             }
 
             // Hostname-level Access should cover every path, but a mistaken
@@ -1322,6 +1336,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           if (!targetStillCurrent()) throw new Error('검사 중 원격 링크가 변경되어 이전 검사 결과를 폐기했습니다.');
           reachable = true;
           accessProtected = current.provider === 'cloudflare-named' ? true : undefined;
+          toolPortalProtected = verifiedPortal;
           verifiedAt = checkedAt;
           lastError = undefined;
           emitStatus();
@@ -1338,6 +1353,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             throw new Error(`검사 중 원격 링크가 변경되어 이전 검사 결과를 폐기했습니다. (${error instanceof Error ? error.message : String(error)})`);
           }
           reachable = false;
+          toolPortalProtected = false;
           if (current.provider === 'cloudflare-named') accessProtected = false;
           verifiedAt = checkedAt;
           lastError = `외부 주소 확인 실패: ${error instanceof Error ? error.message : String(error)}`;
@@ -1540,6 +1556,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
         diagnostics = '';
         reachable = undefined;
         accessProtected = undefined;
+        toolPortalProtected = false;
         verifiedAt = undefined;
         clearAccessReverify();
         // Drop any plaintext credential reference immediately on replace or

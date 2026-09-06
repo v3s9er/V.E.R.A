@@ -144,6 +144,11 @@ check('file APIs use the shared exact-origin authenticated header builder', file
   && secureFiles.includes('pcAuthenticatedHeaders(pc, url,')
   && secureFiles.includes("delete headers['x-mr-robot-token']"));
 check('chat attachment upload uses the encrypted shared client', chat.includes('await uploadSecureFile(pc,'));
+check('legacy edge compatibility marker replaces the bearer without exposing it',
+  secureFiles.includes("headers['x-mr-robot-token'] = 'mr-robot-encrypted-file-v1'")
+  && secureFiles.indexOf("delete headers['x-mr-robot-token']") < secureFiles.indexOf("headers['x-mr-robot-token'] = 'mr-robot-encrypted-file-v1'")
+  && secureFiles.includes('secret: pc.secret')
+  && secureFiles.includes("gcm(key, nonce, aad(stored.id, 'request')).encrypt"));
 check('mobile screens contain no remaining direct bearer-only header literal', !files.includes("headers: { 'x-mr-robot-token'")
   && !chat.includes("headers: { 'content-type': file.mimeType")
   && !pcList.includes("headers: { 'x-mr-robot-token'"));

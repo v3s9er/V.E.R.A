@@ -3,6 +3,16 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
 def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
+// Separate credential-free native UI audit app. Never allow a test release.
+def mrRobotUiTest = findProperty('mrRobotUiTest') == 'true'
+if (mrRobotUiTest && gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }) {
+    throw new GradleException('Native UI fixtures are debug-only; refusing a release build')
+}
+gradle.taskGraph.whenReady { graph ->
+    if (mrRobotUiTest && graph.allTasks.any { it.project == project && it.name.toLowerCase().contains('release') }) {
+        throw new GradleException('Native UI fixtures must never be included in any release task graph')
+    }
+}
 
 /**
  * This is the configuration block to customize your React Native Android app.
@@ -19,6 +29,10 @@ react {
     // works correctly with Expo projects.
     cliFile = new File(["node", "--print", "require.resolve('@expo/cli', { paths: [require.resolve('expo/package.json')] })"].execute(null, rootDir).text.trim())
     bundleCommand = "export:embed"
+    if (mrRobotUiTest) {
+        entryFile = file('../../test/native-ui/index.tsx')
+        debuggableVariants = []
+    }
 
     /* Folders */
      //   The root of your project, i.e. where "package.json" lives. Default is '../..'
@@ -97,8 +111,9 @@ android {
         applicationId 'com.mrrobot.mobile'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 19
-        versionName "0.4.11"
+        versionCode 20
+        versionName "0.4.12"
+        testInstrumentationRunner 'com.mrrobot.mobile.KeyboardAudit'
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -127,6 +142,11 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            if (mrRobotUiTest) {
+                applicationIdSuffix '.uitest'
+                // An embedded test bundle must not wait for a Metro server.
+                debuggable false
+            }
         }
         release {
             // Never publish a debug-signed APK. scripts/build-mobile-release.ps1

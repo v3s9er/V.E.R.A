@@ -25,6 +25,8 @@ await new Promise<void>(resolve => server.once('listening', resolve));
 const base = `http://127.0.0.1:${(server.address() as any).port}`;
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 try {
+ assert.equal((await post('/api/secure-files/channel', {}, { 'x-mr-robot-token': 'mr-robot-encrypted-file-v1' })).status, 403, 'public edge marker cannot authenticate a file request');
+ assert.equal((await fetch(base + '/api/settings', { headers: { 'x-mr-robot-token': 'mr-robot-encrypted-file-v1' } })).status, 401, 'public edge marker cannot authenticate ordinary APIs');
  assert.equal((await post('/api/secure-files/invite', {})).status, 403);
  assert.equal((await post('/api/secure-files/invite', {}, { 'x-mr-robot-token': 'fixture-admin', 'cf-ray': 'fake' })).status, 403);
  const inviteResponse = await post('/api/secure-files/invite', {}, { 'x-mr-robot-token': 'fixture-admin' });
@@ -32,7 +34,7 @@ try {
  const invite = await inviteResponse.json() as any;
  let session: string | undefined;
  const request = (op: Record<string, unknown>) => sealFilePacket(invite.id, invite.key, { ...op, session, secret: 'fixture-device', requestId: randomBytes(16).toString('hex'), time: Date.now() }, 'request');
- const enroll = await post('/api/secure-files/channel', request({ op: 'enroll' }));
+ const enroll = await post('/api/secure-files/channel', request({ op: 'enroll' }), { 'x-mr-robot-token': 'mr-robot-encrypted-file-v1' });
  assert.equal(enroll.status, 200);
  session = openFilePacket(await enroll.json() as any, invite.key, 'response').result.session;
  writeFileSync(join(directory, 'shared', 'fixture.txt'), 'file body must not appear on the wire');

@@ -538,6 +538,8 @@ export interface RemoteLinkStatus {
   reachable?: boolean;
   /** True only after an anonymous probe is denied and a service-token probe succeeds. */
   accessProtected?: boolean;
+  /** Optional portal is denied unless its separate authenticated marker succeeds. */
+  toolPortalProtected?: boolean;
   verifiedAt?: number;
   warning: string;
   lastError?: string;

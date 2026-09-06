@@ -53,7 +53,7 @@ check('composer measures real keyboard occlusion and lifts only by the uncovered
   && chat.includes('disableFullscreenUI')
   && chat.includes("Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'"));
 check('conversation access and reasoning controls stay in the composer and use dropdown modals',
-  chat.includes('style={styles.composerToolbar}')
+  chat.includes('styles.composerToolbar, shortKeyboardViewport')
   && chat.includes('accessibilityLabel={`대화 액세스 실제 적용 ${permissionLabel}')
   && chat.includes('accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}')
   && chat.includes('<Modal visible={showReasoning}')
@@ -68,7 +68,9 @@ check('mobile auth retains the server authority ceiling and the access picker ca
   && chat.includes('updated.permissionMode !== permissionMode')
   && chat.includes('PC 앱의 원격 PC 관리'));
 check('busy steering and stop actions occupy their own responsive row',
-  chat.includes('{busy && <View style={styles.busyActions}>')
+  chat.includes('const busyControls = busy ?')
+  && chat.includes('{shortKeyboardViewport && busyControls}')
+  && chat.includes('{!shortKeyboardViewport && busyControls}')
   && chat.includes('busyActionBtn: { flex: 1 }'));
 check('an exact failed retry replaces only the failed tail while a start-dispatch ref blocks fast duplicate taps',
   chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] =>')

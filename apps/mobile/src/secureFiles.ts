@@ -24,6 +24,10 @@ export async function secureFileCall(pc: SavedPc, operation: Record<string, unkn
   const headers = pcAuthenticatedHeaders(pc, url, { 'content-type': 'application/json' });
   // PC bearer is inside the encrypted packet, not exposed to the relay in a header.
   delete headers['x-mr-robot-token'];
+  // Compatibility with legacy edge rules that check header presence only.
+  // This public protocol marker is NOT a credential; origin authentication
+  // still requires the device bearer and optical key inside the AEAD packet.
+  headers['x-mr-robot-token'] = 'mr-robot-encrypted-file-v1';
   const controller = new AbortController();
   const cancel = () => controller.abort();
   signal?.addEventListener('abort', cancel, { once: true });

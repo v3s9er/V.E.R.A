@@ -90,6 +90,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const insets = useSafeAreaInsets();
   const { width, height, fontScale } = useWindowDimensions();
   const compact = width < 390 || fontScale > 1.25;
+  const shortKeyboardViewport = keyboardVisible && width > height;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<UiMsg[]>([]);
@@ -179,7 +180,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         // cannot make the correction oscillate between zero and the overlap.
         const unliftedBottom = y + composerHeight + composerKeyboardLiftRef.current;
         const overlap = unliftedBottom - keyboardTopRef.current + 6;
-        const maximumSafeLift = Math.max(0, height - 160);
+        const maximumSafeLift = Math.max(0, height);
         applyComposerKeyboardLift(Math.min(maximumSafeLift, Math.max(0, overlap)));
         if (stickToBottom.current) listRef.current?.scrollToEnd({ animated: false });
       });
@@ -870,15 +871,26 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     </>
   );
 
+  const busyControls = busy ? (
+    <View style={[styles.busyActions, shortKeyboardViewport && { width: 300, flexShrink: 0 }]}>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
+        <Text style={styles.sendText} numberOfLines={shortKeyboardViewport ? 1 : undefined}>{shortKeyboardViewport ? '추가 명령' : '추가 명령 끼워넣기'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}>
+        <Text style={styles.sendText} numberOfLines={shortKeyboardViewport ? 1 : undefined}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text>
+      </TouchableOpacity>
+    </View>
+  ) : null;
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
-      <View style={styles.chatHeader}>
+      {!shortKeyboardViewport && <View style={styles.chatHeader}>
         <TouchableOpacity style={styles.chatHeading} accessibilityRole="button" accessibilityLabel="대화 목록과 추가 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}>
           <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversation?.title || '새 대화'} ⌄</Text>
           {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
         </TouchableOpacity>
         <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="새 대화" disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.toolBtnText}>＋</Text></TouchableOpacity>
-      </View>
+      </View>}
       {loadError ? <View style={styles.loadError} accessibilityLiveRegion="assertive"><View style={styles.loadErrorCopy}><Text style={styles.loadErrorTitle}>대화 정보를 불러오지 못했습니다</Text><Text style={styles.loadErrorText} numberOfLines={2}>{loadError}</Text></View><TouchableOpacity style={styles.loadRetryBtn} onPress={() => void refreshInitialData()} accessibilityRole="button" accessibilityLabel="대화 다시 불러오기"><Text style={styles.loadRetryText}>재시도</Text></TouchableOpacity></View> : null}
       <FlatList
         ref={listRef}
@@ -926,7 +938,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       />
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
-      {busy && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
+      {busy && !shortKeyboardViewport && activeRun?.status ? <View style={styles.runStatus}><ActivityIndicator color={colors.accent2} size="small" /><Text style={styles.runStatusText}>{activeRun.status}{activeRun.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text></View> : null}
       <View
         ref={composerRef}
         onLayout={() => { if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 80]); }}
@@ -934,7 +946,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       >
         <View style={styles.composerCard}>
           <TextInput
-            style={styles.input}
+            style={[styles.input, shortKeyboardViewport && { maxHeight: Math.max(44, 26 * fontScale + 14) }]}
             value={input}
             onChangeText={setInput}
             placeholder={busy ? '실행 중인 작업에 추가 명령…' : 'PC에 시킬 일을 입력하세요…'}
@@ -947,7 +959,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             onFocus={() => scheduleComposerKeyboardSync([0, 90, 240])}
             onContentSizeChange={() => scheduleComposerKeyboardSync([0, 80])}
           />
-          <View style={styles.composerToolbar}>
+          <View style={shortKeyboardViewport ? styles.composerCompactControls : undefined}>
+          <View style={[styles.composerToolbar, shortKeyboardViewport && { flex: 1 }]}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="입력창 모델 선택" style={[styles.composerSelectBtn, styles.composerModelBtn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
               <Text style={styles.composerSelectText} numberOfLines={1}>{conversation?.routingPresetId ? '복합 트리' : conversation?.providerModel || providers.find(p => p.id === conversation?.providerId)?.model || '모델 선택'} ⌄</Text>
             </TouchableOpacity>
@@ -974,18 +987,20 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               <Text style={styles.composerSelectText} numberOfLines={1}>{savingReasoning ? '저장 중…' : `추론 ${selectedReasoningEffort}⌄`}</Text>
             </TouchableOpacity>
           </View>
-          <View style={styles.composerActionRow}>
+          <View style={[styles.composerActionRow, shortKeyboardViewport && { flexShrink: 0 }]}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
             <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
-            <View style={styles.composerToolbarSpacer} />
+            {!shortKeyboardViewport && <View style={styles.composerToolbarSpacer} />}
             {!busy && (
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
                 <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
               </TouchableOpacity>
             )}
           </View>
+          {shortKeyboardViewport && busyControls}
+          </View>
         </View>
-        {busy && <View style={styles.busyActions}><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}><Text style={styles.sendText}>추가 명령 끼워넣기</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.busyActionBtn, styles.cancelBtn, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}><Text style={styles.sendText}>{activeRun?.cancelling ? '중지 중…' : '작업 중지'}</Text></TouchableOpacity></View>}
+        {!shortKeyboardViewport && busyControls}
         {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
 
@@ -1233,6 +1248,7 @@ const styles = StyleSheet.create({
   inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
   composerCard: { borderWidth: 1, borderColor: colors.border, borderRadius: 22, backgroundColor: colors.inputBg, padding: 8, gap: 2 },
   composerToolbar: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  composerCompactControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   chatHeader: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   chatHeading: { flex: 1, minWidth: 0 },
   chatHeadingTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },

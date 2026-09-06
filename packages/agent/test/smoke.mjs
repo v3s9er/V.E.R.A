@@ -339,6 +339,7 @@ let verifyRequestHeaders = {};
 let anonymousProbeCount = 0;
 let exposeAgentWithoutAccess = false;
 let exposeTicketWithoutAccess = false;
+let blockOptionalPortal = false;
 let namedBootstrapEvent;
 let legacyPurposeDecrypts = 0;
 let remotePurposeDecrypts = 0;
@@ -376,6 +377,7 @@ const namedPlugin = createRemoteLinkPlugin({
         return new Response('Access denied', { status: 403 });
       }
       verifyRequestHeaders = headers;
+      if (blockOptionalPortal) return new Response('WAF blocked optional portal', { status: 403 });
       return toolPortalAccessProbeResponse();
     }
     if (url.pathname === '/api/pair' && JSON.parse(String(options?.body ?? '{}')).probe === CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE) {
@@ -517,6 +519,13 @@ check('named tunnel uses local in-memory credentials instead of a remotely-manag
   && !spawnedArgs.includes('--token')
   && spawnedArgs.includes(namedTunnelId));
 const fullyMigratedConfig = namedStorage.get('config');
+blockOptionalPortal = true;
+await namedCommands.get('remote-link.verify')({});
+check('blocked optional portal does not stop authenticated mobile transport', namedCommands.get('remote-link.status')({}).running && namedCommands.get('remote-link.status')({}).accessProtected === true);
+check('blocked portal cannot inherit transport Access admission', namedCommands.get('remote-link.status')({}).toolPortalProtected === false && !namedPlugin.portalOriginAllowed(new URL('https://pc1.example.com')));
+blockOptionalPortal = false;
+await namedCommands.get('remote-link.verify')({});
+check('optional portal requires its own exact origin proof before admission', namedCommands.get('remote-link.status')({}).toolPortalProtected === true && namedPlugin.portalOriginAllowed(new URL('https://pc1.example.com')));
 check('legacy Tunnel ciphertext migrates independently before process launch and fallback is one-time',
   fullyMigratedConfig.tunnelTokenProtected === `protected:${namedToken}`
   && fullyMigratedConfig.tunnelTokenPurpose === 'remote-link-v1'
@@ -622,8 +631,8 @@ const pairLeakPlugin = createRemoteLinkPlugin({
     const hasAccess = Boolean(headers['CF-Access-Client-Id'] && headers['CF-Access-Client-Secret']);
     if (url.pathname === '/api/tool-portal/session'
       && headers[TOOL_PORTAL_ACCESS_PROBE_HEADER] === TOOL_PORTAL_ACCESS_PROBE_CODE) {
-      if (!hasAccess) return new Response('Access denied', { status: 403 });
-      return toolPortalAccessProbeResponse();
+      // An independently blocked optional portal must NOT hide an exposed pair path.
+      return new Response('Portal blocked', { status: 403 });
     }
     if (url.pathname === '/api/ws-ticket') {
       if (!hasAccess) return new Response('Access denied', { status: 403 });

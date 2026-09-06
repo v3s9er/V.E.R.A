@@ -216,7 +216,7 @@ if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"')
   || !mobileChat.includes('onLayout={() => { if (stickToBottom.current)')
   || !mobileChat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
 if (!mobileManifest.includes('android:usesCleartextTraffic="false"') || !mobileAppConfig.includes('"usesCleartextTraffic": false')) throw new Error('Android release can regress to sending device credentials over cleartext HTTP');
-if (!mobileChat.includes('accessibilityLabel="입력창 모델 선택"') || !mobileChat.includes('style={styles.composerToolbar}') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
+if (!mobileChat.includes('accessibilityLabel="입력창 모델 선택"') || !mobileChat.includes('styles.composerToolbar, shortKeyboardViewport') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
 if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
   || !mobileChat.includes('provider?.supportedReasoning')
@@ -225,7 +225,7 @@ const mobileInputBar = mobileChat.indexOf('ref={composerRef}');
 const mobileReasoningControl = mobileChat.indexOf('accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}');
 const mobileReasoningModal = mobileChat.indexOf('<Modal visible={showReasoning}');
 if (mobileInputBar < 0 || mobileReasoningControl < mobileInputBar || mobileReasoningModal < mobileReasoningControl
-  || !mobileChat.includes('style={styles.composerToolbar}')
+  || !mobileChat.includes('styles.composerToolbar, shortKeyboardViewport')
   || mobileChat.includes('cycleEffort')) throw new Error('mobile reasoning control is not a compact explicit selector at the keyboard-safe composer bottom');
 if (!mobileChat.includes("client.call('conversations.update', { id: conversationId, reasoningEffort })")
   || !mobileChat.includes('const reasoningLocked = !conversation || busy || savingConfiguration')
