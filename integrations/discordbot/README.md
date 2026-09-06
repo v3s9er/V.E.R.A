@@ -85,7 +85,7 @@ errors never silently upgrade or rewrite a user's chosen model.
 Both `/robot access` and `/robot model-limit` require live server Administrator
 membership; UI visibility alone is insufficient. Full PC access still needs
 explicit confirmation and cannot override the PC's global read-only lock.
-The existing administrator-only bot usage policy is unchanged. Administrators
+Since 0.4.15, allow_ai members may use isolated tickets. Administrators
 may edit their own limits. This is not a spend-security boundary against a user
 already authorized to run arbitrary PC commands or against model selection
 inside a third-party native CLI/plugin; those programs remain separate trust
@@ -101,8 +101,8 @@ not arbitrary URLs. No PC credentials or provider keys reach Discord/Python.
 Access changes still require the existing checks and full-access confirmation.
 Stopping cancels a run; it is not pause/resume.
 
-- Only administrators of the locally registered Discord server are accepted.
-  Live server membership and Administrator roles are checked on every request;
+- Only administrators or allow_ai members of the locally registered Discord server are accepted.
+  Live server membership, allow_ai roles and Administrator roles are checked on every request;
   application ownership alone and Manage Guild do not grant access. DMs fail closed.
 - No public listener, router port or tunnel. Standalone reserves the old bot's
   loopback-only single-instance port (47823); it closes incoming probes without
@@ -144,6 +144,94 @@ it to ticket requesters. The role is checked live before opening the form,
 creating a private thread, and registering it with the PC host. Missing, renamed
 or removed roles deny new tickets, including for server owners/administrators.
 The plugin never creates or grants this role automatically. Existing tickets are
-not deleted when the role is removed. Existing Administrator-only bot usage and
-PC access/model-policy management remain unchanged: `allow_ai` is an additional
-ticket condition, not permission to control a PC or a bypass for ordinary members.
+not deleted when the role is removed. Ordinary members with this role can use
+isolated tickets; it does not grant PC access or permission-policy management.
+
+### Separated user authority (0.4.15)
+
+- `/robot user-access user:@member mode:isolated`: default for ordinary members.
+- `mode:search`: public internet tools only, no artifact read/write or execution.
+- `mode:blocked`: deny all AI use. `mode:default` removes the per-user override.
+- `mode:full confirm_full:True`: explicitly delegate the PC's full agent authority.
+  This is a **trusted operator grant**, not sandboxed access. Grant only to people
+  trusted with the PC and its data. Administrator defaults to full. An explicit
+  per-user restriction overrides the default, including an administrator's.
+- All policy commands require live Administrator permission in Python and the
+  host. `model-limit` continues to apply per user across all server tickets.
+- Existing full-access conversation histories and cached replies are never
+  reused in isolated mode. No PC default workspace, long-term memory, native CLI tools,
+  Computer API, generic plugins, MCP, screen or host shell is supplied to it.
+- Since 0.4.16, isolated users share the owner's registered providers and default
+  model, including Codex/Claude subscriptions. Existing per-user model ceilings
+  still apply. Provider access and computer authority are separate policies.
+  Codex uses app-server with `environments: []` at both thread and turn boundaries,
+  no discovered instructions and no native tools. Claude uses safe mode, no native
+  tools and an empty strict MCP configuration in a fresh scratch directory.
+  Only structured requests to the separate capability broker are executed.
+  Unsupported CLI versions or missing owner login fail closed; there is no
+  fallback to native PC execution or billable API-key authentication.
+- Public HTTP(S) text only: DNS address pinning, private/reserved IP rejection,
+  redirect revalidation, no cookies/authentication, standard ports and byte limits.
+- Results are newly created files beneath a separate hashed ticket directory.
+  Transfers cannot request arbitrary PC files or another ticket's results. The
+  general limit is 1 MiB per artifact, 24 files/8 MiB per ticket. Output is not
+  executed on the host. Downloads are **Discord-hosted attachments, not E2EE**.
+- Optional Python standard-library computation requires Docker and the owner-
+  installed `python:3.12-slim` image. No image pull is triggered by a user request.
+  A fixed non-root, read-only, offline container has no host mounts/socket/secrets,
+  drops all capabilities, prevents privilege gain and limits CPU/RAM/PIDs/time.
+  Docker unavailable means denial, never fallback to host shell execution.
+  Containers are defense in depth, not a guarantee against every kernel exploit.
+- The ticket panel grants channel visibility to the existing exact allow_ai role
+  during `/robot bind` or PC workspace setup. It never assigns roles to users.
+
+Docker security reference: https://docs.docker.com/engine/security/
+
+### Incoming attachments (0.4.17)
+
+Post files with a message in your own ticket, post files alone for a summary, or
+use the optional `file` argument of `/robot ask`. All extensions are accepted;
+intake is not a promise that every proprietary/binary format can be decoded.
+Limits: 25 MiB/file, 50 MiB/request, 10 files/request, 48,000 extracted characters.
+PDF (up to 100 pages), DOCX, XLSX, PPTX, HWP/HWPX, ODF, XLS, RTF, encoded text and
+ZIP contents have data-only readers. Images use local Windows OCR; scanned PDFs
+attempt OCR on up to three pages. OCR may misread text and is not visual reasoning.
+Legacy/proprietary binaries, audio/video, encrypted or malformed input fall back
+to explicit unreadable/partial metadata, never a fabricated content summary.
+
+Downloads are pinned to the Discord attachment CDN and the current channel/file
+identity; redirects and arbitrary URLs are rejected. Parsing uses a fresh temp
+directory, a credential-stripped subprocess, memory/CPU/wall-time bounds and no
+macro execution, shell commands from documents or archive extraction to paths.
+Temporary originals are deleted after extraction. Only bounded excerpts and
+integrity metadata enter this owner's existing conversation/model. The original
+file is not persisted for later binary editing. Large/truncated documents should
+be split or relevant pages reattached. These are resource-limited parsers, not an
+OS security sandbox or an E2EE guarantee; Discord retains its own attachments.
+
+Install the pinned optional parsers with the plugin's Python runtime:
+`python -m pip install -r integrations/discordbot/requirements.txt`.
+Dependencies are upstream packages, not copied parser implementations: pypdf
+(BSD-3-Clause), Pillow (MIT-CMU), xlrd (BSD), striprtf (BSD), olefile (BSD).
+Windows OCR uses the installed Windows language capabilities and no paid API.
+
+### Scheduling and recovery (0.4.18)
+
+Normal ticket messages queue without interrupting an active job. Use **지시 추가**
+or `/robot steer message:...` to amend it at the next safe step, and **작업 중지**
+to cancel that ticket's current and queued work. Independent isolated users get
+up to two concurrent slots; a user cannot monopolize both. Direct full-PC jobs
+run alone relative to other Discord jobs. Existing allow_ai/admin and per-user
+model/access policies remain authoritative and are rechecked during execution.
+
+Gateway resume restores readiness. Pending messages wait for reconnection;
+already-running jobs are not replayed automatically. Progress is edited in the
+receipt and replaced by the final answer. Long replies include a full TXT after
+up to four preview messages. These controls do not require ephemeral response
+tokens that expire during a long job.
+
+Parsing cache: process-local excerpts, scoped to guild/user/ticket and SHA-256,
+maximum five minutes / 32 entries / 4 MiB serialized data. Original files are still
+deleted. This is not shared cross-user storage or an E2EE transport. Restricted
+Codex workers reuse verified conversation prefixes for up to 20 turns / 120 seconds
+idle, with native environments disabled on every turn and no copied credentials.

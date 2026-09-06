@@ -58,6 +58,10 @@ class Controls(SafeView):
     async def stop_work(self, interaction, button):
         await self.manager.bridge.execute(interaction, 'stop')
 
+    @discord.ui.button(label='지시 추가', custom_id='mrrobot:thread:steer:v1', row=0)
+    async def steer(self, interaction, button):
+        await interaction.response.send_modal(SteerModal(self.manager))
+
     @discord.ui.button(label='현재 설정', custom_id='mrrobot:thread:settings:v1')
     async def settings(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
@@ -79,6 +83,16 @@ class Controls(SafeView):
     @discord.ui.button(label='삭제', style=discord.ButtonStyle.danger, custom_id='mrrobot:thread:delete:v1')
     async def delete(self, interaction, button):
         await interaction.response.send_message('이 스레드와 Discord 메시지를 영구 삭제할까요? 복구할 수 없습니다. PC에 저장된 대화 기록은 남습니다.', ephemeral=True, view=Confirm(self.manager, interaction, 'delete'))
+
+
+class SteerModal(discord.ui.Modal, title='진행 중 작업에 지시 추가'):
+    message = discord.ui.TextInput(label='현재 단계 이후 반영할 내용', style=discord.TextStyle.paragraph, max_length=4000)
+    def __init__(self, manager):
+        super().__init__()
+        self.manager = manager
+    async def on_submit(self, interaction):
+        self.manager.owned(interaction)
+        await self.manager.bridge.execute(interaction, 'steer', text=self.message.value)
 
 
 class Confirm(SafeView):
@@ -107,7 +121,7 @@ class Confirm(SafeView):
 
 
 async def choose_access(manager, interaction, mode):
-    await manager.bridge.authorize(interaction)
+    await manager.bridge.authorize(interaction, admin_only=True)
     manager.owned(interaction)
     if mode == 'full':
         await interaction.response.send_message('이 대화에서 전체 PC 접근과 확인 없는 변경 실행을 허용합니다. 동의하나요?', ephemeral=True, view=Confirm(manager, interaction, 'full'))
@@ -253,6 +267,7 @@ class MessageContext:
         self.guild, self.guild_id = message.guild, message.guild.id
         self.channel, self.channel_id = message.channel, message.channel.id
         self.user = message.author
+        self.attachments = list(getattr(message, 'attachments', []))
         self.manager = manager
         self.response = SimpleNamespace(defer=self.defer)
         self.followup = SimpleNamespace(send=self.send)
@@ -285,6 +300,8 @@ class ThreadManager:
         self.mutating = set()
         self.queue = deque()
         self.worker = None
+        self.running = {}
+        self.last_user = None
         self.cancel_epochs = {}
         self.latest_controls = {}
         self.controls_lock = asyncio.Lock()
@@ -338,7 +355,7 @@ class ThreadManager:
         await interaction.followup.send(view.caption() if providers else '등록된 공급자가 없습니다. PC 앱에서 먼저 연결하세요.', view=view, ephemeral=True)
 
     def panel_content(self):
-        content = '## Mr.Robot · 개인 티켓 작업실\n[티켓 열기]를 눌러 제목을 입력하면 개인 비공개 스레드가 만들어집니다. 그 안에서 일반 채팅으로 작업을 요청하세요.\n서버 관리자만 사용할 수 있으며 티켓 생성자의 메시지만 실행합니다. 티켓별 모델·권한·대화가 분리됩니다.\n서버의 스레드 관리 권한자는 비공개 티켓도 볼 수 있습니다.'
+        content = '## Mr.Robot · 개인 티켓 작업실\nallow_ai 역할을 받은 사람은 [티켓 열기]를 눌러 개인 비공개 스레드를 만들 수 있습니다. 그 안에서 일반 채팅으로 작업을 요청하세요.\n기본 사용자는 인터넷 검색·격리 작업과 본인 결과물만 이용합니다. 기존 PC 파일에는 접근할 수 없습니다. 권한 변경은 서버 관리자 전용입니다.\n서버의 스레드 관리 권한자는 비공개 티켓도 볼 수 있습니다.'
         if not self.bridge.client.intents.message_content:
             content += '\n⚠ Developer Portal → Bot → Message Content Intent를 켜고 PC 플러그인을 재연결하세요. 그 전에는 /robot ask를 사용하세요.'
         return content
@@ -377,6 +394,7 @@ class ThreadManager:
             if bound and (not matches or str(matches[0].id) != bound):
                 raise RuntimeError('다른 채널이 이미 연결되어 있습니다. 기존 채널에서 /robot unbind 후 다시 시도하세요.')
             channel = matches[0] if matches else await guild.create_text_channel(channel_name, topic='Mr.Robot 개인 티켓 · 버튼을 눌러 요청하세요', overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, create_private_threads=True, send_messages_in_threads=True, manage_threads=True)}, reason='PC administrator requested Mr.Robot ticket workspace')
+            await self.allow_ticket_role(channel, guild)
             panel, pinned = await self.publish_panel(channel)
             return {'guildId': str(guild_id), 'channelId': str(channel.id), 'panelId': str(panel.id), 'pinned': pinned}
 
@@ -386,13 +404,26 @@ class ThreadManager:
             raise PermissionError('본인이 만든 개인 스레드에서만 사용할 수 있습니다.')
         return s
 
+    async def allow_ticket_role(self, channel, guild):
+        roles = await guild.fetch_roles()
+        for role in roles:
+            if role.name == 'allow_ai':
+                overwrite = channel.overwrites_for(role)
+                overwrite.view_channel = True
+                overwrite.read_message_history = True
+                overwrite.send_messages_in_threads = True
+                overwrite.send_messages = False
+                overwrite.create_public_threads = False
+                overwrite.create_private_threads = False
+                await channel.set_permissions(role, overwrite=overwrite, reason='allow_ai ticket panel access; no PC authority granted')
+
     def check_context(self, context):
         if isinstance(context.channel, discord.Thread) or str(context.channel_id) in self.state['sessions']:
             self.owned(context)
 
     async def bind(self, interaction):
         await interaction.response.defer(ephemeral=True)
-        await self.bridge.authorize(interaction)
+        await self.bridge.authorize(interaction, admin_only=True)
         if not isinstance(interaction.channel, discord.TextChannel):
             raise RuntimeError('일반 텍스트 채널에서 /robot bind를 실행하세요.')
         async with self.lock:
@@ -401,6 +432,7 @@ class ThreadManager:
             if not all(getattr(perms, p, False) for p in ('view_channel', 'send_messages', 'create_private_threads', 'send_messages_in_threads', 'manage_threads', 'read_message_history')):
                 raise RuntimeError('봇에 채널 보기·메시지 보내기·기록 보기·비공개 스레드 생성·스레드 메시지·스레드 관리 권한이 필요합니다.')
             await self.bridge.request(interaction, 'thread.bind')
+            await self.allow_ticket_role(channel, interaction.guild)
             panel, pinned = await self.publish_panel(channel)
             await self.bridge.request(interaction, 'thread.panel', panelId=str(panel.id))
             note = '' if pinned else ' (고정 권한이 없어 패널만 게시했습니다.)'
@@ -408,6 +440,7 @@ class ThreadManager:
 
     async def unbind(self, interaction):
         await interaction.response.defer(ephemeral=True)
+        await self.bridge.authorize(interaction, admin_only=True)
         async with self.lock:
             result = await self.bridge.request(interaction, 'thread.unbind')
             # Queued messages revalidate the binding before execution.
@@ -436,7 +469,7 @@ class ThreadManager:
                 await thread.add_user(interaction.user)
                 await self.bridge.request(interaction, 'thread.register', threadId=str(thread.id), name=name)
                 registered = True
-                await self.send_controls(thread, '여기에 작업을 입력하세요. 제어 메뉴는 새 응답 아래로 따라옵니다.\n작업 중 추가 메시지는 순서대로 대기합니다. /robot controls로 메뉴를 다시 꺼낼 수 있습니다. 전체 PC 권한에서 “PC 파일을 여기 올려줘”라고 요청하면 첨부로 받을 수 있습니다. Discord에서 PC로 올리는 첨부 입력은 아직 지원하지 않습니다.')
+                await self.send_controls(thread, '여기에 작업을 입력하거나 파일을 첨부하세요. 확장자 제한 없이 받으며, 읽을 수 있는 내용과 읽지 못한 부분을 구분합니다. 파일당 25MB·합계 50MB·최대 10개입니다.\n작업 중 추가 메시지는 순서대로 대기합니다. /robot controls로 제어 메뉴를 다시 꺼낼 수 있습니다. 일반 사용자는 본인 첨부와 결과물만 이용할 수 있으며, 기존 PC 파일 접근은 관리자 또는 별도 권한이 필요합니다.')
             except Exception:
                 if not registered:
                     await thread.delete(reason='Roll back incomplete Mr.Robot session')
@@ -525,25 +558,24 @@ class ThreadManager:
         if not self.bridge.client.intents.message_content:
             await context.send('일반 채팅 권한이 꺼져 있습니다. Message Content Intent를 켜고 플러그인을 다시 연결하세요. /robot ask는 사용 가능합니다.')
             return
-        if message.attachments:
-            await context.send('이 연결은 아직 첨부 파일을 읽지 않습니다. 파일 내용 없이 명령을 실행하지 않았습니다. 텍스트로 요청하거나 PC 앱에서 파일을 첨부하세요.')
-            return
-        if not message.content.strip() or len(message.content) > 6000:
+        text = message.content.strip() or ('첨부한 파일의 내용을 확인하고 정리해줘.' if message.attachments else '')
+        if not text or len(text) > 6000:
             await context.send('명령을 1~6000자로 입력하세요.')
             return
         if len(self.queue) >= 16 or sum(item[0].channel_id == context.channel_id for item in self.queue) >= 4:
             await context.send('대기열이 가득 찼습니다. 진행 중인 작업 완료 후 다시 보내세요.')
             return
         # Reserve the queue slot before network awaits so concurrent messages cannot overfill it.
-        self.queue.append((context, message.content, None))
+        self.queue.append((context, text, None))
         try:
-            status = await context.send('접수됨 · 순서대로 실행합니다.')
+            position = sum(item[0].channel_id == context.channel_id for item in self.queue)
+            status = await context.send(f'접수됨 · 이 티켓 대기 {position}번 · 사용자별 순서로 배분합니다. 격리 작업은 최대 2개 병렬, PC 제어는 순차 실행합니다.')
         except Exception:
-            self.queue.remove((context, message.content, None))
+            self.queue.remove((context, text, None))
             return
         for i, item in enumerate(self.queue):
             if item[0] is context:
-                self.queue[i] = (context, message.content, status)
+                self.queue[i] = (context, text, status)
                 break
         else:
             await status.edit(content='대기 작업 취소됨')
@@ -552,30 +584,77 @@ class ThreadManager:
             self.worker = asyncio.create_task(self.drain())
 
     async def drain(self):
-        while self.queue:
-            if self.bridge.active:
-                await asyncio.sleep(0.5)
-                continue
-            if self.queue[0][2] is None:
-                await asyncio.sleep(0.1)
-                continue
-            context, text, status = self.queue.popleft()
-            try:
-                s = self.owned(context)
-                if s['archived'] or self.state['bindings'].get(s['guildId']) != s['parentId']:
-                    await status.edit(content='연결 해제 또는 보관으로 취소됨')
+        try:
+            while self.queue or self.running:
+                for key, (task, _, _) in list(self.running.items()):
+                    if task.done():
+                        task.exception() if not task.cancelled() else None
+                        self.running.pop(key, None)
+                if not self.queue or len(self.running) >= 2 or len(self.bridge.active) >= 2 or not getattr(self.bridge, 'gateway_ready', True):
+                    await asyncio.sleep(0.25)
                     continue
-                await self.bridge.authorize(context)
-                await status.edit(content='작업 중 · 최근 메시지 아래의 [작업 중지] 버튼을 누르세요.')
-                context.result_message = status
-                async with context.channel.typing():
-                    await self.bridge.execute(context, 'ask', text=text)
-            except Exception:
+                users = {(context.guild_id, context.user.id) for _, context, _ in self.running.values()}
+                candidates = [(index, item) for index, item in enumerate(self.queue) if item[2] is not None and (item[0].guild_id, item[0].user.id) not in users]
+                if not candidates or any(access == 'full' for _, _, access in self.running.values()):
+                    await asyncio.sleep(0.25)
+                    continue
+                index, item = next(((i, item) for i, item in candidates if (item[0].guild_id, item[0].user.id) != self.last_user), candidates[0])
+                context, text, status = item
                 try:
-                    await status.edit(content='작업 전달 실패 · 연결 및 권한을 확인하세요.')
-                except discord.HTTPException:
-                    pass
+                    policy = await self.bridge.request(context, 'status')
+                    if not isinstance(policy, dict) or policy.get('access') not in {'full', 'isolated', 'search', 'blocked'}:
+                        raise RuntimeError('PC 작업 정책 확인 실패. 다시 요청하세요.')
+                    access = policy.get('access', 'full')
+                    if policy.get('canStart', True) is False or (access == 'full' and self.running):
+                        await asyncio.sleep(0.5)
+                        continue
+                except Exception as error:
+                    if not getattr(self.bridge, 'gateway_ready', True):
+                        continue
+                    # Remove this failed admission only; never block everyone behind it.
+                    if item in self.queue:
+                        self.queue.remove(item)
+                    try:
+                        await status.edit(content=str(error)[:1200] if isinstance(error, (RuntimeError, PermissionError)) else '대기 작업 권한 확인 실패. 다시 요청하세요.')
+                    except discord.HTTPException:
+                        pass
+                    continue
+                if item not in self.queue:  # stopped while permission lookup was in flight
+                    continue
+                self.queue.remove(item)
+                self.last_user = (context.guild_id, context.user.id)
+                task = asyncio.create_task(self.run_item(context, text, status))
+                self.running[context.channel_id] = (task, context, access)
+        finally:
+            tasks = [task for task, _, _ in self.running.values()]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.running.clear()
+
+    async def run_item(self, context, text, status):
+        try:
+            s = self.owned(context)
+            if s['archived'] or self.state['bindings'].get(s['guildId']) != s['parentId']:
+                await status.edit(content='연결 해제 또는 보관으로 취소됨')
+                return
+            await self.bridge.authorize(context)
+            await status.edit(content='작업 중 · 추가 지시는 [지시 추가], 취소는 [작업 중지]를 사용하세요.')
+            context.result_message = status
+            async with context.channel.typing():
+                await self.bridge.execute(context, 'ask', text=text)
+        except Exception:
+            try:
+                await status.edit(content='작업 전달 실패 · 연결 및 권한을 확인하세요.')
+            except discord.HTTPException:
+                pass
 
     async def disconnected(self):
-        for channel_id in {item[0].channel_id for item in self.queue}:
-            await self.cancel_queued(channel_id)
+        # Keep not-yet-started requests. Running PC jobs are cancelled by the host
+        # and are never replayed automatically (they may have side effects).
+        for _, _, status in self.queue:
+            if status:
+                try:
+                    await status.edit(content='Discord 재연결 대기 · 연결 복구 후 순서대로 실행합니다.')
+                except discord.HTTPException:
+                    pass

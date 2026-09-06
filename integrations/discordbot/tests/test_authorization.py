@@ -81,8 +81,15 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_ticket_role_does_not_grant_pc_admin(self):
         self.role.name = 'allow_ai'
         self.role.permissions.administrator = False
+        await self.bridge.authorize_ticket(self.interaction)
+        self.assertEqual(await self.bridge.authorize(self.interaction), {'admin': False, 'allowed': True})
         with self.assertRaises(PermissionError):
-            await self.bridge.authorize_ticket(self.interaction)
+            await self.bridge.authorize(self.interaction, admin_only=True)
+        for action in ['access', 'user-access', 'model-limit', 'thread.bind', 'thread.unbind', 'approve']:
+            with patch('bridge.emit') as emit:
+                with self.assertRaises(PermissionError):
+                    await self.bridge.request(self.interaction, action)
+                emit.assert_not_called()
 
     async def test_role_revocation_is_live(self):
         await self.bridge.authorize(self.interaction)

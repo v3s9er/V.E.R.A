@@ -1,0 +1,2 @@
+b1b45b5f085e0e51f7cc45bf455303821034f0304a1fd431fcffe6a67b6f95ec  Mr.Robot-Setup-0.4.18-x64.exe
+5aa4aeb94864ab4a6af3a6abb864618c377b9ad11ae70caf58e61258a511cd6e  mobile/Mr.Robot-Mobile-0.4.18.apk

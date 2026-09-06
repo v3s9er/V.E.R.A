@@ -29,6 +29,11 @@ try {
   assert.equal(observed[0].trustedPermissionOverride, false);
   assert.equal(observed[1].permissionMode, 'full');
   assert.equal(observed[1].trustedPermissionOverride, true);
+  await handlers.get('chat.start')({ text: 'isolated fixture', permissionMode: 'workspace', discordIsolation: 'isolated', tokenPolicy: 'audit-only' }, client(local, 'isolated'));
+  assert.ok(observed[2].isolation);
+  assert.equal(observed[2].workspacePath, undefined, 'isolated users must never inherit PC default workspace');
+  assert.ok(!observed[2].context.includes('장기 기억'));
+  await assert.rejects(observed[2].isolation.execute('read_file', { path: 'C:\\private.txt' }));
   let mode: 'workspace' | 'read-only' = 'workspace';
   let executed = 0;
   const executor = new ToolExecutor({ computer: {} as any, safety: () => ({ mode, maxReadBytes: 1024, maxShellBytes: 1024, allowedRoots: [] }), runPluginTool: async () => { executed++; return {}; } });

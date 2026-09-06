@@ -88,6 +88,14 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         threads.on_message.assert_awaited_once_with(message)
         await client.on_disconnect()
         threads.disconnected.assert_awaited_once()
+        self.assertFalse(linked.gateway_ready)
+        await client.on_resumed()
+        self.assertTrue(linked.gateway_ready)
+        self.assertEqual(sum(call.args[0].get('event') == 'ready' for call in emit.call_args_list), 2)
+        for _ in range(3):
+            await client.on_disconnect()
+            await client.on_resumed()
+            self.assertTrue(linked.gateway_ready)
         await client.close()
 
     async def test_config_only_run_without_any_security_source(self):

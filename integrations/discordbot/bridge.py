@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import discord
 from discord import app_commands
 from thread_sessions import ThreadManager, MessageContext
-from presentation import result_text, wants_files
+from presentation import result_text, wants_files, message_chunks
+from attachments import read_attachments
 
 PREFIX = '__MR_ROBOT_DISCORD__'
 _output_lock = threading.Lock()
@@ -97,6 +98,7 @@ class Bridge:
         self.owner = 0
         self.pending = {}
         self.active = {}
+        self.progress_tasks = {}
         self.loop = asyncio.get_running_loop()
         self.tree = app_commands.CommandTree(client)
         self.reader_started = False
@@ -108,7 +110,7 @@ class Bridge:
     def scope_key(interaction):
         return f'{interaction.guild_id}:{interaction.channel_id}:{interaction.user.id}'
 
-    async def authorize(self, interaction):
+    async def authorize(self, interaction, admin_only=False):
         if hasattr(self, 'authorization_path'):
             self.refresh_allowed_guilds()
         if interaction.guild_id not in self.allowed_guilds or not interaction.guild:
@@ -121,17 +123,17 @@ class Bridge:
         member = await guild.fetch_member(interaction.user.id)
         roles = await guild.fetch_roles()
         role_ids = set(member._roles)
-        if member.id == guild.owner_id or any(role.permissions.administrator for role in roles if role.id in role_ids or role.id == guild.id):
-            return
-        raise PermissionError('Discord 서버의 관리자(Administrator) 권한이 필요합니다.')
+        admin = member.id == guild.owner_id or any(role.permissions.administrator for role in roles if role.id in role_ids or role.id == guild.id)
+        allowed = any(role.name == 'allow_ai' and role.id in role_ids for role in roles)
+        if admin_only and not admin:
+            raise PermissionError('Discord 서버의 관리자(Administrator) 권한이 필요합니다.')
+        if not admin and not allowed:
+            raise PermissionError('이용하려면 allow_ai 역할이 필요합니다.')
+        return {'admin': admin, 'allowed': allowed}
 
     async def authorize_ticket(self, interaction):
-        # Ticket eligibility is additional to PC authority, never an admin bypass.
-        await self.authorize(interaction)
-        guild = await self.client.fetch_guild(interaction.guild_id)
-        member = await guild.fetch_member(interaction.user.id)
-        roles = await guild.fetch_roles()
-        if not any(role.name == 'allow_ai' and role.id in member._roles for role in roles):
+        authority = await self.authorize(interaction)
+        if not authority['allowed']:
             raise PermissionError('티켓을 열려면 서버 관리자가 allow_ai 역할을 먼저 부여해야 합니다.')
 
     def refresh_allowed_guilds(self):
@@ -146,17 +148,21 @@ class Bridge:
         self.threads.install()
         # Team apps have one explicit team owner; membership alone is not authority.
         self.owner = application.team.owner_id if application.team else application.owner.id
-        group = app_commands.Group(name='robot', description='내 PC의 Mr.Robot 에이전트', guild_only=True, default_permissions=discord.Permissions(administrator=True))
+        group = app_commands.Group(name='robot', description='Mr.Robot 개인 티켓 에이전트', guild_only=True)
 
-        @group.command(name='ask', description='PC 에이전트에게 작업 요청 (서버 관리자 전용)')
+        @group.command(name='ask', description='개인 티켓에서 AI 작업 요청 (allow_ai 필요)')
         @app_commands.describe(message='작업 내용', provider='models에서 확인한 공급자 ID', model='모델 ID', effort='추론 강도')
         @app_commands.choices(effort=[app_commands.Choice(name=v, value=v) for v in ('auto', 'low', 'medium', 'high')])
-        async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = ''):
-            await self.execute(interaction, 'ask', text=message, providerId=provider, model=model, effort=effort)
+        async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = '', file: discord.Attachment = None):
+            await self.execute(interaction, 'ask', text=message, providerId=provider, model=model, effort=effort, _attachments=[file] if file else [])
 
         @group.command(name='stop', description='이 채널에서 요청한 작업 중지')
         async def stop(interaction: discord.Interaction):
             await self.execute(interaction, 'stop')
+
+        @group.command(name='steer', description='현재 작업을 버리지 않고 추가 지시 전달')
+        async def steer(interaction: discord.Interaction, message: str):
+            await self.execute(interaction, 'steer', text=message)
 
         @group.command(name='new', description='이 채널에서 새 대화 시작')
         async def new(interaction: discord.Interaction):
@@ -176,6 +182,12 @@ class Bridge:
         @app_commands.describe(confirm_full='전체 PC 접근과 확인 없는 변경 실행에 동의하면 True')
         async def access(interaction: discord.Interaction, mode: str, confirm_full: bool = False):
             await self.execute(interaction, 'access', mode=mode, confirmFull=confirm_full)
+
+        @group.command(name='user-access', description='관리자: 사용자별 PC 접근 권한 설정')
+        @app_commands.checks.has_permissions(administrator=True)
+        @app_commands.choices(mode=[app_commands.Choice(name=label, value=value) for value, label in [('show', '현재 권한 조회'), ('default', '기본값 복원'), ('blocked', 'AI 이용 차단'), ('search', '인터넷 검색만'), ('isolated', '격리 작업 · PC 파일 접근 불가'), ('full', '전체 PC 접근 위임 · 주의')]])
+        async def user_access(interaction: discord.Interaction, user: discord.Member, mode: str, confirm_full: bool = False):
+            await self.execute(interaction, 'user-access', targetUserId=str(user.id), mode=mode, confirmFull=confirm_full)
 
         @group.command(name='model-limit', description='서버 관리자 전용: 사용자별 모델 상한 설정·조회')
         @app_commands.checks.has_permissions(administrator=True)
@@ -265,6 +277,26 @@ class Bridge:
                 future.set_exception(RuntimeError(str(value['error'])[:1000]))
             else:
                 future.set_result(value.get('result'))
+        elif value.get('event') == 'progress':
+            key = str(value.get('scopeKey'))
+            destination = self.active.get(key)
+            tasks = getattr(self, 'progress_tasks', {})
+            if not destination or getattr(destination, 'progress_finished', False) or key in tasks:
+                return
+            async def update_progress():
+                try:
+                    await self.authorize(destination)
+                    if self.active.get(key) is not destination or getattr(destination, 'progress_finished', False):
+                        return
+                    message = getattr(destination, 'result_message', None)
+                    if message:
+                        preview = discord.utils.escape_mentions(str(value.get('text', '작업 중'))[:1400])
+                        await message.edit(content=f'작업 중 · {int(value.get("elapsed", 0))}초\n{preview}', allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    pass
+                finally:
+                    tasks.pop(key, None)
+            tasks[key] = self.loop.create_task(update_progress())
         elif value.get('event') == 'approval':
             interaction = self.active.get(str(value.get('scopeKey')))
             if interaction:
@@ -282,14 +314,14 @@ class Bridge:
             view=Approval(self, interaction.channel_id, request_id, interaction.user.id))
 
     async def request(self, interaction, action, **params):
-        await self.authorize(interaction)
+        authority = await self.authorize(interaction, admin_only=action in {'access', 'user-access', 'model-limit', 'thread.bind', 'thread.unbind', 'thread.panel', 'approve'})
         if {'id', 'userId', 'channelId', 'guildId', 'guildAdmin', 'allowAi', 'isThread', 'action'} & params.keys():
             raise PermissionError('인증 필드는 요청에서 변경할 수 없습니다.')
-        ticket_authorized = False
+        ticket_authorized = authority['allowed']
         if action == 'thread.register':
             await self.authorize_ticket(interaction)
             ticket_authorized = True
-        if action == 'model-limit':
+        if action in {'model-limit', 'user-access'}:
             # Resolve live membership, not an arbitrary ID submitted by a client.
             target = await interaction.guild.fetch_member(int(params.get('targetUserId', '0')))
             if target.bot:
@@ -301,7 +333,7 @@ class Bridge:
         request_id = uuid.uuid4().hex
         future = self.loop.create_future()
         self.pending[request_id] = future
-        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), guildId=str(interaction.guild_id), guildAdmin=True, allowAi=ticket_authorized, isThread=isinstance(interaction.channel, discord.Thread), action=action, **params))
+        emit(dict(id=request_id, userId=str(interaction.user.id), channelId=str(interaction.channel_id), guildId=str(interaction.guild_id), guildAdmin=authority['admin'], allowAi=ticket_authorized, isThread=isinstance(interaction.channel, discord.Thread), action=action, **params))
         try:
             return await future if action == 'ask' else await asyncio.wait_for(future, 25)
         finally:
@@ -320,8 +352,12 @@ class Bridge:
         if action == 'ask':
             self.active[channel] = interaction
         watch = None
+        permission_revoked = False
         try:
-            await self.authorize(interaction)
+            starting_authority = await self.authorize(interaction)
+            incoming = params.pop('_attachments', None)
+            if incoming is None:
+                incoming = getattr(interaction, 'attachments', [])
             if action in ('ask', 'result') and not isinstance(interaction, MessageContext):
                 manager = self.threads if str(interaction.channel_id) in self.threads.state['sessions'] else None
                 destination = MessageContext(SimpleNamespace(guild=interaction.guild, channel=interaction.channel, author=interaction.user), manager)
@@ -334,30 +370,56 @@ class Bridge:
                 raise RuntimeError('스레드 관리 작업 중입니다. 잠시 후 다시 보내세요.')
             if action == 'ask':
                 async def watch_permissions():
+                    nonlocal permission_revoked
                     while True:
-                        await asyncio.sleep(30)
+                        await asyncio.sleep(5)
                         try:
-                            await self.authorize(interaction)
+                            if await self.authorize(interaction) != starting_authority:
+                                raise PermissionError('작업 중 역할이 변경되었습니다.')
                         except Exception:
+                            permission_revoked = True
                             emit(dict(event='revoked', scopeKey=channel))
                             return
                 watch = self.loop.create_task(watch_permissions())
+                if incoming:
+                    await self.request(interaction, 'status')  # Host policy/ownership before downloading.
+                    receipt = getattr(destination, 'result_message', None)
+                    if receipt:
+                        await receipt.edit(content=f'첨부 {len(incoming)}개 읽는 중 · 파일 내용을 분석하고 있습니다.')
+                    attachment_epoch = getattr(self.threads, 'cancel_epochs', {}).get(interaction.channel_id, 0)
+                    async def check_cancel():
+                        if permission_revoked or attachment_epoch != getattr(self.threads, 'cancel_epochs', {}).get(interaction.channel_id, 0):
+                            raise RuntimeError('첨부 분석 작업이 중지되었습니다.')
+                    params['attachments'] = await read_attachments(incoming, interaction.channel_id, check_cancel, scope=f'{interaction.guild_id}:{interaction.user.id}:{interaction.channel_id}')
+                    if await self.authorize(interaction) != starting_authority:
+                        raise PermissionError('첨부 분석 중 역할이 변경되어 전달을 중단했습니다.')
+                    if receipt:
+                        await receipt.edit(content='첨부 분석 완료 · 내용을 모델에 전달해 작업 중입니다.')
             result = await self.request(interaction, action, **params)
-            await self.authorize(interaction)
+            if action == 'ask':
+                destination.progress_finished = True
+            task = getattr(self, 'progress_tasks', {}).pop(channel, None)
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if await self.authorize(interaction) != starting_authority:
+                raise PermissionError('작업 중 역할이 변경되어 결과 전송을 중단했습니다. 새 권한으로 다시 요청하세요.')
             if action == 'approval' and isinstance(result, dict) and result.get('requestId'):
                 await self.show_approval(interaction, result)
                 return
-            text = result_text(result, action)[:150_000]
+            text = result_text(result, action)
             sender = destination.followup.send
-            for offset in range(0, min(len(text), 14400), 1800):
-                await sender(discord.utils.escape_mentions(text[offset:offset + 1800]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-            if len(text) > 14400:
+            chunks = message_chunks(discord.utils.escape_mentions(text))
+            for number, chunk in enumerate(chunks[:4]):
+                label = f'[{number+1}/{min(len(chunks), 4)}] ' if len(chunks) > 1 else ''
+                await sender(label + chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            if len(chunks) > 4 or (action in ('ask', 'result') and len(text) > 6000):
                 file = discord.File(io.BytesIO(text.encode('utf-8')), filename='MrRobot-result.txt')
                 try:
-                    await sender('답변이 길어 전체 본문도 파일로 첨부합니다.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                    await sender('위에는 미리보기입니다. 생략 없는 전체 답변은 이 TXT 파일에서 확인하세요.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
                 finally:
                     file.close()
-            if action == 'ask' and isinstance(result, dict) and result.get('ok') is not False and wants_files(params.get('text', '')):
+            if action == 'ask' and isinstance(result, dict) and result.get('ok') is not False and (result.get('artifactOnly') is True or wants_files(params.get('text', ''))):
                 await self.send_files(interaction, destination, result.get('files', []))
         except Exception as error:
             # No raw Discord HTTP/token diagnostics returned to a channel.
@@ -365,6 +427,12 @@ class Bridge:
             if isinstance(destination, MessageContext) or not interaction.is_expired():
                 await destination.followup.send(discord.utils.escape_mentions('⚠️ ' + text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         finally:
+            if action == 'ask':
+                destination.progress_finished = True
+            task = getattr(self, 'progress_tasks', {}).pop(channel, None)
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             if watch:
                 watch.cancel()
                 await asyncio.gather(watch, return_exceptions=True)

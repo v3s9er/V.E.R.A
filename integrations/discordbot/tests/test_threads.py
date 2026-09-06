@@ -14,7 +14,7 @@ from bridge import Bridge
 
 class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.bridge = NS(authorize=AsyncMock(), authorize_ticket=AsyncMock(), execute=AsyncMock(), request=AsyncMock(), active={}, client=NS(intents=NS(message_content=True)))
+        self.bridge = NS(authorize=AsyncMock(), authorize_ticket=AsyncMock(), execute=AsyncMock(), request=AsyncMock(return_value={'access': 'isolated', 'canStart': True}), active={}, client=NS(intents=NS(message_content=True)))
         self.manager = ThreadManager(self.bridge, {'bindings': {'1': '2'}, 'sessions': {'4': {'guildId': '1', 'parentId': '2', 'ownerId': '3', 'name': 'mine', 'archived': False}}})
         self.status = NS(edit=AsyncMock())
         self.channel = NS(id=4, send=AsyncMock(return_value=self.status))
@@ -54,15 +54,19 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.on_message(self.message)
         self.bridge.authorize.assert_not_awaited()
 
-    async def test_content_permission_and_attachments_fail_explicitly(self):
+    async def test_content_permission_and_attachment_only_queue(self):
         self.bridge.client.intents.message_content = False
         await self.manager.on_message(self.message)
         self.assertIn('Intent', self.channel.send.call_args.args[0])
         self.bridge.client.intents.message_content = True
         self.message.attachments = [NS()]
+        self.message.content = ''
+        self.bridge.active = {'busy': True}
         await self.manager.on_message(self.message)
-        self.assertIn('첨부', self.channel.send.call_args.args[0])
-        self.assertFalse(self.manager.queue)
+        self.assertEqual(len(self.manager.queue), 1)
+        context, text, _ = self.manager.queue[0]
+        self.assertEqual(context.attachments, self.message.attachments)
+        self.assertIn('첨부', text)
 
     async def test_queue_bounded_and_cancel_clears_pending(self):
         self.bridge.active = {'busy': True}
@@ -166,7 +170,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_pc_provision_is_admin_visible_and_does_not_create_ticket(self):
         role, member = object(), object()
         channel = NS(id=2)
-        guild = NS(fetch_channels=AsyncMock(return_value=[]), create_text_channel=AsyncMock(return_value=channel), default_role=role, me=member)
+        guild = NS(fetch_channels=AsyncMock(return_value=[]), create_text_channel=AsyncMock(return_value=channel), default_role=role, me=member, fetch_roles=AsyncMock(return_value=[]))
         self.bridge.allowed_guilds = {1}
         self.bridge.client.get_guild = lambda _: guild
         self.manager.state['bindings'] = {}

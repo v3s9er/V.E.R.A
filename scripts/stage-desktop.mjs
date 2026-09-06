@@ -46,7 +46,7 @@ copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
-for (const name of ['bridge.py', 'presentation.py', 'standalone.py', 'legacy_adapter.py', 'thread_sessions.py', 'requirements.txt', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));
+for (const name of ['bridge.py', 'presentation.py', 'standalone.py', 'legacy_adapter.py', 'thread_sessions.py', 'attachments.py', 'attachment_cache.py', 'attachment_worker.py', 'attachment_ocr.ps1', 'requirements.txt', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));
 // Keep the live window and tray on the exact same full icon as Android.
 copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'icon.png'));
 // main.mjs uses ws for native Cloudflare Access headers on WSS upgrades.

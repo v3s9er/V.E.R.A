@@ -502,6 +502,21 @@ const steerableRepeatResult = await steerableRepeatLoop.run([], '명령 실행�
 check('steering at the repeat threshold is applied before automatic stop', steerableRepeatCalls === 5 && steerableRepeatResult.text === 'steering-recovered', `${steerableRepeatCalls} / ${steerableRepeatResult.text}`);
 
 // Native subscription agents receive one explicit run approval in ask mode,
+let finalSteeringCalls = 0, finalSteeringReads = 0;
+const finalSteeringProvider = {
+  ...steerableRepeatProvider,
+  async chat(req) {
+    finalSteeringCalls++;
+    return { text: finalSteeringCalls === 1 ? 'initial' : 'updated', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } };
+  },
+};
+const finalSteeringLoop = new AgentLoop({ default: () => finalSteeringProvider }, { execute: async () => '{}' });
+const finalSteeringResult = await finalSteeringLoop.run([], 'write answer', {
+  takeSteering: () => ++finalSteeringReads === 1 ? ['add verification'] : [],
+});
+check('steering arriving during a final text response is not lost', finalSteeringCalls === 2 && finalSteeringResult.text === 'updated');
+
+// Native subscription agents receive one explicit run approval in ask mode,
 // then consume instructions queued while their non-interactive CLI was busy.
 const nativeCalls = [];
 const nativeProvider = {

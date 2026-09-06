@@ -27,4 +27,27 @@ def result_text(result, action):
 
 
 def wants_files(text):
-    return bool(re.search(r'보내|보여.*파일|올려|첨부|다운로드|\b(?:send|upload|attach|download)\b', text, re.I))
+    return bool(re.search(r'보내|보여.*파일|올려|첨부|다운로드|파일로|파일.*(?:만들|저장)|\b(?:send|upload|attach|download)\b', text, re.I))
+
+
+def message_chunks(text, limit=1750):
+    """Prefer paragraph/line boundaries; bound UTF-16 units including emoji."""
+    chunks, rest = [], text
+    while rest:
+        units, end = 0, 0
+        for char in rest:
+            weight = 2 if ord(char) > 0xffff else 1
+            if units + weight > limit:
+                break
+            units += weight
+            end += 1
+        if end == len(rest):
+            chunks.append(rest)
+            break
+        cut = rest.rfind('\n\n', 0, end)
+        if cut < end // 3:
+            cut = rest.rfind('\n', 0, end)
+        end = cut + 1 if cut >= end // 3 else end
+        chunks.append(rest[:end])
+        rest = rest[end:]
+    return chunks

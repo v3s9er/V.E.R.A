@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bridge import Bridge
@@ -32,6 +32,32 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receipt.edit.call_args.kwargs['content'], '답변은 바로 여기에 있습니다.')
         self.channel.send.assert_not_awaited()
         self.assertFalse(self.bridge.active)
+
+    async def test_long_reply_has_full_txt_and_bounded_messages(self):
+        original = '한글 답변 😀\n\n' * 1400
+        self.bridge.request.return_value = {'text': original}
+        received = []
+        async def send(content=None, **kwargs):
+            if kwargs.get('file'):
+                received.append(kwargs['file'].fp.read().decode('utf-8'))
+            if content:
+                self.assertLessEqual(len(content.encode('utf-16-le')) // 2, 2000)
+        self.channel.send.side_effect = send
+        await self.bridge.execute(self.context, 'ask', text='explain')
+        self.assertEqual(received, [original])
+        self.assertTrue(self.context.progress_finished)
+        self.assertLessEqual(self.channel.send.await_count, 4)
+
+    async def test_attachment_excerpt_is_forwarded_with_same_identity(self):
+        self.context.attachments = [NS(filename='own.pdf')]
+        excerpts = [{'name': 'own.pdf', 'text': 'provided by this user', 'status': 'extracted'}]
+        with patch('bridge.read_attachments', AsyncMock(return_value=excerpts)) as reader:
+            await self.bridge.execute(self.context, 'ask', text='요약')
+        reader.assert_awaited_once()
+        self.assertEqual(reader.call_args.args[1], self.context.channel_id)
+        self.assertEqual(self.bridge.request.call_args.kwargs['attachments'], excerpts)
+        self.assertEqual(self.bridge.request.call_args.args[0], self.context)
+        self.assertEqual(self.receipt.edit.call_args.kwargs['content'], '답변은 바로 여기에 있습니다.')
 
     async def test_expired_slash_still_uses_bot_message(self):
         interaction = NS(guild=self.guild, guild_id=1, channel=self.channel, channel_id=4, user=NS(id=3), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()), edit_original_response=AsyncMock(return_value=self.receipt), is_expired=lambda: True)

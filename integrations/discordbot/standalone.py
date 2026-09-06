@@ -119,11 +119,16 @@ def make_client(connection, thread_state, bridge_type, emit):
         async def on_ready(self):
             bridge = self._mr_robot_bridge
             bridge.refresh_allowed_guilds()
+            bridge.gateway_ready = True
             emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
+
+        async def on_resumed(self):
+            await self.on_ready()
 
         async def on_disconnect(self):
             emit({'event': 'disconnected'})
             if hasattr(self, '_mr_robot_bridge'):
+                self._mr_robot_bridge.gateway_ready = False
                 await self._mr_robot_bridge.threads.disconnected()
 
         async def on_message(self, message):

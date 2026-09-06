@@ -8,6 +8,9 @@ import type { PluginContext } from './context.js';
 import type { PermissionMode } from '@mr-robot/shared';
 import { chatFileLinks } from '@mr-robot/shared';
 import { DiscordSessions } from './discord-sessions.js';
+import { DiscordRunConnection } from './discord-run.js';
+import { discordAttachmentContext } from './discord-attachments.js';
+import { discordAccess, parseDiscordAccess, DISCORD_ADMIN_ACTIONS } from './discord-access.js';
 import { assertDiscordModelAllowed, discordModelAllowed, parseDiscordModelCeiling } from './discord-model-policy.js';
 
 export interface DiscordHost {
@@ -17,7 +20,7 @@ export interface DiscordHost {
   revoke(id: string): void;
   models(providerId?: string): unknown;
   permissionCeiling(): PermissionMode;
-  readChatFile?(conversationId: string, path: string, offset: number, limit: number, version?: string): unknown;
+  readChatFile?(conversationId: string, path: string, offset: number, limit: number, version?: string, isolated?: boolean): unknown;
 }
 interface Settings { botDirectory: string; pythonPath: string; autoStart: boolean; mode: 'standalone' | 'legacy' }
 const defaults: Settings = { botDirectory: '', pythonPath: '', autoStart: false, mode: 'standalone' };
@@ -50,9 +53,9 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
   let lastError = '';
   let lastStart = 0;
   let workspace: { state: string; message: string } = { state: 'idle', message: '' };
-  let activeChannel = '';
-  let activeConversation = '';
-  let approval: { requestId: string; conversationId: string; summary?: string } | undefined;
+  let grantToken = '';
+  type Run = { conversation: string; isolated: boolean; cancelled?: boolean; connection?: DiscordRunConnection; startedAt: number; lastProgress: number; preview: string; approval?: { requestId: string; conversationId: string; summary?: string } };
+  const runs = new Map<string, Run>();
   const results = new Map<string, unknown>();
   const pending = new Map<number, { resolve(v: any): void; reject(e: Error): void; timer?: NodeJS.Timeout }>();
   // Preserve an existing news/KTX installation until the owner selects standalone.
@@ -60,7 +63,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     const saved = ctx.storage.get<Settings>('config');
     return { ...defaults, ...saved, mode: saved ? saved.mode ?? 'legacy' : defaults.mode };
   };
-  const status = () => ({ running: !!child, ready, owner, busy, error: lastError, workspace, config: config() });
+  const status = () => ({ running: !!child, ready, owner, busy, activeCount: runs.size, capacity: 2, error: lastError, workspace, config: config() });
   const send = (data: unknown) => {
     if (child?.stdin.writable && child.stdin.writableLength < 1_000_000) child.stdin.write(JSON.stringify(data) + '\n');
   };
@@ -87,17 +90,47 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       catch { oldChild.kill(); }
     } else oldChild?.kill();
     for (const p of pending.values()) { if (p.timer) ctx.clearTimeout(p.timer); p.reject(new Error('Discord 연결이 종료되었습니다.')); }
-    pending.clear(); ready = false; busy = false; approval = undefined;
+    pending.clear(); ready = false; busy = false; grantToken = '';
+    for (const run of runs.values()) run.connection?.close();
+    runs.clear();
     if (workspace.state === 'pending') workspace = { state: 'error', message: '연결이 종료되어 티켓 설치를 중단했습니다. 다시 시도하세요.' };
-    activeChannel = ''; activeConversation = '';
     return status();
   };
   async function command(message: any): Promise<unknown> {
     const guilds = ctx.storage.get<string[]>('allowedGuildIds') ?? [];
-    if (!ready || message.guildAdmin !== true || !guilds.includes(String(message.guildId))
-      || ![message.userId, message.channelId].every(id => /^\d{15,22}$/.test(String(id)))) throw new Error('등록된 Discord 서버의 관리자 인증이 필요합니다. DM에서는 사용할 수 없습니다.');
+    if (!ready) throw new Error('Discord 재연결 중입니다. 연결 복구 후 다시 요청하세요. 관리자 권한 문제는 아닙니다.');
+    if (!guilds.includes(String(message.guildId))) throw new Error('등록된 Discord 서버에서만 사용할 수 있습니다. DM은 지원하지 않습니다.');
+    if (message.guildAdmin !== true && message.allowAi !== true) throw new Error('allow_ai 역할 또는 서버 관리자 권한이 필요합니다.');
+    if (![message.userId, message.channelId].every(id => /^\d{15,22}$/.test(String(id)))) throw new Error('Discord 사용자·티켓 정보가 올바르지 않습니다.');
     const channel = `${message.guildId}:${message.channelId}:${message.userId}`;
+    const run = runs.get(channel);
+    const activeChannel = run ? channel : '';
+    const activeConversation = run?.conversation ?? '';
+    const approval = run?.approval;
+    const scopedRpc = (method: string, params: unknown) => run?.connection ? run.connection.call(method, params) : rpc(method, params);
     const userScope = `${message.guildId}:${message.userId}`;
+    if (DISCORD_ADMIN_ACTIONS.has(message.action) && message.guildAdmin !== true) throw new Error('이 설정은 서버 관리자만 변경할 수 있습니다.');
+    const accessPolicies = ctx.storage.get<Record<string, unknown>>('userAccess') ?? {};
+    if (!accessPolicies || typeof accessPolicies !== 'object' || Array.isArray(accessPolicies)) throw new Error('사용자 권한 저장소가 손상되었습니다.');
+    if (message.action === 'user-access') {
+      if (!/^\d{15,22}$/.test(String(message.targetUserId))) throw new Error('대상 서버 사용자를 선택하세요.');
+      const target = `${message.guildId}:${message.targetUserId}`;
+      if (message.mode === 'show') return { message: `사용자 권한: ${Object.hasOwn(accessPolicies, target) ? parseDiscordAccess(accessPolicies[target]) : '기본값 (관리자: 전체 / 일반: 격리)'}` };
+      if ([...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.targetUserId}`))) throw new Error('대상 사용자의 작업을 먼저 중지하세요.');
+      if (message.mode !== 'default') parseDiscordAccess(message.mode);
+      if (message.mode === 'full' && message.confirmFull !== true) throw new Error('전체 PC 권한을 위임하려면 confirm_full=True가 필요합니다.');
+      if (!Object.hasOwn(accessPolicies, target) && Object.keys(accessPolicies).length >= 256) throw new Error('사용자 권한 저장소가 가득 찼습니다.');
+      const next = { ...accessPolicies };
+      if (message.mode === 'default') delete next[target]; else next[target] = message.mode;
+      ctx.storage.set('userAccess', next);
+      results.clear();
+      return { message: `대상 사용자 권한을 ${message.mode}으로 저장했습니다. 이 서버의 모든 티켓에 적용됩니다. allow_ai 역할은 별도로 필요합니다.` };
+    }
+    const access = discordAccess(message.guildAdmin === true, accessPolicies, userScope);
+    if (access === 'blocked') throw new Error('관리자가 이 사용자의 AI 이용을 중지했습니다.');
+    const isolated = access !== 'full';
+    const conversationKey = isolated ? `${channel}:isolated` : channel;
+    const resultKey = `${conversationKey}:${access}`;
     const savedLimits = ctx.storage.get<Record<string, string>>('modelLimits');
     const limits = savedLimits === undefined ? {} : savedLimits;
     if (!limits || typeof limits !== 'object' || Array.isArray(limits)) throw new Error('모델 정책 저장소가 손상되었습니다. PC에서 복구하세요.');
@@ -111,7 +144,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         return { modelCeiling: ceiling, message: `대상 사용자 모델 상한: ${ceiling} · 서버 내 모든 티켓에 적용` };
       }
       const ceiling = parseDiscordModelCeiling(message.ceiling);
-      if (busy && activeChannel.startsWith(`${message.guildId}:`) && activeChannel.endsWith(`:${message.targetUserId}`)) throw new Error('대상 사용자의 실행을 먼저 중지하세요. 실행 도중에는 모델 상한을 변경할 수 없습니다.');
+      if ([...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.targetUserId}`))) throw new Error('대상 사용자의 실행을 먼저 중지하세요. 실행 도중에는 모델 상한을 변경할 수 없습니다.');
       if (ceiling !== 'unlimited' && Object.keys(limits).length >= 256 && !Object.hasOwn(limits, target)) throw new Error('모델 정책 저장소가 가득 찼습니다. 불필요한 제한을 해제하세요.');
       const next = { ...limits };
       if (ceiling === 'unlimited') delete next[target]; else next[target] = ceiling;
@@ -120,19 +153,20 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     }
     const modelCeiling = parseDiscordModelCeiling(Object.hasOwn(limits, userScope) ? limits[userScope] : 'unlimited');
     threads.assertOwner(message);
-    const threadCommand = threads.command(message, busy ? activeChannel : '');
+    if (message.action === 'thread.unbind' && [...runs.keys()].some(key => key.startsWith(`${message.guildId}:`))) throw new Error('서버에서 실행 중인 작업을 먼저 중지하세요.');
+    const threadCommand = threads.command(message, activeChannel);
     if (threadCommand) {
-      if (message.action === 'thread.forget') results.delete(channel);
+      if (message.action === 'thread.forget') results.delete(resultKey);
       send({ event: 'thread.state', data: threads.state() });
       return threadCommand.result;
     }
     const permissions = ctx.storage.get<Record<string, PermissionMode>>('permissions') ?? {};
-    const permission = permissions[channel] ?? 'ask';
+    const permission = isolated ? 'workspace' : permissions[channel] ?? 'full';
     if (message.action === 'file.read') {
-      if (permission !== 'full' || host.permissionCeiling() !== 'full') throw new Error('Discord로 PC 파일을 보내려면 서버 관리자가 이 대화의 PC 접근 권한을 전체 허용으로 설정해야 합니다.');
-      const conversationId = ctx.storage.get<Record<string, string>>('conversations')?.[channel];
+      if (access === 'search' || (!isolated && permission !== 'full') || host.permissionCeiling() !== 'full') throw new Error('파일 전송 권한이 없습니다. 일반 사용자는 자기 격리 작업에서 만든 결과물만 받을 수 있습니다.');
+      const conversationId = ctx.storage.get<Record<string, string>>('conversations')?.[conversationKey];
       if (!conversationId || !host.readChatFile) throw new Error('이 대화에서 먼저 파일을 찾아 달라고 요청하세요.');
-      return host.readChatFile(conversationId, String(message.path ?? ''), Number(message.offset), Number(message.limit), typeof message.version === 'string' ? message.version : undefined);
+      return host.readChatFile(conversationId, String(message.path ?? ''), Number(message.offset), Number(message.limit), typeof message.version === 'string' ? message.version : undefined, isolated);
     }
     const preferences = ctx.storage.get<Record<string, { providerId?: string; model?: string; effort?: string }>>('preferences') ?? {};
     const preference = preferences[channel] ?? {};
@@ -155,14 +189,14 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       return catalog.map(provider => ({ ...provider, model: discordModelAllowed(modelCeiling, provider.model) ? provider.model : '', modelCeiling }));
     }
     if (message.action === 'result') {
-      if (results.has(channel)) return results.get(channel);
+      if (results.has(resultKey)) return results.get(resultKey);
       if (busy && activeChannel === channel) return { message: '아직 작업 중입니다. 완료되면 요청한 메시지에 답변을 표시합니다.' };
-      const id = ctx.storage.get<Record<string, string>>('conversations')?.[channel];
+      const id = ctx.storage.get<Record<string, string>>('conversations')?.[conversationKey];
       const saved = id ? await rpc('conversations.get', { id }) : null;
       const last = Array.isArray(saved?.messages) ? [...saved.messages].reverse().find(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) : undefined;
       return { message: last ? `마지막 저장된 답변입니다.\n\n${last.content.slice(0, 150_000)}` : '아직 저장된 답변이 없습니다. 이 채널에 작업을 입력해 주세요.' };
     }
-    if (message.action === 'status') return { ready, busy: busy && channel === activeChannel, preference, permission, modelCeiling, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `권한: ${permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'} · 토큰 제한 없음. PC 읽기 전용 잠금: ${host.permissionCeiling() === 'read-only' ? '켜짐' : '꺼짐'}` };
+    if (message.action === 'status') return { ready, busy: !!run, activeCount: runs.size, canStart: runs.size < 2 && ![...runs.values()].some(r => !r.isolated) && (isolated || runs.size === 0) && ![...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`)), preference, permission, access, modelCeiling, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `접근: ${isolated ? access === 'search' ? '인터넷 검색만 · PC 접근 불가' : '격리 작업 · 기존 PC 파일 접근 불가' : permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'}` };
     if (message.action === 'access') {
       if (message.guildAdmin !== true) throw new Error('PC 접근 권한 변경은 서버 관리자만 할 수 있습니다.');
       if (busy && channel === activeChannel) throw new Error('작업 중에는 권한을 바꿀 수 없습니다. 먼저 /robot stop을 사용하세요.');
@@ -175,26 +209,47 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (message.action === 'approval') return channel === activeChannel ? approval ?? { message: '대기 중인 승인이 없습니다.' } : { message: '본인의 승인 요청이 없습니다.' };
     if (message.action === 'stop') {
       if (!busy || channel !== activeChannel) return { ok: false, message: '이 채널에서 실행 중인 작업이 없습니다.' };
-      return rpc('chat.cancel', { conversationId: activeConversation });
+      if (run) run.cancelled = true;
+      if (!activeConversation) return { ok: true };
+      return scopedRpc('chat.cancel', { conversationId: activeConversation });
     }
     if (message.action === 'approve') {
       if (channel !== activeChannel || !approval || approval.requestId !== message.requestId) throw new Error('만료되었거나 다른 작업의 승인 요청입니다.');
-      const current = approval; approval = undefined;
-      return rpc('chat.confirmResponse', { ...current, approve: message.approve === true });
+      const current = approval; if (run) run.approval = undefined;
+      return scopedRpc('chat.confirmResponse', { ...current, approve: message.approve === true });
     }
-    if (busy) throw new Error('다른 작업을 처리하고 있습니다. /robot stop으로 중지한 뒤 다시 요청하세요.');
+    if (message.action === 'steer') {
+      if (!run?.conversation || typeof message.text !== 'string' || !message.text.trim() || message.text.length > 6000) throw new Error('실행 중인 본인 작업에 추가할 지시를 입력하세요.');
+      await scopedRpc('chat.steer', { conversationId: run.conversation, text: message.text });
+      return { message: '추가 지시를 전달했습니다. 현재 단계가 끝나는 안전한 지점에서 반영됩니다.' };
+    }
+    if (run) throw new Error('이 티켓에서 이미 작업 중입니다. 추가 지시 또는 대기열을 사용하세요.');
     const conversations = ctx.storage.get<Record<string, string>>('conversations') ?? {};
     if (message.action === 'new') {
-      delete conversations[channel]; ctx.storage.set('conversations', conversations);
+      delete conversations[conversationKey]; ctx.storage.set('conversations', conversations);
+      results.delete(resultKey);
       return { message: '다음 명령부터 새 대화를 시작합니다.' };
     }
     if (message.action !== 'ask' || typeof message.text !== 'string' || !message.text.trim() || message.text.length > 6000) throw new Error('명령은 1~6000자로 입력하세요.');
+    const attachmentContext = discordAttachmentContext(message.attachments);
+    if (runs.size >= 2 || [...runs.values()].some(r => !r.isolated) || (!isolated && runs.size > 0)
+      || [...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`))) throw new Error('실행 슬롯이 사용 중입니다. 대기열에서 순서대로 실행합니다.');
     const commandGeneration = generation;
-    results.delete(channel);
-    busy = true; activeChannel = channel;
+    results.delete(resultKey);
+    const currentRun: Run = { conversation: '', isolated, startedAt: Date.now(), lastProgress: 0, preview: '' };
+    runs.set(channel, currentRun); busy = true;
+    const assertLive = () => { if (commandGeneration !== generation || !ready || currentRun.cancelled || runs.get(channel) !== currentRun) throw new Error('연결 변경 또는 작업 중지로 요청이 취소되었습니다.'); };
     try {
       let providerId = message.providerId || preference.providerId;
       let model = message.model || preference.model;
+      if (isolated) {
+        const catalog = await host.models();
+        if (!Array.isArray(catalog)) throw new Error('격리 작업용 모델 목록을 확인할 수 없습니다.');
+        const selected = providerId ? catalog.find(p => p.providerId === providerId) : catalog.find(p => p.isDefault) ?? catalog[0];
+        if (!selected) throw new Error('PC에 연결된 공급자가 없습니다. PC 앱에서 모델을 연결하세요.');
+        providerId = selected.providerId; model ||= selected.model;
+        assertDiscordModelAllowed(modelCeiling, model);
+      }
       if (modelCeiling !== 'unlimited') {
         const catalog = await host.models();
         if (!Array.isArray(catalog)) throw new Error('모델 설정을 확인할 수 없습니다.');
@@ -205,32 +260,49 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         assertDiscordModelAllowed(modelCeiling, model);
         if (commandGeneration !== generation) throw new Error('Discord 연결이 변경되어 요청이 취소되었습니다.');
       }
-      if (!conversations[channel]) {
+      if (!conversations[conversationKey]) {
+        assertLive();
         if (Object.keys(conversations).length >= 64) throw new Error('Discord 대화 채널 한도(64)에 도달했습니다.');
         const result = await rpc('conversations.create', { title: 'Discord', permissionMode: permission, tokenPolicy: 'audit-only' });
-        conversations[channel] = result.id;
-        ctx.storage.set('conversations', conversations);
+        conversations[conversationKey] = result.id;
+        ctx.storage.set('conversations', { ...(ctx.storage.get<Record<string, string>>('conversations') ?? {}), [conversationKey]: result.id });
       }
-      activeConversation = conversations[channel]!;
-      const result = await rpc('chat.start', {
-        conversationId: activeConversation, text: message.text, permissionMode: permission, tokenPolicy: 'audit-only',
+      assertLive();
+      currentRun.conversation = conversations[conversationKey]!;
+      currentRun.connection = new DiscordRunConnection(host.port(), event => {
+        if (commandGeneration !== generation || runs.get(channel) !== currentRun || event.data?.conversationId !== currentRun.conversation) return;
+        if (event.event === 'chat.confirm') {
+          currentRun.approval = { requestId: event.data.requestId, conversationId: currentRun.conversation };
+          send({ event: 'approval', scopeKey: channel, data: event.data });
+        } else if (['chat.status', 'chat.tool', 'chat.delta'].includes(event.event)) {
+          if (event.event === 'chat.delta') currentRun.preview = (currentRun.preview + String(event.data.text ?? '')).slice(-1400);
+          if (Date.now() - currentRun.lastProgress < 2500) return;
+          currentRun.lastProgress = Date.now();
+          send({ event: 'progress', scopeKey: channel, text: currentRun.preview || (event.event === 'chat.tool' ? `도구 실행: ${String(event.data.name).slice(0, 80)}` : String(event.data.status ?? '모델 응답 생성 중').slice(0, 160)), elapsed: Math.floor((Date.now() - currentRun.startedAt) / 1000) });
+        }
+      });
+      await currentRun.connection.authenticate(grantToken);
+      assertLive();
+      const result = await currentRun.connection.call('chat.start', {
+        conversationId: currentRun.conversation, text: message.text + attachmentContext, permissionMode: permission, tokenPolicy: 'audit-only',
         discordModelCeiling: modelCeiling,
+        ...(isolated ? { discordIsolation: access } : {}),
         ...(providerId ? { providerId } : {}),
         ...(model ? { providerModel: model } : {}),
         reasoningEffort: ['auto', 'low', 'medium', 'high'].includes(message.effort) ? message.effort : preference.effort || 'auto',
       }, 0);
-      const outcome = { ok: result?.ok !== false, text: typeof result?.text === 'string' ? result.text.slice(0, 150_000) : '', ...(result?.error ? { error: String(result.error).slice(0, 1500) } : {}) };
+      const outcome = { ok: result?.ok !== false, artifactOnly: isolated, text: typeof result?.text === 'string' ? result.text.slice(0, 384_000) + (result.text.length > 384_000 ? '\n\n[전송 안전 한도를 초과했습니다. 나머지 내용을 별도 결과 파일로 요청하세요.]' : '') : '', ...(result?.error ? { error: String(result.error).slice(0, 1500) } : {}) };
       const files = outcome.ok && outcome.text ? chatFileLinks(outcome.text).slice(0, 3) : [];
       if (commandGeneration === generation) {
-        results.delete(channel); results.set(channel, { ...outcome, files });
+        results.delete(resultKey); results.set(resultKey, { ...outcome, files });
         if (results.size > 32) results.delete(results.keys().next().value!);
       }
       return { ...outcome, files };
     } catch (error) {
-      if (commandGeneration === generation) results.set(channel, { ok: false, error: error instanceof Error ? error.message : '작업 전달에 실패했습니다.' });
-      if (commandGeneration === generation && activeConversation) await rpc('chat.cancel', { conversationId: activeConversation }).catch(() => {});
+      if (commandGeneration === generation) results.set(resultKey, { ok: false, error: error instanceof Error ? error.message : '작업 전달에 실패했습니다.' });
+      if (commandGeneration === generation && currentRun.conversation) await currentRun.connection?.call('chat.cancel', { conversationId: currentRun.conversation }).catch(() => {});
       throw error;
-    } finally { if (commandGeneration === generation) { busy = false; approval = undefined; activeChannel = ''; activeConversation = ''; } }
+    } finally { currentRun.connection?.close(); if (runs.get(channel) === currentRun) runs.delete(channel); busy = runs.size > 0; }
   }
   async function start() {
     if (child || starting) return status();
@@ -245,8 +317,10 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (!runner) throw new Error('Discord 브리지 파일이 없습니다. 설치를 복구하세요.');
     lastError = ''; lastStart = Date.now(); starting = true; paused = false;
     const current = ++generation;
+    let hasBeenReady = false;
     try {
       const grant = host.issue(); linkId = grant.id;
+      grantToken = grant.token;
       ctx.storage.set('activeLinkId', grant.id);
       socket = new WebSocket(`ws://127.0.0.1:${host.port()}/ws`, 'mr-robot-rpc-v1', { handshakeTimeout: 10_000, maxPayload: 4_000_000 });
       socket.on('message', (raw) => {
@@ -257,9 +331,6 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
           pending.delete(message.id); if (p.timer) ctx.clearTimeout(p.timer);
           if (message.error) p.reject(new Error('PC 작업 실패: ' + String(message.error.message ?? message.error).slice(0, 600)));
           else p.resolve(message.result);
-        } else if (message.event === 'chat.confirm' && busy && message.data?.conversationId === activeConversation) {
-          approval = { requestId: message.data.requestId, conversationId: activeConversation, summary: String(message.data.summary ?? '').slice(0, 1400) };
-          send({ event: 'approval', scopeKey: activeChannel, data: message.data });
         }
       });
       socket.on('error', () => { lastError = 'PC 연결 오류'; stop(); });
@@ -276,13 +347,13 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       child.stdout.on('data', (chunk: string) => {
         if (current !== generation) return;
         buffer += chunk;
-        if (buffer.length > 128_000) { lastError = 'Discord 브리지 출력 한도 초과'; stop(); return; }
+        if (buffer.length > 400_000) { lastError = 'Discord 브리지 출력 한도 초과'; stop(); return; }
         let end: number;
         while ((end = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
           if (!line.startsWith(PREFIX)) continue;
           let message: any; try { message = JSON.parse(line.slice(PREFIX.length)); } catch { continue; }
-          if (message.event === 'revoked') { if (busy && message.scopeKey === activeChannel) void rpc('chat.cancel', { conversationId: activeConversation }).catch(() => {}); continue; }
+          if (message.event === 'revoked') { const run = runs.get(message.scopeKey); if (run) { run.cancelled = true; void run.connection?.call('chat.cancel', { conversationId: run.conversation }).catch(() => {}); } continue; }
           if (message.event === 'workspace.ready' && workspace.state === 'pending') {
             if (!(ctx.storage.get<string[]>('allowedGuildIds') ?? []).includes(message.guildId) || ![message.channelId, message.panelId].every(id => typeof id === 'string' && /^\d{15,22}$/.test(id))) continue;
             const state = threads.state();
@@ -298,9 +369,9 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
           if (message.event === 'ready' && /^\d{15,22}$/.test(String(message.owner))) {
             const guilds = Array.isArray(message.guilds) ? message.guilds.filter((id: unknown) => typeof id === 'string' && /^\d{15,22}$/.test(id)) : [];
             if (!ctx.storage.get<string[]>('allowedGuildIds')?.length && guilds.length === 1) ctx.storage.set('allowedGuildIds', guilds);
-            owner = String(message.owner); ready = guilds.some((id: string) => ctx.storage.get<string[]>('allowedGuildIds')?.includes(id)); continue;
+            owner = String(message.owner); ready = guilds.some((id: string) => ctx.storage.get<string[]>('allowedGuildIds')?.includes(id)); hasBeenReady ||= ready; continue;
           }
-          if (message.event === 'disconnected') { ready = false; if (busy) void rpc('chat.cancel', { conversationId: activeConversation }).catch(() => {}); continue; }
+          if (message.event === 'disconnected') { ready = false; for (const run of runs.values()) { run.cancelled = true; void run.connection?.call('chat.cancel', { conversationId: run.conversation }).catch(() => {}); } continue; }
           if (message.event === 'error') {
             const safeErrors: Record<string, string> = { duplicate: '기존 시큐리티봇 또는 Discord 플러그인이 실행 중입니다. 먼저 종료하거나 함께 실행 모드를 사용하세요.', config: 'config.json의 bot_token 연결정보를 읽을 수 없습니다.', mode: 'Discord 실행 모드가 올바르지 않습니다.' };
             lastError = safeErrors[String(message.code)] ?? 'Discord 로그인/명령 등록 실패. 봇 토큰·서버 권한·Python 의존성을 확인하세요.';
@@ -315,14 +386,14 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       child.once('error', () => { if (current === generation) { lastError = 'Discord Python 실행 실패'; stop(); } });
       child.once('exit', () => { if (current === generation) { lastError ||= 'Discord 봇이 종료되었습니다. 중복 실행 여부를 확인하세요.'; stop(); } });
       send({ botDirectory: settings.botDirectory, mode: settings.mode, threadState: threads.state() });
-      ctx.setTimeout(() => { if (current === generation && !ready) { lastError = 'Discord 로그인 시간이 초과되었습니다. 봇 토큰과 네트워크를 확인하세요.'; stop(); } }, 45_000);
+      ctx.setTimeout(() => { if (current === generation && !hasBeenReady) { lastError = 'Discord 로그인 시간이 초과되었습니다. 봇 토큰과 네트워크를 확인하세요.'; stop(); } }, 45_000);
       return status();
     } catch (error) { stop(); throw error; }
     finally { starting = false; }
   }
   return {
-    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.4.2', kind: 'integration', enabledByDefault: false,
-      description: '등록 서버 관리자 전용 /robot. 권한 선택, 누적 토큰 제한 없는 실행, 승인·중지 지원.', permissions: ['network.client'] },
+    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.7.0', kind: 'integration', enabledByDefault: false,
+      description: 'allow_ai 개인 티켓 · 사용자별 격리·모델 제한 · 관리자 권한 관리 · 병렬 대기열·추가 지시·파일 지원.', permissions: ['network.client'] },
     activate(context) {
       ctx = context;
       threads = new DiscordSessions(ctx.storage);
@@ -333,12 +404,13 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         const channelName = String((value as any)?.channelName || 'ai_talk');
         if (!/^[a-z0-9_-]{1,80}$/.test(channelName)) throw new Error('채널 이름은 영문 소문자·숫자·밑줄·하이픈으로 입력하세요.');
         const guilds = ctx.storage.get<string[]>('allowedGuildIds') ?? [];
-        if (!ready || guilds.length !== 1) throw new Error('등록 서버에 Discord가 연결된 뒤 실행하세요.');
+        const guildId = String((value as any)?.guildId ?? (guilds.length === 1 ? guilds[0] : ''));
+        if (!ready || !guilds.includes(guildId)) throw new Error('연결된 등록 서버를 선택한 뒤 실행하세요.');
         if (workspace.state === 'pending') return status();
         workspace = { state: 'pending', message: '티켓 채널·패널 설치 중' };
         const request = workspace;
         ctx.setTimeout(() => { if (workspace === request) workspace = { state: 'error', message: '티켓 설치 응답 지연. 상태를 확인하고 다시 시도하세요.' }; }, 60_000);
-        send({ event: 'workspace.setup', guildId: guilds[0], channelName });
+        send({ event: 'workspace.setup', guildId, channelName });
         return status();
       }, { ...opts, destructive: true });
       ctx.registerCommand('discord.config.get', () => config(), opts);

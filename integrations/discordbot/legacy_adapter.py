@@ -20,6 +20,7 @@ def run(settings, bridge_type, emit):
         original_ready = SecurityBotClient.on_ready
         original_disconnect = getattr(SecurityBotClient, 'on_disconnect', None)
         original_message = getattr(SecurityBotClient, 'on_message', None)
+        original_resumed = getattr(SecurityBotClient, 'on_resumed', None)
 
         async def setup(client):
             client._mr_robot_thread_state = settings.get('threadState')
@@ -31,11 +32,21 @@ def run(settings, bridge_type, emit):
             await original_ready(client)
             bridge = client._mr_robot_bridge
             bridge.refresh_allowed_guilds()
+            bridge.gateway_ready = True
+            emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
+
+        async def resumed(client):
+            if original_resumed:
+                await original_resumed(client)
+            bridge = client._mr_robot_bridge
+            bridge.refresh_allowed_guilds()
+            bridge.gateway_ready = True
             emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
 
         async def disconnected(client):
             emit({'event': 'disconnected'})
             if hasattr(client, '_mr_robot_bridge'):
+                client._mr_robot_bridge.gateway_ready = False
                 await client._mr_robot_bridge.threads.disconnected()
             if original_disconnect:
                 await original_disconnect(client)
@@ -45,7 +56,7 @@ def run(settings, bridge_type, emit):
             if original_message:
                 await original_message(client, value)
 
-        replacements = {'setup_hook': setup, 'on_ready': ready, 'on_disconnect': disconnected, 'on_message': message}
+        replacements = {'setup_hook': setup, 'on_ready': ready, 'on_resumed': resumed, 'on_disconnect': disconnected, 'on_message': message}
         originals = {name: SecurityBotClient.__dict__.get(name) for name in replacements}
         try:
             for name, fn in replacements.items():

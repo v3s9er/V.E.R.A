@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { pooledCodexText, closeTextWorkers } from '../src/ai/cli-text-pool.js';
+import type { ChatRequest } from '../src/ai/provider.js';
+const call = (req: ChatRequest, model = 'fixture') => pooledCodexText({ command: process.execPath, prefixArgs: [fileURLToPath(new URL('./fixtures/text-app-server.mjs', import.meta.url))], env: process.env, providerId: 'fixture', model, req });
+const base: ChatRequest = { system: 'fixture tools only', promptCacheKey: 'guild:user:ticket', turns: [{ role: 'user', content: 'FIRST_PRIVATE_TEXT' }] };
+try {
+  const events: string[] = [];
+  const a = await call({ ...base, onEvent: e => { if (e.type === 'status') events.push(e.text); } });
+  assert.equal(a.text, 'turn 1');
+  const next: ChatRequest = { ...base, turns: [...base.turns, { role: 'assistant', content: a.text }, { role: 'user', content: 'next instruction' }] };
+  const b = await call(next);
+  assert.equal(b.text, 'turn 2', 'same conversation reuses the process/thread');
+  assert.equal(b.usage.promptTokens, 100, 'last turn usage, not accumulated total');
+  assert.ok(events.some(e => e.includes('검토')));
+  assert.equal((await call({ ...base, promptCacheKey: 'guild:OTHER:ticket' })).text, 'turn 1', 'no cross-user reuse');
+  assert.equal((await call({ ...next, system: 'changed permissions' })).text, 'turn 1', 'changed instructions rebuild thread');
+  assert.equal((await call({ ...base, turns: [{ role: 'user', content: 'rewritten history' }] })).text, 'turn 1', 'history edits invalidate session');
+  assert.equal((await call(base, 'other-model')).text, 'turn 1');
+  await assert.rejects(call({ ...base, promptCacheKey: 'attack', turns: [{ role: 'user', content: 'NATIVE_ATTACK' }] }), /네이티브/);
+  const abort = new AbortController();
+  const pending = call({ ...base, promptCacheKey: 'cancel', signal: abort.signal, turns: [{ role: 'user', content: 'WAIT_FOREVER' }] });
+  setTimeout(() => abort.abort(), 100);
+  await assert.rejects(pending, /중지/);
+  closeTextWorkers();
+  const controllers = Array.from({ length: 4 }, () => new AbortController());
+  const busyWorkers = controllers.map((c, i) => call({ ...base, promptCacheKey: `busy-${i}`, signal: c.signal, turns: [{ role: 'user', content: 'WAIT_FOREVER' }] }));
+  const drained = Promise.allSettled(busyWorkers);
+  await assert.rejects(call({ ...base, promptCacheKey: 'fifth' }), /모두 사용 중/);
+  for (const c of controllers) c.abort();
+  assert.ok((await drained).every(r => r.status === 'rejected'));
+  assert.equal((await call({ ...base, promptCacheKey: 'after-cancel' })).text, 'turn 1', 'cancellation releases bounded worker slots');
+  console.log('Isolated subscription pool: reuse, incremental input, usage, authority/history invalidation, native-tool rejection and cancellation passed.');
+} finally { closeTextWorkers(); }

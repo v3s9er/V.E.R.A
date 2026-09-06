@@ -3,6 +3,7 @@ import { networkInterfaces, hostname as osHostname, platform, homedir } from 'no
 import { join as joinFilePath } from 'node:path';
 import { chatFileRoot } from './chat-file-access.js';
 import { readDiscordFile } from './discord-files.js';
+import { createDiscordIsolation, readIsolatedArtifact } from './discord-isolation.js';
 import type { AddressInfo } from 'node:net';
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type {
@@ -82,7 +83,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.14';
+export const VERSION = '0.4.18';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -711,9 +712,10 @@ export class AgentServer {
     },
     revoke: (id) => { this.discordLinkIds.delete(id); try { this.config.revokeDeviceLink(id); } finally { this.invalidateDeviceLink(id); } },
     permissionCeiling: () => this.config.settings.safety.mode === 'read-only' ? 'read-only' : 'full',
-    readChatFile: (id, path, offset, limit, version) => {
+    readChatFile: (id, path, offset, limit, version, isolated) => {
       const conversation = this.conversations.get(id);
       if (!conversation || this.config.settings.safety.mode === 'read-only') throw new Error('파일 접근 권한이 없습니다.');
+      if (isolated) return readIsolatedArtifact(id, path, offset, limit, version);
       const workspace = (this.workspacesList().find(w => w.id === conversation.workspaceId) ?? this.workspacesList().find(w => w.isDefault))?.path;
       // The private Discord host calls this only after current scope full-access
       // validation; the conversation's initial default can predate /robot access.
@@ -723,7 +725,7 @@ export class AgentServer {
     },
     models: (providerId) => providerId
       ? this.providersModels(providerId).then(models => [...new Set(models)].filter(model => typeof model === 'string' && model.length <= 200).slice(0, 1000))
-      : this.registry.list().map(provider => ({ providerId: provider.id, name: provider.label, model: provider.model, isDefault: provider.isDefault, supportedReasoning: provider.supportedReasoning })),
+      : this.registry.list().map(provider => ({ providerId: provider.id, type: provider.type, name: provider.label, model: provider.model, isDefault: provider.isDefault, supportedReasoning: provider.supportedReasoning })),
   });
   private readonly webCryptoObserverPlugin = createWebCryptoObserverPlugin({
     policyProvider: {
@@ -1976,6 +1978,8 @@ export class AgentServer {
   }
 
   async stop(): Promise<void> {
+    const { closeTextWorkers } = await import('../ai/cli-text-pool.js');
+    closeTextWorkers();
     this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
     await this.revokeToolPortalAuthority('Mr.Robot Agent가 종료되었습니다.');
@@ -2405,6 +2409,8 @@ export class AgentServer {
       if (this.busyConversations.has(conversationId)) throw new Error('conversation is already running on another client');
       session.conversationId = conversationId;
       const conversation = this.conversations.get(conversationId) as ConversationDetail;
+      const discordIsolation = client.state.auth?.trustedDiscord === true && (body.discordIsolation === 'isolated' || body.discordIsolation === 'search');
+      const isolation = discordIsolation ? createDiscordIsolation(conversationId, body.discordIsolation === 'search' || this.config.settings.safety.mode === 'read-only') : undefined;
       const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : conversation.workspaceId;
       const workspace = this.config.workspaces.find((item) => item.id === workspaceId)
         ?? this.config.workspaces.find((item) => item.isDefault);
@@ -2445,10 +2451,10 @@ export class AgentServer {
         }
       };
       try {
-        const extraTools = this.plugins.aiTools(text);
+        const extraTools = isolation ? [] : this.plugins.aiTools(text);
         const retained = [
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
-          this.memory.context(text) ? `사용자가 저장한 장기 기억:\n${this.memory.context(text)}` : '',
+          !isolation && this.memory.context(text) ? `사용자가 저장한 장기 기억:\n${this.memory.context(text)}` : '',
         ].filter(Boolean).join('\n\n');
         const result = await this.loop.run(
           this.conversations.turns(conversationId),
@@ -2484,7 +2490,8 @@ export class AgentServer {
             context: retained,
             permissionMode: effectivePermissionMode,
             routing: conversationRouting,
-            workspacePath: workspace?.path,
+            workspacePath: isolation ? undefined : workspace?.path,
+            isolation,
             cacheKey: `mrrobot:${conversationId}`,
             tokenPolicy: effectiveTokenPolicy,
             trustedPermissionOverride: auth.trustedDiscord === true,

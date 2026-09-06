@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { createCliProgress } from './cli-progress.js';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isolatedPrompt, parseIsolatedReply, ISOLATED_OUTPUT_SCHEMA } from './cli-isolated.js';
+import { pooledCodexText } from './cli-text-pool.js';
+import { normalizeProviderUsageReport } from './provider.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
@@ -358,6 +362,7 @@ export class CliProvider implements AiProvider {
   readonly supportsTools = false;
   readonly supportedReasoning: ReasoningEffort[];
   private modelList?: Promise<string[]>;
+  private isolatedHealthUntil = 0;
 
   constructor(
     readonly id: string,
@@ -409,6 +414,39 @@ export class CliProvider implements AiProvider {
     const parsed = this.type === 'claude-cli' ? parseClaudeOutput(raw) : parseCodexOutput(raw);
     req.onEvent?.({ type: 'text', text: parsed.text });
     return { text: parsed.text, toolCalls: [], usage: parsed.usage };
+  }
+
+  async chatIsolated(req: ChatRequest): Promise<ProviderResult> {
+    req.signal?.throwIfAborted();
+    if (this.type === 'codex-cli') return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type), model: this.model, providerId: this.id, req });
+    if (this.type === 'claude-cli' && Date.now() >= this.isolatedHealthUntil) {
+      const health = await this.ping();
+      if (!health.ok) throw new Error('PC 소유자의 Claude 구독 로그인이 필요합니다. PC에서 claude auth login으로 연결한 뒤 다시 요청하세요. API 키로 자동 전환하지 않습니다.');
+      this.isolatedHealthUntil = Date.now() + 30_000;
+      req.signal?.throwIfAborted();
+    }
+    const cwd = mkdtempSync(join(tmpdir(), 'mrrobot-text-worker-'));
+    const invocation = resolveCliInvocation(this.type, this.command);
+    try {
+      const raw = await runCliProcess({
+        command: invocation.command,
+        args: [...invocation.prefixArgs, '-p', '--output-format', 'json', '--no-session-persistence',
+          '--safe-mode', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+          '--disable-slash-commands', '--no-chrome', '--permission-mode', 'plan', '--tools', '',
+          '--setting-sources', '', '--json-schema', JSON.stringify(ISOLATED_OUTPUT_SCHEMA),
+          ...(this.model ? ['--model', this.model] : [])],
+        env: cliSubscriptionEnvironment(this.type), label: this.label, cwd,
+        stdin: isolatedPrompt(req), timeoutMs: 180_000, signal: req.signal,
+      });
+      const output = JSON.parse(raw);
+      if (output.is_error) throw new Error('Claude 구독 모델이 작업을 완료하지 못했습니다.');
+      const usage = output.usage ?? {};
+      return parseIsolatedReply(output.structured_output ? JSON.stringify(output.structured_output) : String(output.result ?? ''), req,
+        normalizeProviderUsageReport({ promptTokens: usage.input_tokens, completionTokens: usage.output_tokens, cachedPromptTokens: usage.cache_read_input_tokens, cacheWritePromptTokens: usage.cache_creation_input_tokens }));
+    } finally {
+      // Only the fresh, privately allocated scratch directory is removed.
+      try { rmSync(cwd, { recursive: true, force: true }); } catch { /* Windows handles may briefly remain open. */ }
+    }
   }
 
   async runAgent(req: NativeAgentRequest): Promise<ProviderResult> {

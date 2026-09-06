@@ -23,10 +23,18 @@ await new Promise<void>(resolve => server.once('listening', resolve));
 let runId: number | undefined;
 let socket: any;
 let lastRun: any;
+let deferIsolated = false;
+const held = new Map<any, number>();
 server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   const req = JSON.parse(raw.toString());
   if (req.method === 'chat.start') {
     lastRun = req.params;
+    if (req.params.discordIsolation) {
+      assert.equal(req.params.permissionMode, 'workspace');
+      if (deferIsolated) { held.set(ws, req.id); return; }
+      ws.send(JSON.stringify({ id: req.id, result: { text: 'isolated result' } }));
+      return;
+    }
     assert.equal(req.params.permissionMode, 'full'); assert.equal(req.params.tokenPolicy, 'audit-only');
     runId = req.id;
     ws.send(JSON.stringify({ id: 0, event: 'chat.confirm', data: { conversationId: 'test-conversation', requestId: 'approval-1', summary: 'Test command' } }));
@@ -36,10 +44,14 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
     assert.equal(req.params.requestId, 'approval-1');
     ws.send(JSON.stringify({ id: runId, ok: true, result: { text: 'Test finished' } }));
   }
+  if (req.method === 'chat.cancel' && held.has(ws)) {
+    ws.send(JSON.stringify({ id: held.get(ws), result: { ok: false, error: 'fixture cancellation' } }));
+    held.delete(ws);
+  }
   ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
 const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra', 'unknown', 'sol'];
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -93,6 +105,31 @@ try {
   assert.equal((await request({ action: 'models' })).result[0].model, '', 'above-cap configured default not offered');
   assert.equal((await request({ action: 'status', channelId: '666666666666666666' })).result.modelCeiling, 'sol', 'new channels cannot reset per-user cap');
   assert.equal((await request({ action: 'status', userId: '555555555555555555' })).result.modelCeiling, 'unlimited', 'other users isolated');
+  const basic = { guildAdmin: false, allowAi: true, userId: '555555555555555555' };
+  assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
+  assert.equal((await request({ ...basic, action: 'models' })).result[0].type, 'codex-cli', 'ordinary users see the same owner subscriptions');
+  assert.equal((await request({ ...basic, action: 'ask', text: 'create a safe report' })).result.text, 'isolated result');
+  assert.equal(lastRun.discordIsolation, 'isolated');
+  assert.equal(lastRun.providerId, 'provider');
+  assert.equal(lastRun.providerModel, 'gpt-6-astra', 'ordinary users follow the owner default within their ceiling');
+  const attachment = { name: 'input.pdf', text: 'attachment fixture about public squares', size: 100, sha256: 'a'.repeat(64), status: 'extracted', warning: '' };
+  assert.equal((await request({ ...basic, action: 'ask', text: 'summarize', attachments: [attachment] })).result.text, 'isolated result');
+  assert.match(lastRun.text, /attachment fixture about public squares/);
+  assert.equal(lastRun.discordIsolation, 'isolated', 'attachments do not grant PC authority');
+  assert.ok((storage.get('conversations') as any)[`${identity.guildId}:${identity.channelId}:${basic.userId}:isolated`]);
+  assert.match((await request({ ...basic, guildAdmin: true, action: 'result' })).result.message, /^아직 저장된 답변이 없습니다/, 'full scope does not reuse isolated cached reply');
+  lastRun = undefined;
+  assert.ok((await request({ ...basic, action: 'user-access', targetUserId: basic.userId, mode: 'full', confirmFull: true })).error);
+  assert.ok((await request({ ...basic, action: 'thread.bind' })).error);
+  assert.ok((await request({ ...basic, allowAi: false, action: 'status' })).error);
+  assert.ok((await request({ action: 'user-access', targetUserId: basic.userId, mode: 'full' })).error);
+  assert.ok((await request({ action: 'user-access', targetUserId: basic.userId, mode: 'search' })).result);
+  assert.equal((await request({ ...basic, action: 'status', channelId: '666666666666666666' })).result.access, 'search');
+  assert.ok((await request({ ...basic, action: 'file.read', path: 'C:\\private.txt', offset: 0, limit: 100 })).error);
+  assert.ok((await request({ action: 'user-access', targetUserId: basic.userId, mode: 'blocked' })).result);
+  assert.ok((await request({ ...basic, action: 'models' })).error);
+  assert.ok((await request({ action: 'user-access', targetUserId: basic.userId, mode: 'default' })).result);
+  assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
   assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-6-astra', effort: 'auto' })).error);
   assert.ok((await request({ action: 'ask', text: 'blocked explicit', model: 'gpt-6-astra' })).error);
   assert.ok((await request({ action: 'ask', text: 'blocked default' })).error);
@@ -139,6 +176,27 @@ try {
   await waitFor(() => commands.get('discord.status')!().workspace.state === 'ready');
   assert.equal((storage.get('threadState') as any).bindings[identity.guildId], identity.channelId);
   assert.ok(replies.some(r => r.event === 'thread.state'));
+  deferIsolated = true;
+  const peer = { ...basic, userId: '777777777777777777', channelId: '888888888888888888' };
+  emit({ ...identity, ...basic, id: 'parallel-a', action: 'ask', text: 'parallel A' });
+  emit({ ...identity, ...peer, id: 'parallel-b', action: 'ask', text: 'parallel B' });
+  await waitFor(() => held.size === 2);
+  assert.equal(commands.get('discord.status')!().activeCount, 2);
+  assert.ok((await request({ ...basic, userId: '666666666666666666', action: 'ask', text: 'third' })).error);
+  assert.ok((await request({ action: 'ask', text: 'full exclusive' })).error);
+  assert.ok((await request({ ...basic, action: 'stop' })).result);
+  await waitFor(() => replies.some(r => r.id === 'parallel-a'));
+  assert.equal(held.size, 1, 'stop affects only the caller websocket/session');
+  assert.equal(replies.some(r => r.id === 'parallel-b'), false);
+  for (const [ws, id] of held) ws.send(JSON.stringify({ id, result: { text: 'peer result' } }));
+  held.clear();
+  await waitFor(() => replies.some(r => r.id === 'parallel-b'));
+  assert.equal(replies.find(r => r.id === 'parallel-b').result.text, 'peer result');
+  assert.equal(commands.get('discord.status')!().activeCount, 0);
+  emit({ event: 'disconnected' });
+  assert.match((await request({ ...basic, action: 'status' })).error, /재연결/);
+  emit({ event: 'ready', owner: '123456789012345678', guilds: [identity.guildId] });
+  assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
   enabled = false; events.get('plugins.changed')!();
   assert.ok(revoked > 0); assert.equal(commands.get('discord.status')!().running, false);
   console.log('Discord tests passed: registered guild administrator, explicit full permission, per-user approval isolation, unlimited RPC, results, disable/revoke');

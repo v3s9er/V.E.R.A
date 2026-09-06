@@ -93,6 +93,7 @@ export interface ProviderHealth {
 }
 
 export type ProviderEvent =
+  | { type: 'status'; text: string }
   | { type: 'text'; text: string }
   | { type: 'tool'; call: ProviderToolCall };
 
@@ -120,6 +121,8 @@ export interface NativeAgentRequest {
 }
 
 export interface AiProvider {
+  /** Optional subscription text worker with native tools/environment removed. */
+  chatIsolated?(req: ChatRequest): Promise<ProviderResult>;
   readonly id: string;
   readonly label: string;
   readonly type: ProviderType;

@@ -57,7 +57,7 @@ export class DiscordSessions {
       delete state.sessions[m.channelId];
       for (const key of ['conversations', 'permissions', 'preferences']) {
         const entries = this.storage.get<Record<string, unknown>>(key) ?? {};
-        delete entries[scope]; this.storage.set(key, entries);
+        delete entries[scope]; delete entries[`${scope}:isolated`]; this.storage.set(key, entries);
       }
     } else throw new Error('지원하지 않는 스레드 명령입니다.');
     save(); return result({ ok: true });
