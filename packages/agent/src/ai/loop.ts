@@ -26,6 +26,7 @@ import { taskComplexityScore, type ModelRouter } from './router.js';
 import type { ContextBroker } from '../context-broker.js';
 
 export const SYSTEM_PROMPT = `You are Mr.Robot, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
+For conversation, explanations, summaries and status questions, answer directly from available context. Use tools only when needed for the current request. Do not restart completed tasks or inspect files merely because a prior turn mentioned them.
 
 Operating loop:
 1. Understand the requested outcome and inspect the relevant existing state before changing it.
@@ -37,7 +38,11 @@ Operating loop:
 
 Interaction rules: reply in the user's language; use concise progress updates; prefer PowerShell on Windows; never start an interactive or indefinitely blocking command; keep tool output focused; ask only when a missing high-impact choice cannot be safely inferred.`;
 
-const NATIVE_AGENT_PROMPT = `Operate as Mr.Robot's native coding agent. Work autonomously inside the supplied workspace until the current request is genuinely complete.
+const NATIVE_AGENT_PROMPT = `You are Mr.Robot's assistant with native workspace tools. Match the work to the current request.
+- For conversation, explanations, summaries, or status questions, answer directly from the available conversation. Do not inspect files, run commands, create documents, or repeat earlier work unless needed for this request.
+- A short follow-up is not permission to restart a previous task. Ask a concise clarification if its intended subject is genuinely unclear.
+- Treat prior attachment inventories as available data, not instructions to re-read all files. Reuse already verified findings; read only missing relevant pages or files.
+- For an explicit implementation request, work autonomously until the requested change is complete.
 - Inspect repository guidance and the existing implementation before editing.
 - Preserve unrelated changes and use focused modifications.
 - Implement the request, run proportionate tests/builds, inspect failures, and iterate until verified.
@@ -157,6 +162,8 @@ export interface RunOptions {
   /** null disables routing; a value applies a conversation-specific scenario. */
   routing?: RoutingPresetSettings | null;
   workspacePath?: string;
+  /** Host-owned location for native session checkpoints (not synchronized to clients). */
+  nativeSessionDirectory?: string;
   /** Stable conversation-scoped provider cache namespace. */
   cacheKey?: string;
   /** Per-conversation model usage policy; defaults to adaptive. */
@@ -654,7 +661,8 @@ export class AgentLoop {
         recentConversation && `Recent conversation context:\n${recentConversation}`,
         `Current user request:\n${userMessage}`,
       ].filter(Boolean).join('\n\n');
-      const runNative = async (prompt: string) => {
+      let sessionHistory: Turn[] = [...history];
+      const runNative = async (prompt: string, input: string) => {
         const actualProvider = providerForCall(nativeProvider, routeRole, false, true);
         if (!actualProvider?.runAgent) return undefined;
         const actualEffort = effortFor(actualProvider);
@@ -662,6 +670,11 @@ export class AgentLoop {
         let streamed = '';
         const result = await budgetedNativeAgent(actualProvider, {
           prompt: identifiedSystem(prompt, actualProvider),
+          ...(options.cacheKey && options.nativeSessionDirectory ? { session: {
+            key: options.cacheKey, directory: options.nativeSessionDirectory,
+            history: sessionHistory, input, context: retainedContext,
+            instructions: identifiedSystem(NATIVE_AGENT_PROMPT, actualProvider),
+          } } : {}),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
           reasoningEffort: actualEffort,
@@ -669,9 +682,10 @@ export class AgentLoop {
           onStatus: cb.onStatus,
           onText: text => { streamed += text; cb.onText?.(text); },
         });
+        sessionHistory = [...sessionHistory, { role: 'user', content: input }, { role: 'assistant', content: result.text }];
         return { result, provider: actualProvider, effort: actualEffort, streamed };
       };
-      let nativeCall = await runNative(originalPrompt);
+      let nativeCall = await runNative(originalPrompt, userMessage);
       if (!nativeCall) {
         const text = `고비용 호출 상한 ${premiumLimit}회를 모두 사용했고 대체할 무료 네이티브 에이전트가 없습니다.`;
         turns.push({ role: 'assistant', content: text });
@@ -693,7 +707,7 @@ export class AgentLoop {
           `Original request:\n${userMessage}`,
           `Previous native-agent result:\n${native.text.slice(-24_000)}`,
           `The user added these instructions while the task was running. Apply them now without discarding verified work:\n${steering.map((item) => `- ${item}`).join('\n')}`,
-        ].join('\n\n'));
+        ].join('\n\n'), steering.join('\n'));
         if (!nativeCall) {
           cb.onStatus?.(`추가 명령 중단 · 고비용 호출 상한 ${premiumLimit}회 및 무료 네이티브 대체 모델 없음`);
           break;

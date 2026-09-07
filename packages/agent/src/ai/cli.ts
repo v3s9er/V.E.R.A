@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isolatedPrompt, parseIsolatedReply, ISOLATED_OUTPUT_SCHEMA } from './cli-isolated.js';
 import { pooledCodexText } from './cli-text-pool.js';
+import { pooledNativeCodex } from './cli-native-pool.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
@@ -385,6 +386,12 @@ export class CliProvider implements AiProvider {
   }
 
   async chat(req: ChatRequest): Promise<ProviderResult> {
+    if (this.type === 'codex-cli') {
+      // No selected workspace/native run: keep a conversation-scoped text
+      // worker, not a fresh CLI launched in the desktop process's ambient cwd.
+      return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
+        model: this.model, providerId: this.id, req: { ...req, tools: [] } });
+    }
     if (req.tools?.length) {
       // Deliberately ignored. Local CLI adapters are reasoning workers, while
       // Mr.Robot executes computer tools under its own permission policy.
@@ -392,18 +399,11 @@ export class CliProvider implements AiProvider {
     const prompt = transcript(req.system, req.turns);
     const effort = req.reasoningEffort && req.reasoningEffort !== 'auto' ? req.reasoningEffort : undefined;
     const extras = safeCliExtraArgs(this.type, this.extraArgs);
-    const args = this.type === 'claude-cli'
-      ? [
+    const args = [
         '-p', prompt, '--output-format', 'json', '--no-session-persistence',
         '--safe-mode', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--disable-slash-commands', '--no-chrome', '--permission-mode', 'plan', '--tools', '',
         ...(this.model ? ['--model', this.model] : []), ...extras,
-      ]
-      : [
-        'exec', '--json', '--strict-config', '--ignore-user-config', '--ignore-rules',
-        '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only',
-        ...(this.model ? ['--model', this.model] : []),
-        ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []), ...extras,
       ];
 
     const invocation = resolveCliInvocation(this.type, this.command);
@@ -412,7 +412,7 @@ export class CliProvider implements AiProvider {
       args: [...invocation.prefixArgs, ...args],
       env: cliSubscriptionEnvironment(this.type),
       label: this.label,
-      stdin: this.type === 'codex-cli' ? prompt : '',
+      stdin: '',
       timeoutMs: CHAT_TIMEOUT_MS,
       signal: req.signal,
     });
@@ -459,6 +459,11 @@ export class CliProvider implements AiProvider {
     if (req.permissionMode === 'ask') throw new Error('네이티브 CLI에는 확인 대기 권한을 직접 전달할 수 없습니다. 먼저 명시적으로 승인해야 합니다.');
     if (this.type === 'claude-cli' && req.permissionMode !== 'full') {
       throw new Error('Claude Code 네이티브 도구는 OS 수준 작업공간 격리를 보장하지 않아 완전 접근에서만 실행할 수 있습니다.');
+    }
+    if (this.type === 'codex-cli' && req.session) {
+      const invocation = resolveCliInvocation(this.type, this.command);
+      return pooledNativeCodex({ ...invocation, env: cliSubscriptionEnvironment(this.type),
+        providerId: this.id, model: this.model, req });
     }
     const effort = req.reasoningEffort && req.reasoningEffort !== 'auto' ? req.reasoningEffort : undefined;
     const permission = req.permissionMode;

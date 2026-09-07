@@ -58,7 +58,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
   let lastStart = 0;
   let workspace: { state: string; message: string } = { state: 'idle', message: '' };
   let grantToken = '';
-  type Run = { conversation: string; isolated: boolean; cancelled?: boolean; attachmentsAbort?: AbortController; connection?: DiscordRunConnection; startedAt: number; lastProgress: number; preview: string; approval?: { requestId: string; conversationId: string; summary?: string } };
+  type Run = { conversation: string; isolated: boolean; cancelled?: boolean; attachmentsAbort?: AbortController; connection?: DiscordRunConnection; startedAt: number; lastProgress: number; preview: string; status?: string; heartbeat?: NodeJS.Timeout; approval?: { requestId: string; conversationId: string; summary?: string } };
   const runs = new Map<string, Run>();
   const results = new Map<string, unknown>();
   const pending = new Map<number, { resolve(v: any): void; reject(e: Error): void; timer?: NodeJS.Timeout }>();
@@ -244,6 +244,12 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     const currentRun: Run = { conversation: '', isolated, startedAt: Date.now(), lastProgress: 0, preview: '' };
     runs.set(channel, currentRun); busy = true;
     const assertLive = () => { if (commandGeneration !== generation || !ready || currentRun.cancelled || runs.get(channel) !== currentRun) throw new Error('연결 변경 또는 작업 중지로 요청이 취소되었습니다.'); };
+    currentRun.heartbeat = setInterval(() => {
+      if (commandGeneration !== generation || currentRun.cancelled || runs.get(channel) !== currentRun || Date.now() - currentRun.lastProgress < 8000) return;
+      currentRun.lastProgress = Date.now();
+      send({ event: 'progress', scopeKey: channel, text: currentRun.preview || currentRun.status || '요청 준비 중', elapsed: Math.floor((Date.now() - currentRun.startedAt) / 1000) });
+    }, 10_000);
+    currentRun.heartbeat.unref();
     try {
       let providerId = message.providerId || preference.providerId;
       let model = message.model || preference.model;
@@ -299,6 +305,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
           currentRun.approval = { requestId: event.data.requestId, conversationId: currentRun.conversation };
           send({ event: 'approval', scopeKey: channel, data: event.data });
         } else if (['chat.status', 'chat.tool', 'chat.delta'].includes(event.event)) {
+          if (event.event !== 'chat.delta') currentRun.status = event.event === 'chat.tool' ? `도구 실행: ${String(event.data.name).slice(0, 80)}` : String(event.data.status ?? '모델 응답 생성 중').slice(0, 1000);
           const firstText = event.event === 'chat.delta' && !currentRun.preview;
           if (event.event === 'chat.delta') currentRun.preview = (currentRun.preview + String(event.data.text ?? '')).slice(-1400);
           // First answer should not wait behind a recent status update. Keep
@@ -329,7 +336,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       if (commandGeneration === generation) results.set(resultKey, { ok: false, error: error instanceof Error ? error.message : '작업 전달에 실패했습니다.' });
       if (commandGeneration === generation && currentRun.conversation) await currentRun.connection?.call('chat.cancel', { conversationId: currentRun.conversation }).catch(() => {});
       throw error;
-    } finally { currentRun.attachmentsAbort?.abort(); currentRun.connection?.close(); if (runs.get(channel) === currentRun) runs.delete(channel); busy = runs.size > 0; }
+    } finally { clearInterval(currentRun.heartbeat); currentRun.attachmentsAbort?.abort(); currentRun.connection?.close(); if (runs.get(channel) === currentRun) runs.delete(channel); busy = runs.size > 0; }
   }
   async function start() {
     if (child || starting) return status();

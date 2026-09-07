@@ -532,9 +532,11 @@ let nativeApprovals = 0;
 const nativeResult = await nativeLoop.run([], '파일을 수정해줘', {
   confirm: async (request) => { nativeApprovals++; return request.tool === 'native_agent'; },
   takeSteering: () => ++steeringReads === 1 ? ['검증도 추가해줘'] : [],
-}, [], { workspacePath: process.env.MR_ROBOT_HOME, permissionMode: 'ask' });
+  }, [], { workspacePath: process.env.MR_ROBOT_HOME, permissionMode: 'ask', cacheKey: 'native-conversation-test', nativeSessionDirectory: process.env.MR_ROBOT_HOME });
 check('native ask mode requests explicit approval', nativeApprovals === 1, String(nativeApprovals));
-check('approved native run is scoped to workspace mode', nativeCalls.every((call) => call.permissionMode === 'workspace'));
+  check('approved native run is scoped to workspace mode', nativeCalls.every((call) => call.permissionMode === 'workspace'));
+  check('native session receives host-scoped identity and incremental user input', nativeCalls[0].session.key === 'native-conversation-test' && nativeCalls[0].session.input === '파일을 수정해줘' && nativeCalls[0].session.history.length === 0);
+  check('native steering keeps verified prior native result in session history', nativeCalls[1].session.history[1].content === 'native-1');
 check('native steering starts bounded continuation', nativeCalls.length === 2 && nativeCalls[1].prompt.includes('검증도 추가해줘'), String(nativeCalls.length));
 check('native continuation returns latest result and aggregates usage', nativeResult.text === 'native-2' && nativeResult.usage.promptTokens === 6);
 

@@ -1980,6 +1980,8 @@ export class AgentServer {
   async stop(): Promise<void> {
     const { closeTextWorkers } = await import('../ai/cli-text-pool.js');
     closeTextWorkers();
+    const { closeNativeWorkers } = await import('../ai/cli-native-pool.js');
+    closeNativeWorkers();
     const { closeDiscordSandboxes } = await import('./discord-sandbox.js');
     await closeDiscordSandboxes();
     this.revokeRemoteHandoff('agent stopped');
@@ -2495,6 +2497,7 @@ export class AgentServer {
             workspacePath: isolation ? undefined : workspace?.path,
             isolation,
             cacheKey: `mrrobot:${conversationId}`,
+            nativeSessionDirectory: this.config.dir,
             tokenPolicy: effectiveTokenPolicy,
             trustedPermissionOverride: auth.trustedDiscord === true,
           },

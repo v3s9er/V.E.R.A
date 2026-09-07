@@ -23,9 +23,31 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = Bridge.__new__(Bridge)
         self.bridge.loop = asyncio.get_running_loop()
         self.bridge.active = {}
+        self.bridge.pending = {}
+        self.bridge.progress_tasks = {}
+        self.bridge.progress_values = {}
         self.bridge.threads = NS(mutating=set(), state={'sessions': {}}, cancel_queued=AsyncMock())
         self.bridge.authorize = AsyncMock()
         self.bridge.request = AsyncMock(return_value={'text': '답변은 바로 여기에 있습니다.'})
+
+    async def test_progress_coalesces_to_latest_and_cleans_up(self):
+        self.bridge.active['ticket'] = self.context
+        gate = asyncio.Event()
+        async def authorize(_):
+            await gate.wait()
+        self.bridge.authorize.side_effect = authorize
+        self.bridge.receive({'event': 'progress', 'scopeKey': 'ticket', 'text': 'old', 'elapsed': 1})
+        await asyncio.sleep(0)
+        self.bridge.receive({'event': 'progress', 'scopeKey': 'ticket', 'text': 'latest', 'elapsed': 9})
+        gate.set()
+        await asyncio.sleep(.05)
+        self.assertIn('latest', self.receipt.edit.call_args.kwargs['content'])
+        self.assertIn('9초', self.receipt.edit.call_args.kwargs['content'])
+        task = self.bridge.progress_tasks['ticket']
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertFalse(self.bridge.progress_values)
+        self.assertFalse(self.bridge.progress_tasks)
 
     async def test_result_replaces_receipt_without_generic_completion(self):
         await self.bridge.execute(self.context, 'ask', text='질문')

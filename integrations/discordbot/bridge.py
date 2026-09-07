@@ -99,6 +99,7 @@ class Bridge:
         self.pending = {}
         self.active = {}
         self.progress_tasks = {}
+        self.progress_values = {}
         self.loop = asyncio.get_running_loop()
         self.tree = app_commands.CommandTree(client)
         self.reader_started = False
@@ -281,20 +282,28 @@ class Bridge:
             key = str(value.get('scopeKey'))
             destination = self.active.get(key)
             tasks = getattr(self, 'progress_tasks', {})
-            if not destination or getattr(destination, 'progress_finished', False) or key in tasks:
+            if not destination or getattr(destination, 'progress_finished', False):
+                return
+            self.progress_values[key] = value
+            if key in tasks:
                 return
             async def update_progress():
                 try:
-                    await self.authorize(destination)
-                    if self.active.get(key) is not destination or getattr(destination, 'progress_finished', False):
-                        return
-                    message = getattr(destination, 'result_message', None)
-                    if message:
-                        preview = discord.utils.escape_mentions(str(value.get('text', '작업 중'))[:1400])
-                        await message.edit(content=f'작업 중 · {int(value.get("elapsed", 0))}초\n{preview}', allowed_mentions=discord.AllowedMentions.none())
-                except Exception:
-                    pass
+                    while key in self.progress_values:
+                        await self.authorize(destination)
+                        if self.active.get(key) is not destination or getattr(destination, 'progress_finished', False):
+                            return
+                        latest = self.progress_values.pop(key)
+                        message = getattr(destination, 'result_message', None)
+                        if message:
+                            preview = discord.utils.escape_mentions(str(latest.get('text', '작업 중'))[:1400])
+                            await message.edit(content=f'작업 중 · {int(latest.get("elapsed", 0))}초\n{preview}', allowed_mentions=discord.AllowedMentions.none())
+                        await asyncio.sleep(2.5)
+                except Exception as error:
+                    # Never include content, credentials or signed URLs in logs.
+                    print(f'Discord progress update failed: {type(error).__name__}', file=sys.stderr)
                 finally:
+                    self.progress_values.pop(key, None)
                     tasks.pop(key, None)
             tasks[key] = self.loop.create_task(update_progress())
         elif value.get('event') == 'approval':

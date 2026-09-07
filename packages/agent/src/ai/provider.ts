@@ -113,6 +113,8 @@ export interface ChatRequest {
 
 export interface NativeAgentRequest {
   prompt: string;
+  /** Host-only conversation identity and verified transcript, never a client CLI thread id. */
+  session?: { key: string; directory: string; history: Turn[]; input: string; instructions: string; context: string };
   cwd: string;
   permissionMode: 'read-only' | 'ask' | 'workspace' | 'full';
   reasoningEffort?: ReasoningEffort;

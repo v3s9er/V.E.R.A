@@ -22,6 +22,8 @@ web-build/
 /memory.json
 /schedules.json
 /routing-traces.jsonl
+/native-sessions.json
+/native-sessions.json.*.tmp
 /pairing-secret.dpapi
 /context-cache/
 /plugins/*.json
