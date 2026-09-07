@@ -35,7 +35,7 @@ function forbiddenTrackedPath(path) {
   const rootRuntimeFiles = new Set([
     'config.json', 'config.json.bak', 'conversations.json', 'conversations.json.bak',
     'memory.json', 'schedules.json', 'routing-traces.jsonl', 'pairing-secret.dpapi',
-    'android-password.dpapi',
+    'android-password.dpapi', 'native-sessions.json',
   ]);
   if (rootRuntimeFiles.has(lower)) return 'repository-root runtime state';
   if (/^(?:\.mr-robot|context-cache|private|runtime|shared|voice|docker|signing)\//i.test(normalized)) {
@@ -145,7 +145,7 @@ for (const path of tracked.filter((item) => /^(?:release\/.*\.exe|release\/mobil
 
 const requiredIgnoreProbes = [
   'config.json', 'config.json.bak', 'conversations.json', 'memory.json', 'schedules.json',
-  'routing-traces.jsonl', 'pairing-secret.dpapi', 'plugins/remote-link.json',
+  'routing-traces.jsonl', 'native-sessions.json', 'pairing-secret.dpapi', 'plugins/remote-link.json',
   'context-cache/stats.json', 'private/work-calendar/state.bin', 'runtime/cloudflared.yml',
   'shared/private.txt', 'voice/model/file', 'docker/ctf-toolbox/Dockerfile',
   'signing/mr-robot-release.jks', 'android-password.dpapi', '.dev.vars.local',

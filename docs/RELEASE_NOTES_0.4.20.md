@@ -1,5 +1,9 @@
 # 0.4.20 — Conversation-scoped native sessions
 
+이번 릴리스는 PC 설치 마법사(EXE), Android APK, 소스 ZIP, SHA-256 체크섬을 제공합니다.
+Android는 실제 버전 `0.4.20` / versionCode `25`로 빌드하며 기존 공식 서명 ID를 유지합니다.
+기존 모바일 APK도 업데이트된 PC와 호환되며, APK 설치가 필수인 통신 규격 변경은 없습니다.
+
 ## Execution
 
 - PC, mobile and administrator Discord Codex requests with a selected workspace now share the same conversation-scoped app-server adapter instead of starting an ephemeral `codex exec` task on every turn.
