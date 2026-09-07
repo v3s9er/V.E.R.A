@@ -9,12 +9,48 @@ import tempfile
 import struct
 import zlib
 import zipfile
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 LIMIT = 48000
 EXPANDED = 32 * 1024 * 1024
 _job = None
+PAGE_START = 1
+PAGE_COUNT = 10
+
+
+def pdf_pages(data, start=1, count=10):
+    """Full-page fallback, never just the first embedded picture. Runs in Docker."""
+    with tempfile.TemporaryDirectory(prefix='pdf-', dir=os.getcwd()) as directory:
+        source = Path(directory) / 'input.pdf'
+        source.write_bytes(data)
+        info = subprocess.run(['pdfinfo', str(source)], capture_output=True, timeout=10)
+        if info.returncode:
+            return '', 'PDF 구조 또는 암호 때문에 열지 못했습니다. 원본은 보관되어 있습니다.'
+        match = re.search(rb'^Pages:\s*(\d+)', info.stdout, re.M)
+        pages = int(match[1]) if match else 0
+        parts, length, ocr, failed = [], 0, [], []
+        end = min(pages, start + count - 1)
+        for page in range(start, end + 1):
+            if length >= LIMIT:
+                break
+            result = subprocess.run(['pdftotext', '-f', str(page), '-l', str(page), '-layout', str(source), '-'], capture_output=True, timeout=12)
+            text = result.stdout.decode('utf-8', errors='replace')[:LIMIT] if result.returncode == 0 else ''
+            if not text.strip() and len(ocr) < 3:
+                ocr.append(page)
+                prefix = str(Path(directory) / 'page')
+                rendered = subprocess.run(['pdftoppm', '-f', str(page), '-l', str(page), '-singlefile', '-scale-to', '2200', '-png', str(source), prefix], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                if rendered.returncode == 0:
+                    result = subprocess.run(['tesseract', prefix+'.png', 'stdout', '-l', 'kor+eng'], capture_output=True, timeout=20)
+                    text = result.stdout.decode('utf-8', errors='replace')[:LIMIT] if result.returncode == 0 else ''
+            if not text.strip(): failed.append(page)
+            parts.append(f'[페이지 {page}/{pages}]\n{text or "[텍스트를 읽지 못함]"}')
+            length += len(text)
+        warning = f'전체 {pages}페이지 중 {start}~{end}페이지를 읽었습니다. 다음 페이지는 attachment_read의 page_start로 계속 읽으세요.' if start > 1 or end < pages else ''
+        if ocr: warning += f' OCR 페이지: {ocr}. 오인식이 있을 수 있으며 그림의 시각적 해석은 아닙니다.'
+        if failed: warning += f' 텍스트 없음/추출 실패 페이지: {failed}. 원본은 보관되어 있으므로 해당 페이지를 다시 읽을 수 있습니다.'
+        return '\n'.join(parts), warning
 
 
 def limit_process():
@@ -66,7 +102,15 @@ def decode_text(data):
 
 def image_text(image):
     if os.name != 'nt':
-        return '', '이 환경에서는 Windows OCR을 사용할 수 없습니다.'
+        image.thumbnail((2400, 2400))
+        with tempfile.TemporaryDirectory(prefix='ocr-', dir=os.getcwd()) as folder:
+            target = Path(folder) / 'image.png'
+            image.convert('RGB').save(target)
+            try:
+                result = subprocess.run(['tesseract', str(target), 'stdout', '-l', 'kor+eng'], capture_output=True, timeout=25)
+                return (result.stdout.decode('utf-8', errors='replace')[:LIMIT] if result.returncode == 0 else ''), 'OCR 추출입니다. 그림의 시각적 해석은 아니며 오인식이 있을 수 있습니다.'
+            except (OSError, subprocess.TimeoutExpired):
+                return '', 'OCR을 완료하지 못했습니다. 원본은 보관되어 있습니다.'
     image.thumbnail((2400, 2400))
     # Generated PNG in this worker's private scratch directory, never a host path.
     with tempfile.TemporaryDirectory(prefix='ocr-', dir=os.getcwd()) as folder:
@@ -86,6 +130,8 @@ def image_text(image):
 def extract(data, name, depth=0):
     suffix = Path(name).suffix.lower()
     if data.startswith(b'%PDF-'):
+        if os.name != 'nt' and shutil.which('pdftotext'):
+            return pdf_pages(data, PAGE_START, PAGE_COUNT)
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data), strict=False)
         if reader.is_encrypted and not reader.decrypt(''):
@@ -94,11 +140,15 @@ def extract(data, name, depth=0):
         for number, page in enumerate(reader.pages):
             if number >= 100 or length >= LIMIT:
                 return '\n'.join(parts), '일부만 읽었습니다: 최대 100페이지/48000자 한도.'
-            contents = page.get_contents()
-            if contents and len(contents.get_data()) > 4 * 1024**2:
-                parts.append(f'[페이지 {number+1}: 복잡도 한도로 제외]')
+            try:
+                contents = page.get_contents()
+                if contents and len(contents.get_data()) > 4 * 1024**2:
+                    parts.append(f'[페이지 {number+1}: 복잡도 한도로 제외]')
+                    continue
+                text = page.extract_text() or ''
+            except Exception:
+                parts.append(f'[페이지 {number+1}: 추출 실패. 원본에서 해당 페이지를 다시 읽어야 합니다.]')
                 continue
-            text = page.extract_text() or ''
             if not text.strip() and ocr_pages < 3:
                 ocr_pages += 1
                 for embedded in list(page.images)[:1]:
@@ -221,6 +271,9 @@ if __name__ == '__main__':
     try:
         limit_process()
         path = Path(sys.argv[1])
+        if len(sys.argv) > 3:
+            PAGE_START = max(1, min(100000, int(sys.argv[3])))
+            PAGE_COUNT = max(1, min(10, int(sys.argv[4])))
         if path.stat().st_size > 25*1024**2:
             raise ValueError('size')
         text, warning = extract(path.read_bytes(), sys.argv[2])
@@ -228,6 +281,8 @@ if __name__ == '__main__':
                   'truncated': len(text) > LIMIT}
     except ImportError:
         result = {'text': '', 'status': 'unreadable', 'warning': 'PC의 첨부 분석 의존성을 설치해야 합니다. integrations/discordbot/requirements.txt를 확인하세요.'}
+    except subprocess.TimeoutExpired:
+        result = {'text': '', 'status': 'unreadable', 'warning': '이 페이지 분석 시간이 초과되었습니다. page_count=1로 해당 페이지를 다시 읽으세요. 원본은 보관되어 있습니다.'}
     except Exception:
         result = {'text': '', 'status': 'unreadable', 'warning': '손상·암호화 또는 안전 한도로 내용을 읽지 못했습니다. 파일을 실행하지 않았습니다.'}
     print(json.dumps(result, ensure_ascii=False))

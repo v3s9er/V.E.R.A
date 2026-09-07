@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { DiscordAttachmentStore, validateAttachmentSources } from '../src/server/discord-attachment-store.js';
+import { DiscordSandboxPool, sandboxFilePath, type DockerCommand } from '../src/server/discord-sandbox.js';
+import { attachmentInstructions } from '../src/server/discord-documents.js';
+import { isolatedTools } from '../src/server/discord-isolation.js';
+const root = mkdtempSync(join(tmpdir(), 'mrrobot-original-test-'));
+const fakeVault = { protect: (s: string) => 'test:' + s, unprotect: (s: string) => s.slice(5) };
+let now = Date.now();
+const data = Buffer.from('SYNTHETIC ORIGINAL CONTENT'), id = createHash('sha256').update(data).digest('hex');
+try {
+  const store = new DiscordAttachmentStore(root, fakeVault as any, () => now);
+  const meta = store.put('ticket-A', '../unsafe-name.pdf', data);
+  assert.equal(meta.id, id);
+  assert.deepEqual(store.get('ticket-A', id).data, data);
+  assert.throws(() => store.get('ticket-B', id));
+  assert.throws(() => store.get('ticket-A', '../key.dpapi'));
+  const disk = readdirSync(root).find(n => n.endsWith('.bin'))!;
+  assert.ok(!readFileSync(join(root, disk)).includes(data), 'original encrypted on disk');
+  const reloaded = new DiscordAttachmentStore(root, fakeVault as any, () => now);
+  assert.deepEqual(reloaded.get('ticket-A', id).data, data, 'restart reopens original');
+  assert.equal(reloaded.list('ticket-B').length, 0);
+  assert.equal(reloaded.list('ticket-A').length, 1);
+  const encrypted = readFileSync(join(root, disk)); encrypted[encrypted.length - 1] ^= 1;
+  writeFileSync(join(root, disk), encrypted);
+  assert.throws(() => reloaded.get('ticket-A', id), 'AEAD rejects tampering');
+  store.put('ticket-A', 'document.pdf', data);
+  now += 8 * 24 * 3600_000;
+  assert.throws(() => store.get('ticket-A', id), /만료/);
+  assert.equal(store.prune(), 0, 'expired original removed');
+  assert.match(sandboxFilePath(meta), /^\/work\/attachments\/[a-f0-9]{64}\.pdf$/);
+  assert.ok(!attachmentInstructions([meta]).includes('https://'));
+  const good = { id: '22', name: 'document.pdf', size: 42, url: 'https://cdn.discordapp.com/attachments/11/22/doc.pdf?ex=synthetic' };
+  assert.equal(validateAttachmentSources([good], '11').length, 1);
+  for (const url of ['https://127.0.0.1/attachments/11/22/a', 'https://cdn.discordapp.com/attachments/99/22/a', 'https://cdn.discordapp.com/attachments/11/23/a', 'https://cdn.discordapp.com@evil.test/a', 'file:///C:/Windows/a', 'https://cdn.discordapp.com:444/attachments/11/22/a']) assert.throws(() => validateAttachmentSources([{ ...good, url }], '11'));
+  assert.throws(() => validateAttachmentSources([{ ...good, size: 26 * 1024**2 }], '11'));
+  assert.ok(isolatedTools(true).some(t => t.name === 'attachment_read'), 'search-only can read own uploads without PC access');
+  assert.ok(!isolatedTools(true).some(t => t.name === 'isolated_python'));
+  const calls: { args: string[]; input: string }[] = [];
+  let present = false;
+  const command: DockerCommand = async (args, input) => {
+    calls.push({ args, input });
+    if (args[0] === 'info') return { code: 0, output: 'linux' };
+    if (args[0] === 'image') return { code: present ? 0 : 1, output: present ? 'sha256:' + 'b'.repeat(64) : '' };
+    if (args[0] === 'build') present = true;
+    return { code: 0, output: 'ok' };
+  };
+  const pool = new DiscordSandboxPool(command, 60000, true);
+  try {
+    const files = [{ id, name: '../document.pdf', data }];
+    await pool.execute('A', 'print(1)', undefined, files);
+    await pool.execute('A', 'print(2)', undefined, files);
+    assert.equal(calls.filter(c => c.args[0] === 'build').length, 1);
+    assert.equal(calls.filter(c => c.args[0] === 'run').length, 1);
+    const build = calls.find(c => c.args[0] === 'build')!;
+    assert.equal(build.args.at(-1), '-', 'no host build context');
+    assert.match(build.input, /poppler-utils/);
+    const run = calls.find(c => c.args[0] === 'exec')!;
+    assert.ok(run.input.includes(data.toString('base64')));
+    assert.ok(!run.input.includes('../document.pdf'));
+    await assert.rejects(pool.execute('A', 'print(1)', undefined, [{ ...files[0], data: Buffer.from('tampered') }]), /무결성/);
+  } finally { await pool.close(); }
+  console.log('Discord originals: scoped AEAD, tamper/foreign-ticket denial, restart retention, expiry, origin checks, fixed paths, one-time build and original restoration passed.');
+} finally { rmSync(root, { recursive: true, force: true }); }

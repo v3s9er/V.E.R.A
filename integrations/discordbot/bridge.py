@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from thread_sessions import ThreadManager, MessageContext
 from presentation import result_text, wants_files, message_chunks
-from attachments import read_attachments
+from attachments import read_attachments, attachment_sources
 
 PREFIX = '__MR_ROBOT_DISCORD__'
 _output_lock = threading.Lock()
@@ -390,11 +390,14 @@ class Bridge:
                     async def check_cancel():
                         if permission_revoked or attachment_epoch != getattr(self.threads, 'cancel_epochs', {}).get(interaction.channel_id, 0):
                             raise RuntimeError('첨부 분석 작업이 중지되었습니다.')
-                    params['attachments'] = await read_attachments(incoming, interaction.channel_id, check_cancel, scope=f'{interaction.guild_id}:{interaction.user.id}:{interaction.channel_id}')
+                    await check_cancel()
+                    # Private bridge metadata only; signed CDN URLs never enter model text.
+                    # Host downloads once and retains originals; no untrusted parser runs on PC.
+                    params['attachmentSources'] = attachment_sources(incoming, interaction.channel_id)
                     if await self.authorize(interaction) != starting_authority:
                         raise PermissionError('첨부 분석 중 역할이 변경되어 전달을 중단했습니다.')
                     if receipt:
-                        await receipt.edit(content='첨부 분석 완료 · 내용을 모델에 전달해 작업 중입니다.')
+                        await receipt.edit(content='첨부 접수 완료 · 원본 보관 및 격리 분석 중입니다.')
             result = await self.request(interaction, action, **params)
             if action == 'ask':
                 destination.progress_finished = True

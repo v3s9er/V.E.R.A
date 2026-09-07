@@ -48,14 +48,15 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.context.progress_finished)
         self.assertLessEqual(self.channel.send.await_count, 4)
 
-    async def test_attachment_excerpt_is_forwarded_with_same_identity(self):
-        self.context.attachments = [NS(filename='own.pdf')]
-        excerpts = [{'name': 'own.pdf', 'text': 'provided by this user', 'status': 'extracted'}]
-        with patch('bridge.read_attachments', AsyncMock(return_value=excerpts)) as reader:
+    async def test_attachment_source_is_forwarded_without_host_parsing(self):
+        self.context.attachments = [NS(filename='own.pdf', id=22, size=42, url='https://cdn.discordapp.com/attachments/4/22/own.pdf')]
+        with patch('bridge.read_attachments', AsyncMock()) as reader:
             await self.bridge.execute(self.context, 'ask', text='요약')
-        reader.assert_awaited_once()
-        self.assertEqual(reader.call_args.args[1], self.context.channel_id)
-        self.assertEqual(self.bridge.request.call_args.kwargs['attachments'], excerpts)
+        reader.assert_not_awaited()
+        sources = self.bridge.request.call_args.kwargs['attachmentSources']
+        self.assertEqual(sources[0]['id'], '22')
+        self.assertEqual(sources[0]['size'], 42)
+        self.assertNotIn('attachments', self.bridge.request.call_args.kwargs)
         self.assertEqual(self.bridge.request.call_args.args[0], self.context)
         self.assertEqual(self.receipt.edit.call_args.kwargs['content'], '답변은 바로 여기에 있습니다.')
 

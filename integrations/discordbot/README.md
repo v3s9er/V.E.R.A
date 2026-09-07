@@ -230,9 +230,9 @@ receipt and replaced by the final answer. Long replies include a full TXT after
 up to four preview messages. These controls do not require ephemeral response
 tokens that expire during a long job.
 
-Parsing cache: process-local excerpts, scoped to guild/user/ticket and SHA-256,
-maximum five minutes / 32 entries / 4 MiB serialized data. Original files are still
-deleted. This is not shared cross-user storage or an E2EE transport. Restricted
+Legacy parsing cache: process-local excerpts, scoped to guild/user/ticket and SHA-256,
+maximum five minutes / 32 entries / 4 MiB serialized data. Version 0.4.19 uses the
+retained-original path below instead of deleting inputs. Discord is not an E2EE transport. Restricted
 Codex workers reuse verified conversation prefixes for up to 20 turns / 120 seconds
 idle, with native environments disabled on every turn and no copied credentials.
 
@@ -263,7 +263,7 @@ capabilities or model-controlled Docker options are supplied. Public internet
 requests still go through the SSRF-checked host broker. Only standard-library
 Python is included; arbitrary dependencies are not installed by model requests.
 
-Limits: four sandbox slots; one code execution per ticket; 256 MiB RAM / one CPU /
+Limits: four slots per pool (basic/document); one code execution per ticket per pool; 512 MiB RAM / one CPU /
 32 processes; 30-second execution; 128 KiB output; two-minute idle expiry. A
 different non-root UID runs a 15-minute daemon-side watchdog, so user code cannot
 disable expiry when the app crashes. Cancellation/error/app shutdown removes the
@@ -276,3 +276,55 @@ localhost model endpoint**, not the account or paid API, to check real tool
 dispatch, early answer streaming, private-skill exclusion, inaccessible host
 tools/network/Node globals, reuse, and aggregate usage. Docker-engine integration
 can be run explicitly with `npx tsx packages/agent/test/discord-sandbox-installed.test.ts`.
+
+### Retained originals (0.4.19)
+
+The authenticated bridge validates Discord attachment/channel identity and sends
+source metadata privately. The host downloads **once**, with public-IP DNS
+pinning, an exact Discord CDN allowlist, no redirects, and declared-size checks.
+Signed CDN URLs never enter prompts, history, logs, release assets or Git.
+No untrusted document parser runs on the host in this intake path.
+
+Original bytes and filenames are AES-256-GCM encrypted at rest. The random key
+is protected by Windows CurrentUser DPAPI with an attachment-specific purpose.
+Ticket identity and content hash are authenticated as associated data; another
+user/ticket cannot reopen the original by guessing its ID. Originals remain for
+seven days across app/container restarts; expired blobs are cleaned on the next
+store operation. Capacity is 512 MiB globally, 25 MiB/file, 50 MiB/request and
+10 files/request; a full store preserves existing files rather than evicting them
+silently. This is storage encryption, **not end-to-end encryption of Discord**.
+
+The document image is prepared once from a stdin-only Dockerfile (no host build
+context) with pinned Python dependencies and Debian Poppler/Tesseract packages.
+It runs by immutable local image ID, without mounts, network, secrets or root
+user code. Originals are restored under `/work/attachments/<hash>.<extension>`.
+PDFs use full-page text extraction and Korean/English OCR of blank pages, not
+just the first embedded image. Read in batches of 1-10 pages; OCR is bounded to
+three pages per call and is not visual diagram interpretation. Parsing timeout
+can be retried one page at a time without resending the file.
+
+Restricted tickets get `attachment_list` / `attachment_read`, including
+search-only users reading their own uploads. `isolated_python(attachment_id=...)`
+opens the original with document libraries while maintaining PC isolation.
+Fully authorized native-CLI tickets receive the initial extracted preview and
+retention metadata; these restricted broker tools are not injected into their
+native CLI. Do not claim full-document analysis from a partial preview.
+
+Local administrators may select an existing WSL Docker engine through the
+Discord plugin config field `sandboxWslDistribution` (distribution name only).
+Empty/default uses Docker Desktop. The WSL launcher invokes the local Docker
+daemon as root, but document/user processes remain UID 65534 in the constrained
+container. This never changes distro users/groups, mounts host files, or repairs
+Docker Desktop by deleting data. Engine selection is not exposed to Discord users.
+
+Run `npm run test:discord-documents-installed` explicitly for live PDF/OCR tests.
+`MR_ROBOT_TEST_WSL` selects an existing local WSL engine for the test;
+`MR_ROBOT_TEST_PDF` optionally supplies a local regression PDF (contents are not
+printed or committed). Synthetic tests require no model tokens.
+
+Licenses: this repository's integration code is original. The optional image
+locally installs [Poppler](https://poppler.freedesktop.org/) (GPL) and
+[Tesseract](https://github.com/tesseract-ocr/tesseract) (Apache-2.0) as separate
+executables, plus Python dependencies from `requirements.txt`; upstream notices
+remain in their packages and `/usr/share/doc`. The Docker image and user PDFs
+are not bundled in the installer or published to this repository.

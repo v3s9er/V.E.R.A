@@ -30,7 +30,7 @@ try {
   for (const args of calls.filter(a => a[0] === 'run')) {
     assert.ok(args.includes(id));
     assert.ok(!args.includes('-v') && !args.some(a => a.startsWith('--mount') || a.startsWith('--privileged')));
-    for (const flag of ['--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--memory=256m', '--user=65533:65533', '--entrypoint=/bin/sleep']) assert.ok(args.includes(flag));
+    for (const flag of ['--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--memory=512m', '--user=65533:65533', '--entrypoint=/bin/sleep']) assert.ok(args.includes(flag));
     assert.equal(args.at(-1), '900', 'daemon-side watchdog independent of app timers');
   }
   await new Promise(r => setTimeout(r, 80));

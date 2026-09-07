@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-export type SecretVaultPurpose = 'provider' | 'pairing-administrator' | 'mcp-server-environment' | 'remote-link';
+export type SecretVaultPurpose = 'provider' | 'pairing-administrator' | 'mcp-server-environment' | 'remote-link' | 'discord-attachments';
 
 export interface SecretPurposeFallbackResult {
   plaintext: string;
@@ -9,6 +9,7 @@ export interface SecretPurposeFallbackResult {
 }
 
 const ENTROPY: Record<SecretVaultPurpose, string> = {
+  'discord-attachments': 'Mr.Robot/discord-attachments/v1',
   // Keep the legacy provider entropy byte-for-byte compatible.
   provider: 'Mr.Robot/provider-secrets/v1',
   // Domain separation prevents a provider ciphertext from being substituted

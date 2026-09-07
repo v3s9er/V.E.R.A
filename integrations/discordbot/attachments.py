@@ -17,6 +17,17 @@ MAX_COUNT = 10
 MAX_TEXT = 48000
 
 
+def attachment_sources(attachments, channel_id):
+    """Private host intake: download exactly once, parse only inside Docker."""
+    if len(attachments) > MAX_COUNT:
+        raise RuntimeError('한 요청에는 최대 10개 파일을 첨부할 수 있습니다.')
+    for attachment in attachments:
+        validate_attachment(attachment, channel_id)
+    if sum(a.size for a in attachments) > MAX_TOTAL:
+        raise RuntimeError('한 요청의 첨부 합계는 50MB 이하로 보내주세요.')
+    return [{'id': str(a.id), 'url': a.url, 'name': str(a.filename)[:200], 'size': a.size} for a in attachments]
+
+
 def validate_attachment(attachment, channel_id):
     url = urlsplit(attachment.url)
     parts = url.path.split('/')

@@ -1,6 +1,7 @@
 // Explicit integration test: requires Docker Linux engine; may pull the fixed image.
 import assert from 'node:assert/strict';
-import { DiscordSandboxPool } from '../src/server/discord-sandbox.js';
+import { DiscordSandboxPool, configureDiscordSandboxEngine } from '../src/server/discord-sandbox.js';
+configureDiscordSandboxEngine(process.env.MR_ROBOT_TEST_WSL ?? '');
 const pool = new DiscordSandboxPool();
 const key = 'synthetic-sandbox-' + Date.now();
 try {
