@@ -1,5 +1,13 @@
 # Discord Agent plugin
 
+## License
+
+Original Mr.Robot Discord integration code is licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 v3s9er. Keep the copyright and permission notice in copies or
+substantial portions. Third-party components retain their own licenses.
+This software license does not grant access to AI subscriptions, accounts or
+APIs, and does not override Discord or model-provider terms of service.
+
 The optional first-party plugin connects Discord to the normal Mr.Robot agent.
 **Standalone mode** reads only `bot_token` and `server_name` from a local
 `config.json`. It does not import the security bot, execute its `main.py`, or need

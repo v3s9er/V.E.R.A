@@ -23,6 +23,7 @@ mkdirSync(stage, { recursive: true });
 
 execFileSync(process.execPath, [join(root, 'scripts', 'third-party-notices.mjs')], { stdio: 'inherit' });
 copyFileSync(notices, join(stage, 'THIRD_PARTY_NOTICES.txt'));
+copyFileSync(join(root, 'LICENSE'), join(stage, 'LICENSE'));
 
 // The esbuild JS service can crash on some Windows/Node combinations when the
 // workspace path contains non-ASCII characters. The CLI uses the same pinned
@@ -46,6 +47,7 @@ copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
+copyFileSync(join(root, 'integrations', 'discordbot', 'LICENSE'), join(stage, 'integrations', 'discordbot', 'LICENSE'));
 for (const name of ['bridge.py', 'presentation.py', 'standalone.py', 'legacy_adapter.py', 'thread_sessions.py', 'attachments.py', 'attachment_cache.py', 'attachment_worker.py', 'attachment_ocr.ps1', 'requirements.txt', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));
 // Keep the live window and tray on the exact same full icon as Android.
 copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'icon.png'));
@@ -58,6 +60,6 @@ const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));
 writeFileSync(join(stage, 'package.json'), JSON.stringify({
-  name: 'mr-robot-desktop', version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
+  name: 'mr-robot-desktop', version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, license: 'MIT', description: 'Mr.Robot PC AI Agent', author: 'Mr.Robot', type: 'module', main: 'main.mjs', dependencies: { ws: wsVersion },
 }, null, 2));
 console.log(`Desktop staging complete: ${stage}`);

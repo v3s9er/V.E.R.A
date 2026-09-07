@@ -2,6 +2,7 @@
   "name": "mr-robot",
   "version": "0.4.19",
   "private": true,
+  "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",
   "workspaces": [

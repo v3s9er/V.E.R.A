@@ -2,6 +2,7 @@
   "name": "@mr-robot/desktop",
   "version": "0.4.19",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "main.mjs",
   "description": "Mr.Robot 데스크톱 셸 (Electron) — 에이전트를 내장해 창/트레이로 실행",

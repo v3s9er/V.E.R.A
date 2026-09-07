@@ -2,6 +2,7 @@
   "name": "mr-robot-mobile",
   "version": "0.4.19",
   "private": true,
+  "license": "MIT",
   "main": "expo/AppEntry.js",
   "expo": {
     "autolinking": {

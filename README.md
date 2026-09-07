@@ -221,6 +221,17 @@ npm test                # 스모크 + 스케줄러 + AI 루프(모의 서버) �
 npm run test:leak       # 메모리 누수 측정 (플러그인 600회·WS 80회·스트리밍 20회)
 ```
 
+## 라이선스
+
+Mr.Robot의 자체 코드와 Discord 플러그인은 [MIT License](LICENSE)로 제공합니다.
+Copyright (c) 2026 v3s9er. 수정·재배포·상업적 사용을 허용하며, 소프트웨어의 사본이나
+상당 부분을 배포할 때 저작권 및 허가 고지를 유지해야 합니다. 보증은 제공하지 않습니다.
+
+외부 코드·라이브러리·자산에 별도 고지가 있는 경우 해당 라이선스가 유지됩니다.
+[외부 라이선스 고지](THIRD_PARTY_NOTICES.txt)와 [라이선스 근거](docs/RESEARCH_AND_LICENSES.md)를 참고하세요.
+이 라이선스는 제3자 AI 서비스의 구독·계정·API 사용 권한을 부여하지 않으며,
+각 공급자와 Discord의 이용약관은 별도로 적용됩니다.
+
 ## 문제 해결
 
 - **포트 충돌**: 설정 → 네트워크에서 포트 변경, 또는 `node packages/agent/dist/index.js --port 9000`
