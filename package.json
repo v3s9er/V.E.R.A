@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.4.20",
+  "version": "0.4.21",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -33,6 +33,7 @@
     "test:discord-documents-installed": "tsx packages/agent/test/discord-documents-installed.test.ts",
     "test:codex-installed": "tsx packages/agent/test/cli-pool-installed.test.ts && tsx packages/agent/test/cli-broker-installed.test.ts && tsx packages/agent/test/cli-native-installed.test.ts",
     "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts",
+    "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts",
     "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts"
   },
   "devDependencies": {

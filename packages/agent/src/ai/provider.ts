@@ -144,7 +144,7 @@ export interface AiProvider {
   /** Cheap authenticated reachability check. */
   ping(): Promise<ProviderHealth>;
   /** List model ids exposed by this account/provider when supported. */
-  models(): Promise<string[]>;
+  models(force?: boolean): Promise<string[]>;
   /** Optional native coding-agent execution (Codex/Claude CLI keeps its own tools and harness). */
   runAgent?(req: NativeAgentRequest): Promise<ProviderResult>;
 }

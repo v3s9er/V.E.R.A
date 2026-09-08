@@ -98,6 +98,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [messages, setMessages] = useState<UiMsg[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [modelRefreshStatus, setModelRefreshStatus] = useState('');
+  const modelRefreshInFlight = useRef(false);
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [commandMode, setCommandMode] = useState<'pc' | 'scenario'>('pc');
   const [input, setInput] = useState('');
@@ -331,18 +334,26 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     }
   }, [client, loadConversation]);
 
-  const refreshProviders = useCallback(async (): Promise<void> => {
+  const refreshProviders = useCallback(async (force = false): Promise<void> => {
+    if (modelRefreshInFlight.current) return;
+    modelRefreshInFlight.current = true;
+    setRefreshingModels(true);
+    try {
     const list = await client.call('providers.list', {}) as ProviderInfo[];
     setProviders(list);
-    const entries = await Promise.all(list.map(async (provider): Promise<[string, string[]]> => {
+    let failed = false;
+    const entries = await Promise.all(list.map(async (provider): Promise<[string, string[] | null]> => {
       try {
-        const discovered = await client.call('providers.models', { id: provider.id }) as string[];
+        const discovered = await client.call('providers.models', { id: provider.id, refresh: force }) as string[];
         return [provider.id, [...new Set([provider.model, ...discovered])]];
       } catch {
-        return [provider.id, [provider.model]];
+        failed = true;
+        return [provider.id, null];
       }
     }));
-    setProviderModels(Object.fromEntries(entries));
+    setProviderModels(previous => Object.fromEntries(entries.map(([id, models]) => [id, models ?? previous[id] ?? [list.find(p => p.id === id)!.model]])));
+    if (force) setModelRefreshStatus(failed ? '일부 목록 갱신 실패 · 기존 목록 유지. PC의 CLI·로그인·연결을 확인하세요.' : '목록 갱신 완료 · 선택한 모델은 유지됩니다.');
+    } finally { modelRefreshInFlight.current = false; setRefreshingModels(false); }
   }, [client]);
 
   const refreshRuns = useCallback(async (): Promise<void> => {
@@ -615,6 +626,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setCustomProviderId(selectedProvider?.id ?? '');
     setCustomModel(conversation?.providerModel ?? selectedProvider?.model ?? '');
     setShowModels(true);
+    void refreshProviders().catch(() => setModelRefreshStatus('PC 연결을 확인하세요. 기존 모델 목록은 유지됩니다.'));
   };
 
   const selectModel = async (providerId?: string, providerModel?: string): Promise<void> => {
@@ -1048,6 +1060,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
             <View style={styles.modal}>
               <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="모델 목록 새로고침" style={styles.bigBtn} disabled={refreshingModels} onPress={() => void refreshProviders(true).catch(() => setModelRefreshStatus('PC 연결을 확인하세요. 기존 모델 목록은 유지됩니다.'))}><Text style={styles.bigBtnText}>{refreshingModels ? '모델 목록 확인 중…' : '↻ 모델 목록 새로고침'}</Text></TouchableOpacity>
+              {Boolean(modelRefreshStatus) && <Text accessibilityLiveRegion="polite" style={styles.accessCapText}>{modelRefreshStatus}</Text>}
               <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
                 {singleModelChoices(true)}
               </ScrollView>

@@ -200,10 +200,10 @@ export class ProviderRegistry {
     return this.list().find((p) => p.id === id)!;
   }
 
-  async models(id: string): Promise<string[]> {
+  async models(id: string, force = false): Promise<string[]> {
     const provider = this.providers.get(id);
     if (!provider) throw new Error('provider not found');
-    return provider.models();
+    return provider.models(force);
   }
 
   async test(id: string): Promise<{ ok: boolean; error?: string }> {

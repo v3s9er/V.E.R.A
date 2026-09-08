@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { isolatedPrompt, parseIsolatedReply, ISOLATED_OUTPUT_SCHEMA } from './cli-isolated.js';
 import { pooledCodexText } from './cli-text-pool.js';
 import { pooledNativeCodex } from './cli-native-pool.js';
+import { discoverCodexModels, ModelListCache } from './cli-models.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
@@ -364,7 +365,9 @@ export class CliProvider implements AiProvider {
   readonly runBrokerAgent?: (req: BrokerAgentRequest) => Promise<ProviderResult>;
   readonly supportsTools = false;
   readonly supportedReasoning: ReasoningEffort[];
-  private modelList?: Promise<string[]>;
+  private readonly modelList = new ModelListCache(() => this.discoverModels(), () => [
+    ...(this.model ? [this.model] : []), ...(this.type === 'codex-cli' ? CURRENT_CODEX_MODELS : CURRENT_CLAUDE_MODELS),
+  ]);
   private isolatedHealthUntil = 0;
 
   constructor(
@@ -551,14 +554,14 @@ export class CliProvider implements AiProvider {
     });
   }
 
-  async models(): Promise<string[]> {
-    this.modelList ??= this.discoverModels();
-    return this.modelList;
+  async models(force = false): Promise<string[]> {
+    return this.modelList.get(force);
   }
 
   private async discoverModels(): Promise<string[]> {
     const fallback = this.type === 'codex-cli' ? CURRENT_CODEX_MODELS : CURRENT_CLAUDE_MODELS;
     const invocation = resolveCliInvocation(this.type, this.command);
+    if (this.type === 'codex-cli') return discoverCodexModels({ ...invocation, env: cliSubscriptionEnvironment(this.type) });
     const help = await new Promise<string>((resolve) => {
       const child = spawn(invocation.command, [...invocation.prefixArgs, '--help'], {
         shell: false,

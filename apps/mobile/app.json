@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mr.Robot",
     "slug": "mr-robot-mobile",
-    "version": "0.4.20",
+    "version": "0.4.21",
     "icon": "./assets/icon.png",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.mrrobot.mobile",
-      "versionCode": 25,
+      "versionCode": 26,
       "allowBackup": false,
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {

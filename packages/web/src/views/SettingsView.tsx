@@ -709,7 +709,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
     if (!canManage) return;
     setTestResult((t) => ({ ...t, [id]: '모델 목록 가져오는 중…' }));
     try {
-      const values = await client.call('providers.models', { id }) as string[];
+      const values = await client.call('providers.models', { id, refresh: true }) as string[];
       setModelOptions((current) => ({ ...current, [id]: values }));
       setTestResult((t) => ({ ...t, [id]: values.length ? `${values.length}개 모델 발견` : '모델 목록이 비어 있습니다' }));
     } catch (err) {

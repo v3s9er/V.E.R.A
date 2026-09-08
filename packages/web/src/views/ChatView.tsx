@@ -133,6 +133,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [messages, setMessages] = useState<UiMsg[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [modelRefreshStatus, setModelRefreshStatus] = useState('');
+  const modelRefreshInFlight = useRef(false);
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [input, setInput] = useState('');
@@ -314,16 +317,24 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     }
   }, [client]);
 
-  const discoverProviderModels = useCallback(async (items: ProviderInfo[]): Promise<void> => {
-    const entries = await Promise.all(items.map(async (provider): Promise<[string, string[]]> => {
+  const discoverProviderModels = useCallback(async (items: ProviderInfo[], force = false): Promise<void> => {
+    if (modelRefreshInFlight.current) return;
+    modelRefreshInFlight.current = true;
+    setRefreshingModels(true);
+    let failed = false;
+    const entries = await Promise.all(items.map(async (provider): Promise<[string, string[] | null]> => {
       try {
-        const discovered = await client.call('providers.models', { id: provider.id }) as string[];
+        const discovered = await client.call('providers.models', { id: provider.id, refresh: force }) as string[];
         return [provider.id, [...new Set([provider.model, ...discovered])]];
       } catch {
-        return [provider.id, [provider.model]];
+        failed = true;
+        return [provider.id, null];
       }
     }));
-    setProviderModels(Object.fromEntries(entries));
+    setProviderModels(previous => Object.fromEntries(entries.map(([id, models]) => [id, models ?? previous[id] ?? [items.find(p => p.id === id)!.model]])));
+    if (force) setModelRefreshStatus(failed ? '일부 모델 목록 갱신 실패 · 기존 목록 유지. CLI·로그인·연결을 확인하세요.' : '모델 목록 갱신 완료 · 선택한 모델은 유지됩니다.');
+    setRefreshingModels(false);
+    modelRefreshInFlight.current = false;
   }, [client]);
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
@@ -924,6 +935,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? '✦' : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
+          {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}
           <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
             <div className="composer-options" aria-label="대화 실행 설정">
@@ -931,6 +943,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               <Select
                 className="model-select"
                 aria-label="대화 모델"
+                onFocus={() => void discoverProviderModels(providers)}
                 value={selected.routingPresetId ? '' : selected.providerId ? modelChoiceValue(selected.providerId, selected.providerModel ?? providers.find((provider) => provider.id === selected.providerId)?.model ?? '') : ''}
                 onChange={(event) => {
                   const target = selectedRef.current;
@@ -955,9 +968,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               >
                 <option value="">{selected.routingPresetId ? '시나리오 자동 배정' : '기본 모델'}</option>
                 {providers.map((provider) => <optgroup key={provider.id} label={provider.label}>
-                  {(providerModels[provider.id] ?? [provider.model]).map((model) => <option key={model} value={modelChoiceValue(provider.id, model)}>{model}</option>)}
+                  {[...new Set([...(providerModels[provider.id] ?? [provider.model]), ...(selected.providerId === provider.id && selected.providerModel ? [selected.providerModel] : [])])].map((model) => <option key={model} value={modelChoiceValue(provider.id, model)}>{model}</option>)}
                 </optgroup>)}
               </Select>
+              <button type="button" className="model-refresh-button" aria-label="모델 목록 새로고침" title="공급자 모델 목록 새로고침 (선택 유지)" disabled={refreshingModels} onClick={() => void discoverProviderModels(providers, true)}>{refreshingModels ? '…' : '↻'}</button>
             </div>}
               <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
                 <span className="composer-control-icon" aria-hidden="true">◇</span>
