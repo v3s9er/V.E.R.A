@@ -1987,7 +1987,7 @@ export class AgentServer {
     this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
     await this.revokeToolPortalAuthority('Mr.Robot Agent가 종료되었습니다.');
-    for (const run of this.activeRuns.values()) run.session.cancel();
+    for (const run of this.activeRuns.values()) run.session.cancel('shutdown');
     for (const transfer of this.activeHttpTransfers) {
       if (!transfer.signal.aborted) transfer.abort(new Error('Mr.Robot Agent가 종료되어 전송을 중단했습니다.'));
     }
@@ -2031,7 +2031,7 @@ export class AgentServer {
   /** Permission/revocation changes take effect for already-open sockets too. */
   private invalidateDeviceLink(linkId: string): void {
     for (const run of this.activeRuns.values()) {
-      if (run.ownerLinkId === linkId) run.session.cancel();
+      if (run.ownerLinkId === linkId) run.session.cancel('revoked');
     }
     this.hub?.disconnectLink(linkId);
   }
@@ -2527,9 +2527,9 @@ export class AgentServer {
         // Only label an error as a user cancellation when this run's abort
         // signal was actually triggered. Provider/network errors containing
         // the word "aborted" must remain visible for diagnosis and retry.
-        const message = session.signal()?.aborted || /^작업이 중지되었습니다\.?$/i.test(rawMessage.trim())
+        const message = session.cancellationMessage() ?? (session.signal()?.aborted || /^작업이 중지되었습니다\.?$/i.test(rawMessage.trim())
           ? '작업이 중지되었습니다.'
-          : rawMessage;
+          : rawMessage);
         if (!usagePersisted && hasRecordedUsage(chargedUsage)) {
           try {
             this.conversations.appendUsage(conversationId, chargedUsage);
@@ -2560,13 +2560,15 @@ export class AgentServer {
       })().finally(() => admission.finish(chargedUsage));
     });
     h.set('chat.cancel', (params, client) => {
+      const reason = client.state.auth?.trustedDiscord === true && ['discord-disconnected', 'discord-authority', 'discord-transport'].includes(str(p(params).reason))
+        ? str(p(params).reason) as 'discord-disconnected' | 'discord-authority' | 'discord-transport' : 'user';
       const conversationId = str(p(params).conversationId) || client.state.chat.conversationId || '';
       const run = conversationId ? this.activeRuns.get(conversationId) : undefined;
       if (run) {
         assertRunControl(client, run);
-        run.session.cancel();
+        run.session.cancel(reason);
       } else if (!conversationId || conversationId === client.state.chat.conversationId) {
-        client.state.chat.cancel();
+        client.state.chat.cancel(reason);
       }
       return { ok: true };
     });

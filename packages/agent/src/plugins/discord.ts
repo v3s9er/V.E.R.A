@@ -334,7 +334,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       return { ...outcome, files };
     } catch (error) {
       if (commandGeneration === generation) results.set(resultKey, { ok: false, error: error instanceof Error ? error.message : '작업 전달에 실패했습니다.' });
-      if (commandGeneration === generation && currentRun.conversation) await currentRun.connection?.call('chat.cancel', { conversationId: currentRun.conversation }).catch(() => {});
+      if (commandGeneration === generation && currentRun.conversation) await currentRun.connection?.call('chat.cancel', { conversationId: currentRun.conversation, reason: 'discord-transport' }).catch(() => {});
       throw error;
     } finally { clearInterval(currentRun.heartbeat); currentRun.attachmentsAbort?.abort(); currentRun.connection?.close(); if (runs.get(channel) === currentRun) runs.delete(channel); busy = runs.size > 0; }
   }
@@ -389,7 +389,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
           const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
           if (!line.startsWith(PREFIX)) continue;
           let message: any; try { message = JSON.parse(line.slice(PREFIX.length)); } catch { continue; }
-          if (message.event === 'revoked') { const run = runs.get(message.scopeKey); if (run) { run.cancelled = true; run.attachmentsAbort?.abort(); void run.connection?.call('chat.cancel', { conversationId: run.conversation }).catch(() => {}); } continue; }
+          if (message.event === 'revoked') { const run = runs.get(message.scopeKey); if (run) { run.cancelled = true; run.attachmentsAbort?.abort(); void run.connection?.call('chat.cancel', { conversationId: run.conversation, reason: 'discord-authority' }).catch(() => {}); } continue; }
           if (message.event === 'workspace.ready' && workspace.state === 'pending') {
             if (!(ctx.storage.get<string[]>('allowedGuildIds') ?? []).includes(message.guildId) || ![message.channelId, message.panelId].every(id => typeof id === 'string' && /^\d{15,22}$/.test(id))) continue;
             const state = threads.state();
@@ -407,7 +407,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
             if (!ctx.storage.get<string[]>('allowedGuildIds')?.length && guilds.length === 1) ctx.storage.set('allowedGuildIds', guilds);
             owner = String(message.owner); ready = guilds.some((id: string) => ctx.storage.get<string[]>('allowedGuildIds')?.includes(id)); hasBeenReady ||= ready; continue;
           }
-          if (message.event === 'disconnected') { ready = false; for (const run of runs.values()) { run.cancelled = true; run.attachmentsAbort?.abort(); void run.connection?.call('chat.cancel', { conversationId: run.conversation }).catch(() => {}); } continue; }
+          if (message.event === 'disconnected') { ready = false; for (const run of runs.values()) { run.cancelled = true; run.attachmentsAbort?.abort(); void run.connection?.call('chat.cancel', { conversationId: run.conversation, reason: 'discord-disconnected' }).catch(() => {}); } continue; }
           if (message.event === 'error') {
             const safeErrors: Record<string, string> = { duplicate: '기존 시큐리티봇 또는 Discord 플러그인이 실행 중입니다. 먼저 종료하거나 함께 실행 모드를 사용하세요.', config: 'config.json의 bot_token 연결정보를 읽을 수 없습니다.', mode: 'Discord 실행 모드가 올바르지 않습니다.' };
             lastError = safeErrors[String(message.code)] ?? 'Discord 로그인/명령 등록 실패. 봇 토큰·서버 권한·Python 의존성을 확인하세요.';

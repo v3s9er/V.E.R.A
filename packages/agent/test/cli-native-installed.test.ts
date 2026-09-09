@@ -1,7 +1,7 @@
 // Real installed CLI, synthetic localhost Responses server. No account tokens/model usage.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +37,7 @@ const req: NativeAgentRequest = { prompt: 'fallback', cwd: dir, permissionMode: 
   onStatus: t => statuses.push(t), session: { key: 'fixture-user-ticket', directory: dir, history: [], input: 'Remember synthetic-marker-742. Answer briefly.', instructions: 'Synthetic test. Answer without tools.', context: '' } };
 const call = (req: NativeAgentRequest) => pooledNativeCodex({ command: process.execPath,
   prefixArgs: [fileURLToPath(new URL('./fixtures/codex-fixture-proxy.mjs', import.meta.url))],
-  env: { ...cliSubscriptionEnvironment('codex-cli'), CODEX_HOME: join(dir, 'codex'), MRROBOT_FIXTURE_PORT: String((server.address() as any).port), MRROBOT_FIXTURE_COMMAND: cli.command, MRROBOT_FIXTURE_PREFIX: JSON.stringify(cli.prefixArgs) },
+  env: { ...cliSubscriptionEnvironment('codex-cli'), CODEX_HOME: join(dir, 'codex'), MRROBOT_FIXTURE_TRACE: '1', MRROBOT_FIXTURE_PORT: String((server.address() as any).port), MRROBOT_FIXTURE_COMMAND: cli.command, MRROBOT_FIXTURE_PREFIX: JSON.stringify(cli.prefixArgs) },
   providerId: 'fixture', model: 'gpt-5.6-sol', req });
 const timeout = setTimeout(() => controller.abort(), 55_000);
 try {
@@ -59,6 +59,9 @@ try {
   assert.ok(statuses.some(t => t.includes('세션 재사용')));
   assert.ok(bodies.every(b => b.reasoning?.effort === 'high'), 'user reasoning choice preserved');
   console.log(JSON.stringify({ installedNativeSessionTest: 'passed', coldMs, warmMs, turns: bodies.length, accountUsage: false }));
+} catch (error) {
+  try { console.error(readFileSync(join(dir, 'codex', 'fixture-transport.jsonl'), 'utf8').slice(-12000)); } catch { /* no fixture trace */ }
+  throw error;
 } finally {
   clearTimeout(timeout); closeNativeWorkers(); controller.abort(); server.closeAllConnections();
   await new Promise<void>(r => server.close(() => r()));

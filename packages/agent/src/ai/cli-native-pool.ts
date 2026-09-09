@@ -3,7 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { terminateProcessTree } from '../computer/shell.js';
+import { CliSessionEvents } from './cli-session-events.js';
+import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { normalizeProviderUsageReport, type NativeAgentRequest, type ProviderResult, type Turn } from './provider.js';
 
 type Options = { command: string; prefixArgs: string[]; env: NodeJS.ProcessEnv; providerId: string; model: string; req: NativeAgentRequest };
@@ -56,12 +57,14 @@ class Checkpoints {
  */
 class NativeWorker {
   private child: ChildProcessWithoutNullStreams;
+  private retirement: CliProcessRetirement;
   private decoder = new StringDecoder('utf8');
   private buffer = '';
   private bytes = 0;
   private thread = '';
   private ready = false;
   private sequence = 20;
+  private events = new CliSessionEvents();
   private checkpoint?: Checkpoint;
   private idle?: NodeJS.Timeout;
   private store: Checkpoints;
@@ -88,6 +91,7 @@ class NativeWorker {
     this.child = spawn(options.command, [...options.prefixArgs, 'app-server', '--listen', 'stdio://', '--strict-config',
       ...Object.entries(config).flatMap(([k, v]) => ['-c', `${k}=${v && typeof v === 'object' && !Array.isArray(v) ? '{}' : JSON.stringify(v)}`])],
     { env: options.env, cwd: options.req.cwd, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.retirement = new CliProcessRetirement(this.child, options.env);
     this.child.on('error', () => this.close(new Error('네이티브 세션을 시작하지 못했습니다. CLI 설치를 확인하세요.')));
     this.child.on('close', () => this.close(new Error('네이티브 연결이 종료되었습니다. 다시 요청하세요.')));
     this.child.stdin.on('error', () => this.close(new Error('네이티브 입력 연결이 종료되었습니다.')));
@@ -100,7 +104,7 @@ class NativeWorker {
         const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
         if (!line.trim()) continue;
         try { this.receive(JSON.parse(line)); }
-        catch { this.close(new Error('네이티브 세션 응답을 처리하지 못했습니다.'));
+        catch (error) { this.close(error instanceof SyntaxError ? new Error('네이티브 세션 응답을 처리하지 못했습니다.') : error instanceof Error ? error : new Error('네이티브 연결 검증 오류'));
         }
       }
     });
@@ -146,6 +150,7 @@ class NativeWorker {
     const req = this.active!.req;
     if (this.thread) { this.startTurn(); return; }
     const sandbox = req.permissionMode === 'full' ? 'danger-full-access' : req.permissionMode === 'workspace' ? 'workspace-write' : 'read-only';
+    this.events.beginThread();
     this.send({ id: 2, method: this.checkpoint ? 'thread/resume' : 'thread/start', params: {
       ...(this.checkpoint ? { threadId: this.checkpoint.thread } : { ephemeral: false }),
       model: this.options.model, allowProviderModelFallback: false, cwd: req.cwd, approvalPolicy: 'never', sandbox,
@@ -162,7 +167,8 @@ class NativeWorker {
     // cancellation must not silently replay/continue an uncertain partial turn.
     this.store.set(this.key);
     this.status(this.checkpoint ? '세션 재사용 · 새 입력 처리 중' : '요청 처리 중');
-    this.send({ id: ++this.sequence, method: 'turn/start', params: { threadId: this.thread,
+    this.events.beginTurn(++this.sequence);
+    this.send({ id: this.sequence, method: 'turn/start', params: { threadId: this.thread,
       input: [{ type: 'text', text, text_elements: [] }],
       ...(a.req.reasoningEffort && a.req.reasoningEffort !== 'auto' ? { effort: a.req.reasoningEffort } : { effort: null }),
     } });
@@ -182,6 +188,7 @@ class NativeWorker {
     if (m.id === 2 && !m.method) {
       const id = m.result?.thread?.id;
       if (typeof id !== 'string' || !/^[\w-]{1,128}$/.test(id) || (this.checkpoint && id !== this.checkpoint.thread)) return this.close(new Error('네이티브 대화 식별자 검증 실패'));
+      this.events.bindThread(id, m.result?.thread?.turns);
       this.thread = id; this.startTurn(); return;
     }
     if (m.id !== undefined && m.method) {
@@ -190,9 +197,13 @@ class NativeWorker {
     }
     const a = this.active;
     if (!a) return;
-    if (m.params?.threadId && m.params.threadId !== this.thread) return this.close(new Error('네이티브 대화가 일치하지 않습니다.'));
-    const turn = m.params?.turnId ?? m.params?.turn?.id ?? m.result?.turn?.id;
-    if (turn) { if (a.turn && a.turn !== turn) return this.close(new Error('네이티브 실행이 일치하지 않습니다.')); a.turn = turn; }
+    if (!m.method && m.id === this.events.turnRequest) {
+      const queued = this.events.bindTurn(m.result?.turn?.id);
+      a.turn = this.events.turn;
+      for (const event of queued) { if (!this.closed && this.active === a) this.receive(event); }
+      return;
+    }
+    if (!this.events.accept(m)) return;
     if (m.method === 'thread/tokenUsage/updated') {
       const u = m.params?.tokenUsage?.total;
       if (u) {
@@ -234,6 +245,7 @@ class NativeWorker {
       this.checkpoint = { thread: this.thread, history: fingerprints([...s.history, { role: 'user', content: s.input }, { role: 'assistant', content: a.text }]), context: digest(s.context), usage: a.total, at: Date.now() };
       try { this.store.set(this.key, this.checkpoint); }
       catch { this.status('답변 완료 · 세션 저장 실패, 다음 요청은 대화 기록으로 복구합니다'); this.checkpoint = undefined; this.thread = ''; }
+      this.events.complete();
       this.release(); this.active = undefined;
       this.idle = setTimeout(() => this.close(), IDLE_MS); this.idle.unref();
       a.resolve({ text: a.text, toolCalls: [], usage: a.usage });
@@ -249,7 +261,7 @@ class NativeWorker {
     }
     this.buffer = ''; this.checkpoint = undefined;
     if (workers.get(this.key) === this) workers.delete(this.key);
-    terminateProcessTree(this.child, true);
+    this.retirement.retire();
   }
 }
 
@@ -259,19 +271,23 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
     options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions]);
-  let worker = workers.get(key);
-  if (worker?.busy) throw new Error('같은 대화의 네이티브 작업이 이미 실행 중입니다.');
-  // Retire the whole worker on a transcript rewrite/host compaction. Otherwise
-  // old loaded threads would accumulate inside one long-lived CLI process.
-  if (worker && !worker.accepts(options.req)) { worker.close(); worker = undefined; }
-  if (!worker) {
-    if (workers.size >= MAX_WORKERS) {
-      const idle = [...workers.values()].find(w => !w.busy);
-      if (!idle) throw new Error('네이티브 실행 슬롯이 사용 중입니다. 잠시 후 다시 요청하세요.');
-      idle.close();
+  while (true) {
+    await waitForCliRetirements(options.env, options.req.signal);
+    options.req.signal?.throwIfAborted();
+    let worker = workers.get(key);
+    if (worker?.busy) throw new Error('같은 대화의 네이티브 작업이 이미 실행 중입니다.');
+    // Retire the whole worker on a transcript rewrite/host compaction. Otherwise
+    // old loaded threads would accumulate inside one long-lived CLI process.
+    if (worker && !worker.accepts(options.req)) { worker.close(); continue; }
+    if (!worker) {
+      if (workers.size >= MAX_WORKERS) {
+        const idle = [...workers.values()].find(w => !w.busy);
+        if (!idle) throw new Error('네이티브 실행 슬롯이 사용 중입니다. 잠시 후 다시 요청하세요.');
+        idle.close(); continue;
+      }
+      worker = new NativeWorker(key, options); workers.set(key, worker);
     }
-    worker = new NativeWorker(key, options); workers.set(key, worker);
+    return worker.run(options.req);
   }
-  return worker.run(options.req);
 }
 export function closeNativeWorkers() { for (const worker of [...workers.values()]) worker.close(); }

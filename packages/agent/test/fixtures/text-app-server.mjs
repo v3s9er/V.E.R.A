@@ -14,6 +14,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.params.environments.length || m.params.threadId !== threadId) throw Error('turn boundary failed');
   const prompt = m.params.input[0].text;
   if (count && prompt.includes('FIRST_PRIVATE_TEXT')) throw Error('history retransmitted');
+  send({ id: m.id, result: { turn: { id: `turn-${count + 1}` } } });
   if (prompt.includes('WAIT_FOREVER')) return;
   if (prompt.includes('NATIVE_ATTACK')) return send({ method: 'item/started', params: { threadId, item: { type: 'commandExecution' } } });
   count++;
