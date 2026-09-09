@@ -6,8 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createDiscordPlugin, validateDiscordSettings } from '../src/plugins/discord.js';
+import { discordAttachmentStore } from '../src/server/discord-attachment-store.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'mr-robot-discord-test-'));
+const previousHome = process.env.MR_ROBOT_HOME;
+process.env.MR_ROBOT_HOME = dir;
 const timers = new Set<NodeJS.Timeout>();
 const commands = new Map<string, Function>();
 const storage = new Map<string, unknown>();
@@ -24,9 +27,16 @@ let runId: number | undefined;
 let socket: any;
 let lastRun: any;
 let deferIsolated = false;
+let createdConversations = 0;
 const held = new Map<any, number>();
 server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   const req = JSON.parse(raw.toString());
+  if (req.method === 'conversations.get' && req.params.id === 'deleted-ticket') {
+    ws.send(JSON.stringify({ id: req.id, error: { message: 'conversation not found' } })); return;
+  }
+  if (req.method === 'conversations.create') {
+    createdConversations++; assert.equal(req.params.origin, 'discord');
+  }
   if (req.method === 'chat.start') {
     lastRun = req.params;
     if (req.params.discordIsolation) {
@@ -106,9 +116,20 @@ try {
   assert.equal((await request({ action: 'status', channelId: '666666666666666666' })).result.modelCeiling, 'sol', 'new channels cannot reset per-user cap');
   assert.equal((await request({ action: 'status', userId: '555555555555555555' })).result.modelCeiling, 'unlimited', 'other users isolated');
   const basic = { guildAdmin: false, allowAi: true, userId: '555555555555555555' };
+  const basicKey = `${identity.guildId}:${identity.channelId}:${basic.userId}:isolated`;
+  storage.set('conversations', { [basicKey]: 'deleted-ticket' });
+  const original = discordAttachmentStore().put('deleted-ticket', 'fixture.txt', Buffer.from('synthetic continuity attachment'));
+  const createsBeforeRepair = createdConversations;
   assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
   assert.equal((await request({ ...basic, action: 'models' })).result[0].type, 'codex-cli', 'ordinary users see the same owner subscriptions');
   assert.equal((await request({ ...basic, action: 'ask', text: 'create a safe report' })).result.text, 'isolated result');
+  assert.equal(createdConversations, createsBeforeRepair + 1, 'deleted ticket repaired exactly once');
+  const repairedId = lastRun.conversationId;
+  assert.equal((storage.get('conversations') as any)[basicKey], repairedId);
+  assert.equal(discordAttachmentStore().get(repairedId, original.id).data.toString(), 'synthetic continuity attachment');
+  assert.equal((await request({ ...basic, action: 'ask', text: 'continue this same ticket' })).result.text, 'isolated result');
+  assert.equal(lastRun.conversationId, repairedId, 'follow-up uses the repaired persistent ID');
+  assert.equal(createdConversations, createsBeforeRepair + 1, 'follow-up never creates another conversation');
   assert.equal(lastRun.discordIsolation, 'isolated');
   assert.equal(lastRun.providerId, 'provider');
   assert.equal(lastRun.providerModel, 'gpt-6-astra', 'ordinary users follow the owner default within their ceiling');
@@ -205,4 +226,5 @@ try {
   for (const t of timers) clearTimeout(t);
   socket?.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
   rmSync(dir, { recursive: true, force: true });
+  if (previousHome === undefined) delete process.env.MR_ROBOT_HOME; else process.env.MR_ROBOT_HOME = previousHome;
 }

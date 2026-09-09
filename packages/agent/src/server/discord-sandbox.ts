@@ -8,9 +8,10 @@ import { createHash } from 'node:crypto';
 
 export const DISCORD_SANDBOX_IMAGE = 'python:3.12-slim';
 export type SandboxFile = { id: string; name: string; data: Buffer };
-export function attachmentWorkerSource(): string {
+export function attachmentWorkerSource(filename = 'attachment_worker.py'): string {
+  if (!['attachment_worker.py', 'audio_worker.py'].includes(filename)) throw new Error('분석기 이름이 올바르지 않습니다.');
   const base = dirname(fileURLToPath(import.meta.url)).replace(/app\.asar(?=[\\/]|$)/, 'app.asar.unpacked');
-  const path = [join(base, 'integrations/discordbot/attachment_worker.py'), resolve(base, '../../../../integrations/discordbot/attachment_worker.py')].find(existsSync);
+  const path = [join(base, 'integrations/discordbot', filename), resolve(base, '../../../../integrations/discordbot', filename)].find(existsSync);
   if (!path) throw new Error('첨부 분석 구성 파일이 없습니다. 앱 설치를 복구하세요.');
   return readFileSync(path, 'utf8');
 }
@@ -50,12 +51,12 @@ export const dockerCommand: DockerCommand = (args, input, signal, timeout = 20_0
   });
 };
 
-export function reusableSandboxArgs(name: string, image: string): string[] {
+export function reusableSandboxArgs(name: string, image: string, audio = false): string[] {
   return ['run', '--detach', '--rm', '--pull=never', '--name', name,
     '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
     // Watchdog and user code have different unprivileged UIDs: model code
     // cannot stop/extend the watchdog after the host application crashes.
-    '--user=65533:65533', '--pids-limit=32', '--memory=512m', '--memory-swap=512m', '--cpus=1', '--log-driver=none',
+    '--user=65533:65533', '--pids-limit=32', `--memory=${audio ? '1536m' : '512m'}`, `--memory-swap=${audio ? '1536m' : '512m'}`, `--cpus=${audio ? 2 : 1}`, '--log-driver=none',
     '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m',
     '--tmpfs=/work:rw,noexec,nosuid,nodev,size=128m,uid=65534,gid=65534,mode=700', '--workdir=/work',
     ...['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy', 'no_proxy'].flatMap(key => ['--env', `${key}=`]),
@@ -69,22 +70,24 @@ export class DiscordSandboxPool {
   private image?: Promise<string>;
   private closed = false;
   private shutdown = new AbortController();
-  constructor(private command: DockerCommand = dockerCommand, private idleMs = 120_000, private documents = false) {}
+  constructor(private command: DockerCommand = dockerCommand, private idleMs = 120_000, private documents: boolean | 'audio' = false) {}
 
   private prepare(): Promise<string> {
     if (!this.image) this.image = (async () => {
       const info = await this.command(['info', '--format', '{{.OSType}}'], '', this.shutdown.signal);
       if (info.code !== 0 || info.output.trim() !== 'linux') throw new Error('Docker Linux 엔진이 준비되지 않았습니다. PC에서 Docker Desktop을 켜 주세요. 검색·대화는 Docker 없이도 사용할 수 있습니다.');
-      const worker = this.documents ? attachmentWorkerSource() : '';
-      const imageName = this.documents ? `mrrobot-discord-documents:${createHash('sha256').update(worker + 'deps-v1').digest('hex').slice(0, 20)}` : DISCORD_SANDBOX_IMAGE;
+      const audio = this.documents === 'audio';
+      const worker = this.documents ? attachmentWorkerSource(audio ? 'audio_worker.py' : 'attachment_worker.py') : '';
+      const imageName = this.documents ? `mrrobot-discord-${audio ? 'audio' : 'documents'}:${createHash('sha256').update(worker + 'deps-v1').digest('hex').slice(0, 20)}` : DISCORD_SANDBOX_IMAGE;
       let inspect = await this.command(['image', 'inspect', imageName, '--format', '{{.Id}}'], '', this.shutdown.signal);
       if (inspect.code !== 0) {
         // Download only this host-defined base image, once; never accept image
         // names/installation commands from Discord users or model output.
         // Stdin-only Dockerfile: no host build context, user files or credentials.
         const dockerfile = `FROM python:3.12-slim-bookworm\nRUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor && rm -rf /var/lib/apt/lists/*\nRUN pip install --no-cache-dir pypdf==6.14.2 Pillow==12.2.0 xlrd==2.0.2 striprtf==0.0.32 olefile==0.47\nRUN python -c "import base64;open('/opt/attachment_worker.py','wb').write(base64.b64decode('${Buffer.from(worker).toString('base64')}'))"\nENV OMP_THREAD_LIMIT=1\n`;
+        const audioDockerfile = `FROM python:3.12-slim-bookworm\nRUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*\nRUN pip install --no-cache-dir sherpa-onnx==1.13.6 numpy==2.2.6\nRUN python -c "import urllib.request,hashlib,tarfile,io,os;d=urllib.request.urlopen('https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2',timeout=120).read(200000000);assert hashlib.sha256(d).hexdigest()=='7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e';t=tarfile.open(fileobj=io.BytesIO(d),mode='r:bz2');os.makedirs('/opt/asr');prefix='sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/';[(open('/opt/asr/'+n,'wb').write(t.extractfile(prefix+n).read())) for n in ['model.int8.onnx','tokens.txt','LICENSE','README.md']]"\nRUN python -c "import base64;open('/opt/audio_worker.py','wb').write(base64.b64decode('${Buffer.from(worker).toString('base64')}'))"\nENV OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1\n`;
         const pull = this.documents
-          ? await this.command(['build', '--quiet', '--tag', imageName, '-'], dockerfile, this.shutdown.signal, 600_000)
+          ? await this.command(['build', '--quiet', '--tag', imageName, '-'], audio ? audioDockerfile : dockerfile, this.shutdown.signal, 600_000)
           : await this.command(['pull', '--quiet', DISCORD_SANDBOX_IMAGE], '', this.shutdown.signal, 180_000);
         if (pull.code !== 0) throw new Error('격리 기본 이미지를 준비하지 못했습니다. Docker 연결을 확인하세요.');
         inspect = await this.command(['image', 'inspect', imageName, '--format', '{{.Id}}'], '', this.shutdown.signal);
@@ -143,12 +146,13 @@ export class DiscordSandboxPool {
           if (activeSignal.aborted) abort();
         });
         activeSignal.throwIfAborted();
-        const started = await this.command(reusableSandboxArgs(session.name, image), '', activeSignal);
+        const started = await this.command(reusableSandboxArgs(session.name, image, this.documents === 'audio'), '', activeSignal);
         if (started.code !== 0) throw new Error('격리 컨테이너를 준비하지 못했습니다.');
       }
       activeSignal.throwIfAborted();
       const restore = files.length ? `import os,base64,stat\np='/work/attachments'\nif not os.path.lexists(p): os.mkdir(p,0o700)\nif not stat.S_ISDIR(os.lstat(p).st_mode): raise RuntimeError('Unsafe attachment directory')\n` + files.map(f => `p=${JSON.stringify(sandboxFilePath(f))}\nif os.path.lexists(p): os.unlink(p)\nwith open(p,'xb') as out: out.write(base64.b64decode('${f.data.toString('base64')}'))\n`).join('') : '';
-      const result = await this.command(['exec', '--interactive', '--user=65534:65534', '--workdir=/work', session.name, '/usr/bin/timeout', '--signal=KILL', this.documents ? '90s' : '30s', 'python', '-I', '-B', '-'], restore + code, activeSignal, this.documents ? 95_000 : 35_000);
+      const limit = this.documents === 'audio' ? 180 : this.documents ? 90 : 30;
+      const result = await this.command(['exec', '--interactive', '--user=65534:65534', '--workdir=/work', session.name, '/usr/bin/timeout', '--signal=KILL', `${limit}s`, 'python', '-I', '-B', '-'], restore + code, activeSignal, (limit + 5) * 1000);
       activeSignal.throwIfAborted();
       if (result.code !== 0) throw new Error(`격리 코드 실행 실패: ${result.output.slice(-2000) || '실행 제한 또는 컨테이너 종료'}`);
       session.busy = false;
@@ -165,6 +169,8 @@ export class DiscordSandboxPool {
 
 let pool: DiscordSandboxPool | undefined;
 let documents: DiscordSandboxPool | undefined;
+let audio: DiscordSandboxPool | undefined;
 export function runDiscordPython(ticket: string, code: string, signal?: AbortSignal) { return (pool ??= new DiscordSandboxPool()).execute(ticket, code, signal); }
 export function runDiscordDocument(ticket: string, code: string, files: SandboxFile[], signal?: AbortSignal) { return (documents ??= new DiscordSandboxPool(dockerCommand, 120_000, true)).execute(ticket, code, signal, files); }
-export async function closeDiscordSandboxes() { const current = pool, docs = documents; pool = documents = undefined; await Promise.all([current?.close(), docs?.close()]); }
+export function runDiscordAudio(ticket: string, code: string, files: SandboxFile[], signal?: AbortSignal) { return (audio ??= new DiscordSandboxPool(dockerCommand, 120_000, 'audio')).execute(ticket, code, signal, files); }
+export async function closeDiscordSandboxes() { const current = pool, docs = documents, asr = audio; pool = documents = audio = undefined; await Promise.all([current?.close(), docs?.close(), asr?.close()]); }

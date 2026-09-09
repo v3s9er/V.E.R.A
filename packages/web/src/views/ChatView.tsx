@@ -5,6 +5,7 @@ import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
 import { BrandIcon } from '../components/BrandIcon';
+import { inConversationSpace, selectConversationInSpace, type ConversationSpace } from '../conversation-spaces';
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string }
@@ -130,6 +131,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selected, setSelected] = useState<ConversationDetail | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [space, setSpace] = useState<ConversationSpace>('personal');
+  const spaceRef = useRef<ConversationSpace>('personal');
+  const loadRequest = useRef(0);
+  spaceRef.current = space;
   const [messages, setMessages] = useState<UiMsg[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
@@ -248,6 +253,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setComposerError('');
 
     let conversation = selectedRef.current;
+    if (!conversation && spaceRef.current === 'discord') {
+      setComposerError('대화를 이어갈 Discord 티켓을 먼저 선택하세요.');
+      return;
+    }
     if (!conversation) {
       try {
         conversation = await client.call('conversations.create', {}) as ConversationDetail;
@@ -292,6 +301,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         permissionMode: conversation.permissionMode,
         tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive',
       }, 10 * 60_000) as { ok?: boolean; error?: string; text?: string; route?: RouteInfo };
+      if (selectedId.current !== conversation.id) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
       if (result.route) setRoute(result.route);
       if (result.text) {
@@ -303,6 +313,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         });
       }
     } catch (error) {
+      if (selectedId.current !== conversation.id) return;
       setMessages((items) => {
         const copy = [...items];
         const last = copy[copy.length - 1];
@@ -311,9 +322,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       });
     } finally {
       if (runningConversationRef.current === conversation.id) runningConversationRef.current = null;
-      busyRef.current = false;
-      setBusy(false);
-      setStatus('');
+      if (selectedId.current === conversation.id) {
+        busyRef.current = false;
+        setBusy(false);
+        setStatus('');
+      }
     }
   }, [client]);
 
@@ -338,16 +351,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   }, [client]);
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
+    const request = ++loadRequest.current;
     const [detail, runs] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
       client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
     ]);
     const selectedRun = runs.find((run) => run.conversationId === id);
-    const controlledRun = selectedRun ?? runs[0];
-    const confirmations = await Promise.all(runs.map((run) => (
+    if (!inConversationSpace(detail, spaceRef.current)) return;
+    const controlledRun = selectedRun;
+    const confirmations = await Promise.all(runs.filter(run => run.conversationId === id).map((run) => (
       client.call('chat.pendingConfirm', { conversationId: run.conversationId }, 5000)
         .catch(() => null) as Promise<ChatConfirmRequest | null>
     )));
+    if (request !== loadRequest.current || !inConversationSpace(detail, spaceRef.current)) return;
     selectedId.current = id;
     selectedRef.current = detail;
     setSelected(detail);
@@ -369,16 +385,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       client.call('routing.presets.list', {}) as Promise<RoutingPreset[]>,
       client.call('workspaces.list', {}) as Promise<WorkspaceInfo[]>,
     ]);
-    setConversations(list);
+    if (spaceRef.current !== space) return;
+    const visible = list.filter(c => inConversationSpace(c, space));
+    setConversations(visible);
     setProviders(provs);
     setRoutingPresets(presets);
     setWorkspaces(workspaceList);
     void discoverProviderModels(provs);
-    const target = preferredId ?? selectedId.current ?? list[0]?.id;
-    if (target && list.some((c) => c.id === target)) await loadConversation(target);
-    else if (!showArchived) {
+    const target = selectConversationInSpace(list, space, preferredId ?? selectedId.current);
+    if (target) await loadConversation(target);
+    else if (!showArchived && space === 'personal') {
       const created = await client.call('conversations.create', {}) as ConversationDetail;
-      setConversations([created, ...list]);
+      if (spaceRef.current !== space) return;
+      setConversations([created, ...visible]);
       selectedId.current = created.id;
       selectedRef.current = created;
       setSelected(created);
@@ -389,7 +408,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       setSelected(null);
       setMessages([]);
     }
-  }, [client, discoverProviderModels, loadConversation, showArchived]);
+  }, [client, discoverProviderModels, loadConversation, showArchived, space]);
 
   useEffect(() => {
     let active = true;
@@ -409,7 +428,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   useEffect(() => {
     const offList = client.on('conversations.changed', (data) => {
       const all = data as ConversationSummary[];
-      setConversations(all.filter((c) => c.status === (showArchived ? 'archived' : 'active')));
+      setConversations(all.filter((c) => c.status === (showArchived ? 'archived' : 'active') && inConversationSpace(c, spaceRef.current)));
     });
     const offProviders = client.on('providers.changed', (data) => {
       const next = data as ProviderInfo[];
@@ -472,7 +491,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       if (!isCurrent(data)) return;
       setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { last.done = true; last.error = (data as { message: string }).message; } return copy; });
     });
-    const offConfirm = client.on('chat.confirm', (data) => setConfirm(data as ChatConfirmRequest));
+    const offConfirm = client.on('chat.confirm', (data) => { if (isCurrent(data)) setConfirm(data as ChatConfirmRequest); });
     const offVoice = client.on('voice.wake', (data) => {
       const wake = data as { kind?: string; commandText?: string; awaitingCommand?: boolean };
       if (wake.kind !== 'pc') return;
@@ -859,7 +878,17 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     <div className="conversation-layout">
       <aside className="conversation-list">
         <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>Mr.Robot</b></div>
-        <div className="conversation-list-head"><Button onClick={() => void createConversation()}>＋ 새 대화</Button><button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
+        <div className="conversation-spaces" role="tablist" aria-label="대화 공간">
+          {(['personal', 'discord'] as const).map(key => <button key={key} role="tab" aria-selected={space === key} onClick={() => {
+            if (space === key) return;
+            loadRequest.current++;
+            spaceRef.current = key; selectedId.current = null; selectedRef.current = null;
+            runningConversationRef.current = null; busyRef.current = false;
+            setBusy(false); setStatus(''); setConfirm(null); setComposerError('');
+            setSelected(null); setMessages([]); setConversations([]); setConversationMenu(null); setShowArchived(false); setSpace(key);
+          }}>{key === 'personal' ? '내 대화' : 'Discord'}</button>)}
+        </div>
+        <div className="conversation-list-head">{space === 'personal' ? <Button onClick={() => void createConversation()}>＋ 새 대화</Button> : <span className="conversation-space-label">티켓 대화 기록</span>}<button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
         <div className="conversation-items">
           {conversations.map((c) => <div
             key={c.id}
@@ -883,7 +912,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
             }}
           >•••</button></div>)}
-          {conversations.length === 0 && <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : '대화가 없습니다.'}</div>}
+          {conversations.length === 0 && <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '대화가 없습니다.'}</div>}
         </div>
         {profile}
       </aside>

@@ -106,6 +106,7 @@ function saveDesktopPreferences() {
 
 function showMainWindow() {
   if (!win) return;
+  if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
 }
@@ -937,12 +938,7 @@ if (!gotLock) {
   logStartup('single-instance lock is already held');
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (win) {
-      win.show();
-      win.focus();
-    }
-  });
+  app.on('second-instance', showMainWindow);
 
   app.whenReady()
     .then(async () => {

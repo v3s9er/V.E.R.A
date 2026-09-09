@@ -812,6 +812,11 @@ console.log('8. stored conversation permissions cannot exceed the linked device 
   const ask = client('asker', 'ask');
   const admin = { id: 'local-admin', remoteAddress: '127.0.0.1', directLoopback: true, state: { auth: { isAdmin: true, permissionCap: 'full', nativeAuditOnly: true }, chat: new ChatSession() } };
   const remoteAdmin = { id: 'remote-admin', remoteAddress: 'cloudflare:203.0.113.20', directLoopback: false, state: { auth: { isAdmin: true, permissionCap: 'full' }, chat: new ChatSession() } };
+  const countBeforeStaleTicket = server.conversations.list().length;
+  let staleTicketRejected = false;
+  try { await handlers.get('chat.start')({ conversationId: 'deleted-discord-ticket', text: 'continue', tokenPolicy: 'audit-only' }, admin); }
+  catch (error) { staleTicketRejected = error.message === 'conversation not found'; }
+  check('explicit stale ticket IDs cannot silently create another conversation', staleTicketRejected && server.conversations.list().length === countBeforeStaleTicket && !admin.state.chat.busy);
   let readOnlyCreateBlocked = false;
   let readOnlyMemoryBlocked = false;
   try { handlers.get('conversations.create')({ title: 'escape', permissionMode: 'full' }, readOnly); } catch { readOnlyCreateBlocked = true; }

@@ -2285,6 +2285,7 @@ export class AgentServer {
       const requested = ['read-only', 'ask', 'workspace', 'full'].includes(String(input.permissionMode)) ? input.permissionMode : undefined;
       const created = this.conversations.create({
         ...input,
+        origin: client.state.auth?.trustedDiscord === true || (client.state.auth?.isAdmin === true && input.origin === 'discord') ? 'discord' : undefined,
         permissionMode: clientPermission(client, requested),
         tokenPolicy: clientTokenPolicy(client, requestedTokenPolicy(input.tokenPolicy)),
       });
@@ -2301,6 +2302,7 @@ export class AgentServer {
       const body = p(params);
       const requestedPermission = ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : undefined;
       const item = this.conversations.update(str(body.id), {
+        origin: (client.state.auth?.isAdmin === true || client.state.auth?.trustedDiscord === true) && (body.origin === 'discord' || body.origin === null) ? body.origin : undefined,
         title: typeof body.title === 'string' ? body.title : undefined,
         status: body.status === 'archived' ? 'archived' : body.status === 'active' ? 'active' : undefined,
         pinned: typeof body.pinned === 'boolean' ? body.pinned : undefined,
@@ -2390,6 +2392,9 @@ export class AgentServer {
       const session = client.state.chat;
       if (session.busy) throw new Error('chat already running');
       const requestedConversationId = str(body.conversationId) || session.conversationId;
+      // Never silently replace an explicit stale ticket binding with a new ID.
+      // The caller must repair/persist its binding before issuing a model run.
+      if (requestedConversationId && !this.conversations.get(requestedConversationId)) throw new Error('conversation not found');
       if (requestedConversationId && this.busyConversations.has(requestedConversationId)) {
         throw new Error('conversation is already running on another client');
       }
@@ -2402,6 +2407,7 @@ export class AgentServer {
       if (!conversationId || !this.conversations.get(conversationId)) {
         const requestedPermission = ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : undefined;
         conversationId = this.conversations.create({
+          origin: client.state.auth?.trustedDiscord === true ? 'discord' : undefined,
           reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : 'auto',
           providerId: typeof body.providerId === 'string' ? body.providerId : undefined,
           providerModel: typeof body.providerModel === 'string' ? body.providerModel : undefined,

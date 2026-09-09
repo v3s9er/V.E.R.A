@@ -17,6 +17,7 @@ import type { Turn } from './ai/provider.js';
 
 interface StoredConversation {
   id: string;
+  origin?: 'discord';
   title: string;
   status: ConversationStatus;
   pinned?: boolean;
@@ -81,6 +82,7 @@ function conversationRevision(item: StoredConversation): string {
   // The id and wall-clock updatedAt are also excluded so a deterministic
   // conflict copy keeps the ancestry of the branch it protects.
   const content = {
+    origin: item.origin,
     title: item.title,
     status: item.status,
     pinned: item.pinned === true,
@@ -225,6 +227,7 @@ function normalizeStoredConversation(raw: unknown, index: number): StoredConvers
   };
   const normalized: StoredConversation = {
     id,
+    origin: source.origin === 'discord' ? 'discord' : undefined,
     title,
     status: source.status as ConversationStatus,
     pinned: source.pinned === true,
@@ -272,12 +275,24 @@ function assertConversationSnapshotBudget(value: unknown[]): void {
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_SYNC_CONVERSATION_BYTES) throw new Error('대화 동기화 데이터가 32MB를 초과했습니다.');
 }
 
-function publicMessages(turns: Turn[]): ChatMessage[] {
+export function discordDisplayText(text: string): string {
+  const markers = ['\n[이 티켓에 보관된 첨부 원본', '\n[첨부 분석 자료', '\n[Discord에 사용자가 직접 첨부한 파일', '\n[Discord 첨부'];
+  const offsets = markers.map(marker => text.indexOf(marker)).filter(i => i >= 0);
+  return offsets.length ? text.slice(0, Math.min(...offsets)).trimEnd() : text;
+}
+
+function displayOrigin(c: StoredConversation): 'discord' | undefined {
+  // Legacy bridge records lacked origin metadata. This is presentation-only;
+  // it must never be used to authorize a Discord request or file access.
+  return c.origin ?? (c.title === 'Discord' || c.turns.some(t => t.role === 'user' && discordDisplayText(t.content) !== t.content) ? 'discord' : undefined);
+}
+
+function publicMessages(turns: Turn[], origin?: 'discord'): ChatMessage[] {
   return turns.map((turn) => ({
     role: turn.role,
     content: turn.role === 'tool'
       ? (turn.toolResults ?? []).map((r) => `${r.name}: ${r.content}`).join('\n')
-      : turn.content,
+      : origin === 'discord' && turn.role === 'user' ? discordDisplayText(turn.content) : turn.content,
     toolCalls: turn.toolCalls?.map((call) => ({ id: call.id, name: call.name, input: call.args })),
   }));
 }
@@ -285,7 +300,8 @@ function publicMessages(turns: Turn[]): ChatMessage[] {
 function summarize(c: StoredConversation): ConversationSummary {
   return {
     id: c.id,
-    title: c.title,
+    origin: displayOrigin(c),
+    title: displayOrigin(c) === 'discord' && /\[(이 티켓|첨부 분석|Discord)/.test(c.title) ? discordDisplayText(c.turns.find(t => t.role === 'user')?.content ?? c.title).slice(0, 120) : c.title,
     status: c.status,
     pinned: c.pinned === true,
     createdAt: c.createdAt,
@@ -619,6 +635,7 @@ export class ConversationStore {
     const now = Date.now();
     const item: StoredConversation = {
       id: randomUUID(),
+      origin: input.origin === 'discord' ? 'discord' : undefined,
       title: input.title?.trim() || '새 대화',
       status: 'active',
       pinned: input.pinned === true,
@@ -655,7 +672,7 @@ export class ConversationStore {
     return this.require(id).summary;
   }
 
-  update(id: string, patch: { title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
+  update(id: string, patch: { origin?: 'discord' | null; title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
     const item = this.require(id);
     if (patch.tokenPolicy !== undefined && !tokenPolicies.has(patch.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     // update() mutates the live object so existing server-side references keep
@@ -666,6 +683,7 @@ export class ConversationStore {
     const previousRevision = item.syncRevision as string;
     const previousAncestors = [...(item.syncAncestors ?? [])];
     if (patch.title !== undefined) item.title = patch.title.trim().slice(0, 120) || item.title;
+    if (patch.origin !== undefined) item.origin = patch.origin === 'discord' ? 'discord' : undefined;
     if (patch.status) item.status = patch.status;
     if (patch.pinned !== undefined) item.pinned = patch.pinned;
     if (patch.reasoningEffort) item.reasoningEffort = patch.reasoningEffort;
@@ -713,7 +731,8 @@ export class ConversationStore {
     candidate.usage.cacheWritePromptTokens = addRecordedTokens(candidate.usage.cacheWritePromptTokens, usage.cacheWritePromptTokens);
     candidate.usage.reasoningTokens = addRecordedTokens(candidate.usage.reasoningTokens, usage.reasoningTokens);
     candidate.updatedAt = Date.now();
-    const firstUser = candidate.turns.find((turn) => turn.role === 'user')?.content.trim();
+    const rawFirstUser = candidate.turns.find((turn) => turn.role === 'user')?.content.trim();
+    const firstUser = rawFirstUser && candidate.origin === 'discord' ? discordDisplayText(rawFirstUser) : rawFirstUser;
     if (candidate.title === '새 대화' && firstUser) candidate.title = firstUser.replace(/\s+/g, ' ').slice(0, 48);
     this.compact(candidate);
     candidate.turns = normalizeLocalTurns(candidate.turns);
@@ -799,6 +818,6 @@ export class ConversationStore {
   }
 
   private detail(item: StoredConversation): ConversationDetail {
-    return { ...summarize(item), messages: publicMessages(item.turns), summary: item.summary, usage: { ...item.usage } };
+    return { ...summarize(item), messages: publicMessages(item.turns, displayOrigin(item)), summary: item.summary, usage: { ...item.usage } };
   }
 }

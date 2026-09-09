@@ -242,6 +242,8 @@ export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'qua
 
 export interface ConversationSummary {
   id: string;
+  /** Presentation category only; never an authorization grant. */
+  origin?: 'discord';
   title: string;
   status: ConversationStatus;
   /** Pinned conversations sort before ordinary conversations on every device. */
@@ -271,6 +273,7 @@ export interface ConversationDetail extends ConversationSummary {
 }
 
 export interface ConversationCreateInput {
+  origin?: 'discord';
   title?: string;
   reasoningEffort?: ReasoningEffort;
   providerId?: string;

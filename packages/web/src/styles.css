@@ -937,6 +937,11 @@ select.input option {
 
 .conversation-brand { height: 58px; display: flex; align-items: center; gap: 9px; padding: 0 16px; font-size: 16px; letter-spacing: -.01em; }
 .conversation-brand-mark { width: 27px; height: 27px; display: grid; place-items: center; filter: drop-shadow(0 5px 13px rgba(124, 92, 255, .34)); }
+.conversation-spaces { display: flex; gap: 3px; flex-shrink: 0; margin: 0 12px 8px; padding: 3px; border: 1px solid rgba(255,255,255,.08); border-radius: 11px; background: rgba(255,255,255,.025); }
+.conversation-spaces button { flex: 1; min-width: 0; border: 0; border-radius: 8px; padding: 7px 12px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.conversation-spaces button[aria-selected="true"] { background: rgba(124,92,255,.2); color: #ece7ff; }
+.conversation-spaces button:focus-visible { outline: 2px solid #a696ff; outline-offset: 1px; }
+.conversation-space-label { font-size: 12px; color: var(--muted); padding: 8px 0; }
 .conversation-list-head { padding: 6px 12px 12px; display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .conversation-list-head .btn { flex: 1; }
 .text-button { border: none; background: none; color: var(--text-faint); cursor: pointer; font: inherit; font-size: 12px; }
@@ -2388,10 +2393,12 @@ body::before {
 @media (max-width: 900px) {
   .conversation-layout { grid-template-rows: 118px minmax(0,1fr); padding-bottom: 54px; }
   .conversation-list { position: relative; height: 118px; max-height: none; display: grid; grid-template-columns: auto minmax(0,1fr); grid-template-rows: 42px 62px; gap: 4px 10px; padding: 7px 12px; overflow: hidden; background: rgba(9,13,24,.97); }
-  .conversation-brand { align-self: center; padding: 0 5px; }
-  .conversation-list-head { align-self: center; padding: 0; gap: 6px; }
+  .conversation-brand { display: none; }
+  .conversation-spaces { grid-row: 1; grid-column: 1; align-self: center; margin: 0; }
+  .conversation-spaces button { padding: 6px 8px; font-size: 11px; }
+  .conversation-list-head { grid-row: 1; grid-column: 2; align-self: center; padding: 0; gap: 6px; }
   .conversation-list-head .btn { width: auto; padding: 8px 12px; }
-  .conversation-items { grid-column: 1 / -1; min-width: 0; padding: 2px 0 5px; gap: 7px; }
+  .conversation-items { grid-row: 2; grid-column: 1 / -1; min-width: 0; padding: 2px 0 5px; gap: 7px; }
   .conversation-item { min-width: 165px; max-width: 210px; padding: 8px 10px; }
   .profile-menu.embedded { position: fixed; z-index: 100; inset: auto 0 0; margin: 0; padding: 5px max(10px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); border-top: 1px solid rgba(255,255,255,.1); background: rgba(9,13,24,.96); box-shadow: 0 -12px 34px rgba(0,0,0,.24); backdrop-filter: blur(18px); }
   .profile-menu.embedded .profile-shortcuts { width: min(480px,100%); margin: 0 auto; }

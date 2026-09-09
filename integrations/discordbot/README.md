@@ -314,9 +314,36 @@ can be retried one page at a time without resending the file.
 Restricted tickets get `attachment_list` / `attachment_read`, including
 search-only users reading their own uploads. `isolated_python(attachment_id=...)`
 opens the original with document libraries while maintaining PC isolation.
-Fully authorized native-CLI tickets receive the initial extracted preview and
-retention metadata; these restricted broker tools are not injected into their
-native CLI. Do not claim full-document analysis from a partial preview.
+Fully authorized native-CLI tickets receive the extracted preview plus actual
+task-scoped temporary paths to their uploaded originals. These copies are removed
+when the run finishes or is cancelled; the seven-day encrypted originals remain.
+Restricted broker tools are not injected into native CLI, and native host paths
+are never sent to ordinary isolated tickets. Do not claim full-document analysis
+from a partial preview.
+
+Audio uploads (WAV, MP3, M4A, AAC, OGG/Opus, FLAC, WebM, WMA and MP4 audio) use
+FFmpeg and offline sherpa-onnx SenseVoice transcription in a separate networkless
+container. First use downloads the public engine/model once; the model archive
+is SHA-256 pinned. No audio is sent to an external transcription service.
+The resulting transcript can be sent to the user's selected AI provider as task
+context. This is not an end-to-end encryption guarantee for Discord or that provider.
+Read long recordings in up-to-120-second windows using `audio_start_seconds` and
+`audio_duration_seconds`, following `has_more` / `next_start_seconds`. Silent or
+undecodable files return an explicit status, not invented text. The in-memory
+cache is scoped by ticket, hash and window, expires after 30 minutes (or original
+expiry), holds at most 16 results, and rechecks ownership/integrity on every read.
+
+The optional image locally installs FFmpeg (Debian license notices retained),
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0), NumPy (BSD-3-Clause),
+and [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) model assets. The model's
+upstream LICENSE and README are preserved under `/opt/asr`; the weights and images
+are not included in the source repository or installer.
+
+One saved conversation binding is used per ticket and access scope. Missing
+bindings are repaired once, carrying over only that scope's encrypted uploads.
+Changing from full PC access to isolated access does not merge privileged history.
+Desktop history has separate Personal and Discord spaces; original messages are
+preserved, while generated attachment context is hidden from user-message display.
 
 Local administrators may select an existing WSL Docker engine through the
 Discord plugin config field `sandboxWslDistribution` (distribution name only).

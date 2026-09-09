@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -32,6 +32,8 @@
     "test:discord": "tsx packages/agent/test/discord.test.ts && tsx packages/agent/test/discord-sessions.test.ts && tsx packages/agent/test/discord-authority.test.ts && tsx packages/agent/test/discord-isolation.test.ts && tsx packages/agent/test/discord-attachments.test.ts && tsx packages/agent/test/cli-text-pool.test.ts && npm run test:discord-fast",
     "test:discord-fast": "tsx packages/agent/test/cli-broker.test.ts && tsx packages/agent/test/discord-sandbox.test.ts && tsx packages/agent/test/discord-originals.test.ts",
     "test:discord-documents-installed": "tsx packages/agent/test/discord-documents-installed.test.ts",
+    "test:discord-spaces": "tsx packages/agent/test/discord-conversation-spaces.test.ts",
+    "test:discord-audio-installed": "tsx packages/agent/test/discord-audio-installed.test.ts",
     "test:codex-installed": "tsx packages/agent/test/cli-pool-installed.test.ts && tsx packages/agent/test/cli-broker-installed.test.ts && tsx packages/agent/test/cli-native-installed.test.ts",
     "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts",
     "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts",

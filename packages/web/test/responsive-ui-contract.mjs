@@ -133,4 +133,13 @@ requireAll(ui, [
   '}, [open]);',
 ], 'modal focus lifecycle can reset on every parent render');
 
-console.log('RESPONSIVE UI CONTRACT PASSED · header, gate, chat, composer, menus and modal focus are bounded');
+requireAll(chat, [
+  'aria-label="대화 공간"',
+  'inConversationSpace(c, spaceRef.current)',
+  'selectConversationInSpace(list, space,',
+  "client.on('chat.confirm', (data) => { if (isCurrent(data))",
+  'request !== loadRequest.current',
+  'selectedId.current !== conversation.id',
+], 'Discord/personal spaces can mix messages, approvals or late responses');
+requireAll(css, ['.conversation-spaces { grid-row: 1; grid-column: 1;', '.conversation-items { grid-row: 2; grid-column: 1 / -1;'], 'compact conversation spaces overflow');
+console.log('RESPONSIVE UI CONTRACT PASSED · header, gate, chat, composer, menus, spaces and modal focus are bounded');
