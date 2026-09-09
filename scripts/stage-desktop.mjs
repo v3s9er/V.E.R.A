@@ -46,6 +46,8 @@ copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
 copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
+mkdirSync(join(stage, 'integrations', 'lid-display'), { recursive: true });
+for (const name of ['bridge.ps1', 'LidDisplay.cs', 'README.md']) copyFileSync(join(root, 'integrations', 'lid-display', name), join(stage, 'integrations', 'lid-display', name));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
 copyFileSync(join(root, 'integrations', 'discordbot', 'LICENSE'), join(stage, 'integrations', 'discordbot', 'LICENSE'));
 for (const name of ['bridge.py', 'presentation.py', 'standalone.py', 'legacy_adapter.py', 'thread_sessions.py', 'attachments.py', 'attachment_cache.py', 'attachment_worker.py', 'audio_worker.py', 'attachment_ocr.ps1', 'requirements.txt', 'README.md']) copyFileSync(join(root, 'integrations', 'discordbot', name), join(stage, 'integrations', 'discordbot', name));

@@ -50,6 +50,7 @@ import { createOrcaPlugin } from '../plugins/orca.js';
 import { createCalendarPlugin } from '../plugins/calendar.js';
 import { createTailscalePlugin } from '../plugins/tailscale.js';
 import { createDiscordPlugin } from '../plugins/discord.js';
+import { createLidDisplayPlugin } from '../plugins/lid-display.js';
 import { assertDiscordModelAllowed, parseDiscordModelCeiling } from '../plugins/discord-model-policy.js';
 import { createDockerPlugin } from '../plugins/docker.js';
 import { createCtfPlugin } from '../plugins/ctf.js';
@@ -105,7 +106,7 @@ const ADMIN_EVENT_ALLOWLIST = new Set([
   'log', 'plugins.changed', 'providers.changed', 'settings.changed',
   'dependencies.changed', 'memory.changed', 'scheduler.changed', 'scheduler.ran',
   'voice.wake', 'voice.command', 'voice.command.ready', 'voice.command.timeout',
-  'voice.status', 'pairing.changed', 'remote-link.changed',
+  'voice.status', 'pairing.changed', 'remote-link.changed', 'lid-display.changed',
   'resource-archiver.progress', 'sslscan-auditor.progress',
   'sslscan-auditor.completed',
   'webcrypto-observer.changed',
@@ -1894,6 +1895,7 @@ export class AgentServer {
     await this.plugins.loadBuiltin(createCtfPlugin());
     await this.plugins.loadBuiltin(createMcpPlugin());
     await this.plugins.loadBuiltin(createVoicePlugin());
+    await this.plugins.loadBuiltin(createLidDisplayPlugin(() => this.plugins.list().some(p => p.id === 'lid-display' && p.enabled)));
     await this.plugins.loadBuiltin(createResourceArchiverPlugin());
     await this.plugins.loadBuiltin(createSslScanPlugin());
     await this.plugins.loadBuiltin(this.webCryptoObserverPlugin);
@@ -1955,7 +1957,7 @@ export class AgentServer {
       'routing.changed', 'routing.presets.changed', 'conversations.changed',
       'memory.changed', 'scheduler.changed', 'scheduler.ran', 'workspaces.changed',
       'calendar.changed', 'calendar.work.changed', 'voice.wake', 'voice.command', 'voice.command.ready',
-      'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed',
+      'voice.command.timeout', 'voice.status', 'pairing.changed', 'remote-link.changed', 'lid-display.changed',
       'resource-archiver.progress', 'sslscan-auditor.progress', 'sslscan-auditor.completed',
       'webcrypto-observer.changed',
     ].forEach(forward);
@@ -2420,7 +2422,7 @@ export class AgentServer {
       session.conversationId = conversationId;
       const conversation = this.conversations.get(conversationId) as ConversationDetail;
       const discordIsolation = client.state.auth?.trustedDiscord === true && (body.discordIsolation === 'isolated' || body.discordIsolation === 'search');
-      const isolation = discordIsolation ? createDiscordIsolation(conversationId, body.discordIsolation === 'search' || this.config.settings.safety.mode === 'read-only') : undefined;
+      const isolation = discordIsolation ? createDiscordIsolation(conversationId, body.discordIsolation === 'search' || this.config.settings.safety.mode === 'read-only', body.discordAttachmentIds) : undefined;
       const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : conversation.workspaceId;
       const workspace = this.config.workspaces.find((item) => item.id === workspaceId)
         ?? this.config.workspaces.find((item) => item.isDefault);

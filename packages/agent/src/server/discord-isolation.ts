@@ -47,7 +47,10 @@ export function readIsolatedArtifact(id: string, path: string, offset: number, l
 
 
 /** Separate capability broker: no Computer API, native CLI, MCP or general plugins. */
-export function createDiscordIsolation(conversationId: string, searchOnly: boolean) {
+export function createDiscordIsolation(conversationId: string, searchOnly: boolean, selectedIds?: unknown) {
+  if (selectedIds !== undefined && (!Array.isArray(selectedIds) || selectedIds.length > 64 || selectedIds.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)))) throw new Error('첨부 선택 목록이 올바르지 않습니다.');
+  const selection = selectedIds === undefined ? undefined : new Set(selectedIds as string[]);
+  const assertSelected = (id: string) => { if (selection && !selection.has(id)) throw new Error('이번 질문에서 선택한 첨부가 아닙니다. 다른 파일이 필요하면 사용자에게 파일 이름을 확인하세요.'); };
   const tools = isolatedTools(searchOnly);
   const allowed = new Set(tools.map(t => t.name));
   let webRequests = 0;
@@ -72,7 +75,8 @@ export function createDiscordIsolation(conversationId: string, searchOnly: boole
         const text = Buffer.from(result.body).toString('utf8').replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 24_000);
         return JSON.stringify({ url: result.finalUrl, status: result.status, untrustedWebText: text });
       }
-      if (name === 'attachment_list') return JSON.stringify(attachmentInventory(conversationId));
+      if (name === 'attachment_list') return JSON.stringify(attachmentInventory(conversationId).filter(f => !selection || selection.has(f.id)));
+      if (name === 'attachment_read' || (name === 'isolated_python' && body.attachment_id)) assertSelected(String(body.attachment_id ?? ''));
       if (name === 'attachment_read') return readDiscordAttachment(conversationId, String(body.attachment_id ?? ''), Number(body.page_start ?? 1), Number(body.page_count ?? 10), signal, Number(body.audio_start_seconds ?? 0), Number(body.audio_duration_seconds ?? 120));
       if (name === 'isolated_python') return JSON.stringify({ output: body.attachment_id
         ? await runPythonWithAttachment(conversationId, String(body.code ?? ''), String(body.attachment_id), signal)

@@ -261,7 +261,7 @@ console.log('1c. server event visibility is fail-closed');
   check('conversation summaries remain available to paired clients', serverEventAudience('conversations.changed') === 'paired');
   check('private work-calendar revisions use a capability-scoped audience', serverEventAudience('calendar.work.changed') === 'private-calendar');
   check('scheduler/log/voice/provider events require administrator', [
-    'scheduler.changed', 'scheduler.ran', 'log', 'voice.command', 'voice.status', 'providers.changed', 'plugins.changed', 'dependencies.changed', 'remote-link.changed',
+    'scheduler.changed', 'scheduler.ran', 'log', 'voice.command', 'voice.status', 'providers.changed', 'plugins.changed', 'dependencies.changed', 'remote-link.changed', 'lid-display.changed',
   ].every((event) => serverEventAudience(event) === 'admin'));
   check('new unreviewed event types are not broadcast', serverEventAudience('future.unreviewed.secret') === 'none');
 }
