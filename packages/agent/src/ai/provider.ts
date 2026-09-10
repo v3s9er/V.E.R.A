@@ -1,4 +1,4 @@
-import type { ChatUsage, ProviderType, ReasoningEffort } from '@mr-robot/shared';
+import type { ChatUsage, ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
 
 /** Provider-agnostic conversation turn. Each provider maps this to its wire format. */
 export interface Turn {
@@ -145,6 +145,7 @@ export interface AiProvider {
   ping(): Promise<ProviderHealth>;
   /** List model ids exposed by this account/provider when supported. */
   models(force?: boolean): Promise<string[]>;
+  modelCatalog?(force?: boolean): Promise<ProviderModelCatalog>;
   /** Optional native coding-agent execution (Codex/Claude CLI keeps its own tools and harness). */
   runAgent?(req: NativeAgentRequest): Promise<ProviderResult>;
 }

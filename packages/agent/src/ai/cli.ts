@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { isolatedPrompt, parseIsolatedReply, ISOLATED_OUTPUT_SCHEMA } from './cli-isolated.js';
 import { pooledCodexText } from './cli-text-pool.js';
 import { pooledNativeCodex } from './cli-native-pool.js';
-import { discoverCodexModels, ModelListCache } from './cli-models.js';
+import { discoverCodexModels, discoverCodexVersion, ModelListCache } from './cli-models.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
+import type { ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, BrokerAgentRequest, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
 import { terminateProcessTree } from '../computer/shell.js';
 
@@ -102,14 +102,12 @@ function executableOnPath(name: string): string | undefined {
   return undefined;
 }
 
-/** Pull model names and aliases exposed by newer CLI help output. */
+/** Claude-only help aliases. Codex discovery must use app-server model/list. */
 export function extractCliModels(
-  type: Extract<ProviderType, 'codex-cli' | 'claude-cli'>,
+  type: 'claude-cli',
   output: string,
 ): string[] {
-  const pattern = type === 'codex-cli'
-    ? /\bgpt-\d[\w.-]*\b/gi
-    : /\b(?:claude-)?(?:fable|opus|sonnet|haiku)(?:-\d[\w.-]*)?\b/gi;
+  const pattern = /\b(?:claude-)?(?:fable|opus|sonnet|haiku)(?:-\d[\w.-]*)?\b/gi;
   return [...new Set(output.match(pattern)?.map((value) => value.toLowerCase()) ?? [])];
 }
 
@@ -366,8 +364,9 @@ export class CliProvider implements AiProvider {
   readonly supportsTools = false;
   readonly supportedReasoning: ReasoningEffort[];
   private readonly modelList = new ModelListCache(() => this.discoverModels(), () => [
-    ...(this.model ? [this.model] : []), ...(this.type === 'codex-cli' ? CURRENT_CODEX_MODELS : CURRENT_CLAUDE_MODELS),
+    ...(this.model ? [this.model] : []), ...(this.type === 'codex-cli' ? [] : CURRENT_CLAUDE_MODELS),
   ]);
+  private catalogCliVersion?: string;
   private isolatedHealthUntil = 0;
 
   constructor(
@@ -558,10 +557,27 @@ export class CliProvider implements AiProvider {
     return this.modelList.get(force);
   }
 
+  async modelCatalog(force = false): Promise<ProviderModelCatalog> {
+    // The old string[] endpoint still throws on a failed explicit refresh.
+    // This endpoint returns the retained list WITH its failure/freshness state.
+    const models = await this.models(force).catch(() => this.models());
+    return { models, source: this.type === 'codex-cli' ? 'codex-model-list' : 'claude-cli-help',
+      ...this.modelList.status(), ...(this.catalogCliVersion ? { cliVersion: this.catalogCliVersion } : {}) };
+  }
+
   private async discoverModels(): Promise<string[]> {
     const fallback = this.type === 'codex-cli' ? CURRENT_CODEX_MODELS : CURRENT_CLAUDE_MODELS;
     const invocation = resolveCliInvocation(this.type, this.command);
-    if (this.type === 'codex-cli') return discoverCodexModels({ ...invocation, env: cliSubscriptionEnvironment(this.type) });
+    if (this.type === 'codex-cli') {
+      this.catalogCliVersion = undefined;
+      const options = { ...invocation, env: cliSubscriptionEnvironment(this.type) };
+      // Wait for both bounded probes even on failure, so an older version can
+      // be shown alongside its actionable model/list compatibility warning.
+      const [models, version] = await Promise.allSettled([discoverCodexModels(options), discoverCodexVersion(options)]);
+      if (version.status === 'fulfilled') this.catalogCliVersion = version.value;
+      if (models.status === 'rejected') throw models.reason;
+      return models.value;
+    }
     const help = await new Promise<string>((resolve) => {
       const child = spawn(invocation.command, [...invocation.prefixArgs, '--help'], {
         shell: false,

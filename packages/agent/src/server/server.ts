@@ -2256,6 +2256,7 @@ export class AgentServer {
     h.set('providers.setDefault', (params, client) => { assertAdmin(client); return this.providersSetDefault(str(p(params).id)); });
     h.set('providers.test', async (params, client) => { assertAdmin(client); return this.providersTest(str(p(params).id)); });
     h.set('providers.models', async (params, client) => { assertAdmin(client); return this.providersModels(str(p(params).id), p(params).refresh === true); });
+    h.set('providers.catalog', async (params, client) => { assertAdmin(client); return this.registry.modelCatalog(str(p(params).id), p(params).refresh === true); });
     h.set('providers.updateModel', (params, client) => { assertAdmin(client); return this.providersUpdateModel(str(p(params).id), str(p(params).model)); });
 
     h.set('plugins.list', () => this.pluginsList());

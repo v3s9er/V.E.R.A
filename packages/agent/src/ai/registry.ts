@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ModelRole, ProviderAddInput, ProviderConfig, ProviderInfo } from '@mr-robot/shared';
+import type { ModelRole, ProviderAddInput, ProviderConfig, ProviderInfo, ProviderModelCatalog } from '@mr-robot/shared';
 import { ConfigStore, defaultProviderBaseUrl } from '../config.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAICompatibleProvider } from './openai.js';
@@ -204,6 +204,14 @@ export class ProviderRegistry {
     const provider = this.providers.get(id);
     if (!provider) throw new Error('provider not found');
     return provider.models(force);
+  }
+
+  async modelCatalog(id: string, force = false): Promise<ProviderModelCatalog> {
+    const provider = this.providers.get(id);
+    if (!provider) throw new Error('provider not found');
+    if (provider.modelCatalog) return provider.modelCatalog(force);
+    const models = await provider.models(force);
+    return { models, source: 'provider', state: 'fresh', lastUpdatedAt: Date.now(), lastAttemptAt: Date.now() };
   }
 
   async test(id: string): Promise<{ ok: boolean; error?: string }> {

@@ -5,6 +5,7 @@ import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
 import { BrandIcon } from '../components/BrandIcon';
+import { loadModelCatalog } from '../model-catalog';
 import { inConversationSpace, selectConversationInSpace, type ConversationSpace } from '../conversation-spaces';
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
@@ -334,18 +335,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     if (modelRefreshInFlight.current) return;
     modelRefreshInFlight.current = true;
     setRefreshingModels(true);
-    let failed = false;
+    const warnings: string[] = [];
     const entries = await Promise.all(items.map(async (provider): Promise<[string, string[] | null]> => {
       try {
-        const discovered = await client.call('providers.models', { id: provider.id, refresh: force }) as string[];
-        return [provider.id, [...new Set([provider.model, ...discovered])]];
+        const catalog = await loadModelCatalog(client, provider.id, force);
+        if (catalog.state !== 'fresh') warnings.push(`${provider.label}: ${catalog.warning ?? '이전 목록 표시 중 · 설정에서 모델 목록을 갱신하세요.'}`);
+        return [provider.id, [...new Set([provider.model, ...catalog.models])]];
       } catch {
-        failed = true;
+        if (client.isAdmin) warnings.push(`${provider.label}: 모델 목록을 가져오지 못했습니다. CLI·로그인·연결을 확인하세요.`);
         return [provider.id, null];
       }
     }));
     setProviderModels(previous => Object.fromEntries(entries.map(([id, models]) => [id, models ?? previous[id] ?? [items.find(p => p.id === id)!.model]])));
-    if (force) setModelRefreshStatus(failed ? '일부 모델 목록 갱신 실패 · 기존 목록 유지. CLI·로그인·연결을 확인하세요.' : '모델 목록 갱신 완료 · 선택한 모델은 유지됩니다.');
+    setModelRefreshStatus(warnings.length ? warnings.join(' / ') : force ? '모델 목록 갱신 완료 · 선택한 모델은 유지됩니다.' : '');
     setRefreshingModels(false);
     modelRefreshInFlight.current = false;
   }, [client]);

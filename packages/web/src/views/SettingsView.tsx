@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import type { AppSettings, DependencyInstallResult, DependencyReport, DeviceCapability, MemoryItem, PluginInfo, ProviderInfo, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
+import type { AppSettings, DependencyInstallResult, DependencyReport, DeviceCapability, MemoryItem, PluginInfo, ProviderInfo, ProviderModelCatalog, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
 import { DependencySetup } from '../components/DependencySetup';
 import { ToolPortalSettings } from '../components/ToolPortalSettings';
+import { loadModelCatalog, modelCatalogSummary } from '../model-catalog';
 
 interface PairingInfo {
   deviceName: string;
@@ -189,6 +190,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const [addError, setAddError] = useState('');
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   const [modelOptions, setModelOptions] = useState<Record<string, string[]>>({});
+  const [modelCatalogs, setModelCatalogs] = useState<Record<string, ProviderModelCatalog>>({});
+  const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({});
+  const modelLoadingRef = useRef(new Set<string>());
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
   const [repairOffer, setRepairOffer] = useState<RepairOffer | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
@@ -319,12 +323,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   }, [canManage, clearPairingQr, client, refresh]);
 
   useEffect(() => {
-    if (!canManage || section !== 'routing' || providers.length === 0) return;
+    if (!canManage || !['models', 'routing'].includes(section) || providers.length === 0) return;
     let alive = true;
     void Promise.all(providers.map(async (provider): Promise<[string, string[]]> => {
       try {
-        const values = await client.call('providers.models', { id: provider.id }) as string[];
-        return [provider.id, [...new Set([provider.model, ...values])]];
+        const catalog = await loadModelCatalog(client, provider.id);
+        if (alive) setModelCatalogs(current => ({ ...current, [provider.id]: catalog }));
+        return [provider.id, [...new Set([provider.model, ...catalog.models])]];
       } catch {
         return [provider.id, [provider.model]];
       }
@@ -706,14 +711,20 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   };
 
   const discoverModels = async (id: string): Promise<void> => {
-    if (!canManage) return;
+    if (!canManage || modelLoadingRef.current.has(id)) return;
+    modelLoadingRef.current.add(id);
+    setModelLoading(current => ({ ...current, [id]: true }));
     setTestResult((t) => ({ ...t, [id]: '모델 목록 가져오는 중…' }));
     try {
-      const values = await client.call('providers.models', { id, refresh: true }) as string[];
-      setModelOptions((current) => ({ ...current, [id]: values }));
-      setTestResult((t) => ({ ...t, [id]: values.length ? `${values.length}개 모델 발견` : '모델 목록이 비어 있습니다' }));
+      const catalog = await loadModelCatalog(client, id, true);
+      setModelOptions((current) => ({ ...current, [id]: catalog.models }));
+      setModelCatalogs(current => ({ ...current, [id]: catalog }));
+      setTestResult((t) => ({ ...t, [id]: catalog.state === 'fresh' ? '모델 목록을 갱신했습니다. 현재 선택은 유지됩니다.' : '' }));
     } catch (err) {
       setTestResult((t) => ({ ...t, [id]: `✕ ${err instanceof Error ? err.message : String(err)}` }));
+    } finally {
+      modelLoadingRef.current.delete(id);
+      setModelLoading(current => ({ ...current, [id]: false }));
     }
   };
 
@@ -897,12 +908,18 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
               </div>
               <div className="provider-url" title={p.baseUrl}>{p.baseUrl}</div>
               <div className="provider-url">추론: {p.supportedReasoning.join(' · ')}</div>
+              {modelCatalogs[p.id] && <div className="provider-test" role="status">
+                <div>{modelCatalogSummary(modelCatalogs[p.id])}</div>
+                {modelCatalogs[p.id].lastUpdatedAt != null && <div>마지막 성공: {new Date(modelCatalogs[p.id].lastUpdatedAt!).toLocaleString()}</div>}
+                {modelCatalogs[p.id].warning && <div>{modelCatalogs[p.id].warning}</div>}
+              </div>}
+              {p.type === 'codex-cli' && <p className="panel-hint">새 모델은 실행 PC의 Codex CLI와 로그인 계정이 제공하는 목록을 따릅니다. 누락되면 해당 PC의 CLI 업데이트·로그인·계정 권한을 확인한 뒤 새로고침하세요. 조회에는 AI 질문 토큰을 사용하지 않습니다.</p>}
               {testResult[p.id] && <div className="provider-test">{testResult[p.id]}</div>}
               <div className="plugin-actions">
                 <Button variant="ghost" disabled={!canManage} onClick={() => void testProvider(p.id)}>
                   연결 확인
                 </Button>
-                <Button variant="ghost" disabled={!canManage} onClick={() => void discoverModels(p.id)}>모델 가져오기</Button>
+                <Button variant="ghost" disabled={!canManage || modelLoading[p.id]} onClick={() => void discoverModels(p.id)}>{modelLoading[p.id] ? '모델 조회 중…' : '모델 새로고침'}</Button>
                 {!p.isDefault && (
                   <Button variant="ghost" disabled={!canManage} onClick={() => void client.call('providers.setDefault', { id: p.id }).catch(() => undefined)}>
                     기본으로

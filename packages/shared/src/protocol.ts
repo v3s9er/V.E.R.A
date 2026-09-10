@@ -69,6 +69,17 @@ export type ProviderType = 'openai-compatible' | 'anthropic' | 'ollama' | 'codex
 export type ProviderSource = 'api' | 'subscription' | 'local' | 'free';
 export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/** Discovery metadata contains no credentials, executable paths, or raw CLI output. */
+export interface ProviderModelCatalog {
+  models: string[];
+  source: 'codex-model-list' | 'claude-cli-help' | 'provider';
+  state: 'fresh' | 'stale' | 'fallback';
+  lastUpdatedAt: number | null;
+  lastAttemptAt: number | null;
+  cliVersion?: string;
+  warning?: string;
+}
+
 export interface ProviderConfig {
   id: string;
   label: string;

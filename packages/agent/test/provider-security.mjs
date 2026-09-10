@@ -77,10 +77,14 @@ console.log('3. provider network probes require local administrator access');
   };
   let testBlocked = false;
   let modelsBlocked = false;
+  let catalogBlocked = false;
+  check('catalog diagnostics handler is registered', typeof handlers.get('providers.catalog') === 'function');
   try { await handlers.get('providers.test')({ id: 'missing' }, linked); } catch { testBlocked = true; }
   try { await handlers.get('providers.models')({ id: 'missing' }, linked); } catch { modelsBlocked = true; }
+  try { await handlers.get('providers.catalog')({ id: 'missing' }, linked); } catch { catalogBlocked = true; }
   check('linked clients cannot test provider endpoints', testBlocked);
   check('linked clients cannot enumerate provider models', modelsBlocked);
+  check('linked clients cannot probe model discovery diagnostics', catalogBlocked);
 }
 
 rmSync(home, { recursive: true, force: true });
