@@ -14,7 +14,7 @@ const findings = new Set();
 // The page publisher accepts private frontend content at runtime. Only its
 // reusable tooling and instructions may enter this public repository.
 const pagePublisherPublicFiles = new Set([
-  '.gitignore', 'README.md', '.codex-plugin/plugin.json',
+  '.gitignore', 'README.md', '.codex-plugin/plugin.json', 'index.mjs', 'test/native-adapter.test.mjs',
   'scripts/site_manager.py', 'scripts/build_worker.py', 'scripts/serve_preview.py',
   'skills/page-publisher/SKILL.md', 'skills/page-publisher/agents/openai.yaml',
   'skills/page-publisher/references/storage-and-publishing.md',

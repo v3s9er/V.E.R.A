@@ -671,6 +671,12 @@ async function startAgent() {
   server = new AgentServer();
   const { port } = await server.start({ webDir: webDir() });
   agentPort = port;
+  // Register the bundled module every launch; the host keeps its OFF/ON choice.
+  // Its default is OFF and activation only registers commands, never page jobs.
+  const publisher = existsSync(resolve(here, 'plugins', 'mr-robot', 'index.mjs'))
+    ? resolve(here, 'plugins', 'mr-robot', 'index.mjs')
+    : resolve(here, '..', '..', 'plugins', 'mr-robot', 'index.mjs');
+  try { await server.pluginsLoad(publisher); } catch (error) { logStartup(error); }
   server.bus.on('voice.wake', (data) => {
     if (data?.kind !== 'pc') return;
     if (win) { win.show(); win.focus(); }

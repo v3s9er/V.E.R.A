@@ -4,6 +4,9 @@
 *
 !.gitignore
 !README.md
+!index.mjs
+!test/
+!test/native-adapter.test.mjs
 !.codex-plugin/
 !.codex-plugin/plugin.json
 !scripts/

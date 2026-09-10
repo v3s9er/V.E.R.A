@@ -46,6 +46,13 @@ copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
 copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));
+// Exact tooling allowlist: never package page sources, frontend assets, or
+// generated Workers from the publisher's development directory.
+for (const name of ['index.mjs', 'scripts/site_manager.py', 'scripts/build_worker.py', 'scripts/serve_preview.py']) {
+  const destination = join(stage, 'plugins', 'mr-robot', name);
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(join(root, 'plugins', 'mr-robot', name), destination);
+}
 mkdirSync(join(stage, 'integrations', 'lid-display'), { recursive: true });
 for (const name of ['bridge.ps1', 'LidDisplay.cs', 'README.md']) copyFileSync(join(root, 'integrations', 'lid-display', name), join(stage, 'integrations', 'lid-display', name));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
