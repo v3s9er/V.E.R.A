@@ -1,0 +1,19 @@
+# This public plugin contains tooling and documentation only.
+# Keep an exact allowlist so page sources, revisions, icons, preview files,
+# generated Workers (which embed page code), and credentials stay local.
+*
+!.gitignore
+!README.md
+!.codex-plugin/
+!.codex-plugin/plugin.json
+!scripts/
+!scripts/site_manager.py
+!scripts/build_worker.py
+!scripts/serve_preview.py
+!skills/
+!skills/page-publisher/
+!skills/page-publisher/SKILL.md
+!skills/page-publisher/agents/
+!skills/page-publisher/agents/openai.yaml
+!skills/page-publisher/references/
+!skills/page-publisher/references/storage-and-publishing.md

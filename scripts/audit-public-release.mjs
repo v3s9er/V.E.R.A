@@ -11,6 +11,14 @@ const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
 const MAX_TEXT_BYTES = 8 * 1024 * 1024;
 const failures = [];
 const findings = new Set();
+// The page publisher accepts private frontend content at runtime. Only its
+// reusable tooling and instructions may enter this public repository.
+const pagePublisherPublicFiles = new Set([
+  '.gitignore', 'README.md', '.codex-plugin/plugin.json',
+  'scripts/site_manager.py', 'scripts/build_worker.py', 'scripts/serve_preview.py',
+  'skills/page-publisher/SKILL.md', 'skills/page-publisher/agents/openai.yaml',
+  'skills/page-publisher/references/storage-and-publishing.md',
+]);
 
 function git(args, options = {}) {
   return execFileSync('git', args, {
@@ -32,6 +40,10 @@ function isText(buffer) {
 function forbiddenTrackedPath(path) {
   const normalized = path.replaceAll('\\', '/');
   const lower = normalized.toLowerCase();
+  const publisherPrefix = 'plugins/mr-robot/';
+  if (lower.startsWith(publisherPrefix) && !pagePublisherPublicFiles.has(normalized.slice(publisherPrefix.length))) {
+    return 'page publisher content outside the public tooling allowlist';
+  }
   const rootRuntimeFiles = new Set([
     'config.json', 'config.json.bak', 'conversations.json', 'conversations.json.bak',
     'memory.json', 'schedules.json', 'routing-traces.jsonl', 'pairing-secret.dpapi',
@@ -150,6 +162,11 @@ const requiredIgnoreProbes = [
   'shared/private.txt', 'voice/model/file', 'docker/ctf-toolbox/Dockerfile',
   'signing/mr-robot-release.jks', 'android-password.dpapi', '.dev.vars.local',
   '.wrangler/state.json', '.mr-robot-output/result.txt', '.mr-robot-transfer.part',
+  'plugins/mr-robot/index.html', 'plugins/mr-robot/scripts/page.js',
+  'plugins/mr-robot/styles.css', 'plugins/mr-robot/assets/icon.svg',
+  'plugins/mr-robot/site/src/App.tsx', 'plugins/mr-robot/dist/worker.mjs',
+  'plugins/mr-robot/worker.mjs', 'plugins/mr-robot/wrangler.jsonc',
+  'plugins/mr-robot/build-manifest.json', 'plugins/mr-robot/sites/private/site.json',
 ];
 for (const path of requiredIgnoreProbes) {
   try {

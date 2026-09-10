@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mr. Robot Publisher"
+  short_description: "Turn supplied code into a previewable, publishable web page."
+  default_prompt: "Publish this page code with Mr. Robot."

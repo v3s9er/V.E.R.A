@@ -1,0 +1,24 @@
+{
+  "name": "mr-robot",
+  "version": "0.1.0",
+  "description": "Create, revise, preview, publish, pause, and retire small web pages from supplied code.",
+  "author": {
+    "name": "v3s9er"
+  },
+  "keywords": ["hosting", "html", "publisher", "cloudflare", "web-pages"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Mr. Robot",
+    "shortDescription": "Save, edit, preview, and publish page code.",
+    "longDescription": "Mr. Robot manages a versioned library of small HTML, CSS, and JavaScript sites and prepares them for Cloudflare Workers publishing.",
+    "developerName": "v3s9er",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Publish this HTML as a new page.",
+      "Update my saved page with this code.",
+      "List my Mr. Robot pages and their status."
+    ],
+    "brandColor": "#111827"
+  }
+}
