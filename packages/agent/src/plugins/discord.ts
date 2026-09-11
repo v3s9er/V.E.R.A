@@ -11,7 +11,7 @@ import { DiscordSessions } from './discord-sessions.js';
 import { DiscordRunConnection } from './discord-run.js';
 import { discordAttachmentContext } from './discord-attachments.js';
 import { selectDiscordAttachments } from './discord-attachment-selection.js';
-import { discordAttachmentStore, validateAttachmentSources } from '../server/discord-attachment-store.js';
+import { discordAttachmentStore, validateAttachmentSources, DiscordAttachmentError } from '../server/discord-attachment-store.js';
 import { attachmentInstructions, isAudioAttachment, readDiscordAttachment, stageNativeAttachments } from '../server/discord-documents.js';
 import { configureDiscordSandboxEngine, closeDiscordSandboxes } from '../server/discord-sandbox.js';
 import { discordAccess, parseDiscordAccess, DISCORD_ADMIN_ACTIONS } from './discord-access.js';
@@ -308,9 +308,13 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       const uploadedIds: string[] = [];
       if (sources.length) {
         send({ event: 'progress', scopeKey: channel, text: '첨부 원본을 티켓별 암호화 보관소에 저장 중…', elapsed: 0 });
+        const attachmentBudget = { remaining: 50 * 1024 * 1024 };
         for (const source of sources) {
           assertLive();
-          const original = await discordAttachmentStore().receive(currentRun.conversation, source, currentRun.attachmentsAbort.signal);
+          const original = await discordAttachmentStore().receive(currentRun.conversation, source, currentRun.attachmentsAbort.signal, attachmentBudget).catch(error => {
+            if (error instanceof DiscordAttachmentError) ctx.logger.warn(`Attachment intake failed: ${error.code}; attempts=${error.attempts}`);
+            throw error;
+          });
           uploadedIds.push(original.id);
           assertLive();
           // Recover failed initial extraction before asking the model. Ordinary

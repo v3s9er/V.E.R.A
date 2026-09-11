@@ -26,7 +26,9 @@ for (const [network, prefix] of [
 const SAFE_RESPONSE_HEADERS = new Set(['cache-control', 'content-length', 'content-type', 'etag', 'last-modified']);
 
 export class SafeFetchError extends Error {
-  constructor(message: string, readonly retryable = false) {
+  constructor(message: string, readonly retryable = false,
+    readonly kind: 'policy' | 'dns' | 'network' | 'timeout' | 'http' | 'size' | 'body' = 'policy',
+    readonly status?: number) {
     super(message);
     this.name = 'SafeFetchError';
   }
@@ -170,10 +172,10 @@ export async function resolvePublicTarget(
   try {
     records = await resolver(host, { all: true, verbatim: true }) as Array<{ address: string; family: number }>;
   } catch {
-    throw new SafeFetchError(`DNS 조회에 실패했습니다: ${host}`, true);
+    throw new SafeFetchError(`DNS 조회에 실패했습니다: ${host}`, true, 'dns');
   }
   const list = records;
-  if (list.length === 0) throw new SafeFetchError(`DNS 결과가 없습니다: ${host}`, true);
+  if (list.length === 0) throw new SafeFetchError(`DNS 결과가 없습니다: ${host}`, true, 'dns');
   if (list.some((record) => !isPublicAddress(record.address))) {
     throw new SafeFetchError(`공개 주소와 사설·예약 주소가 섞인 DNS 응답을 거부했습니다: ${host}`);
   }
@@ -329,8 +331,8 @@ async function requestOnce(
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(options, (response) => {
       void handleResponse(response, maxBytes, sharedBudget).then(resolve, reject);
     });
-    request.once('timeout', () => request.destroy(new SafeFetchError('요청 시간이 초과되었습니다.', true)));
-    request.once('error', (error) => reject(error instanceof SafeFetchError ? error : new SafeFetchError('네트워크 요청에 실패했습니다.', true)));
+    request.once('timeout', () => request.destroy(new SafeFetchError('요청 시간이 초과되었습니다.', true, 'timeout')));
+    request.once('error', (error) => reject(error instanceof SafeFetchError ? error : new SafeFetchError('네트워크 요청에 실패했습니다.', true, 'network')));
     request.end();
   });
 }
@@ -345,12 +347,12 @@ async function handleResponse(response: IncomingMessage, maxBytes: number, share
   }
   if (status < 200 || status >= 300) {
     response.destroy();
-    throw new SafeFetchError(`HTTP ${status} 응답을 저장하지 않았습니다.`, status === 408 || status === 425 || status === 429 || status >= 500);
+    throw new SafeFetchError(`HTTP ${status} 응답을 저장하지 않았습니다.`, status === 408 || status === 425 || status === 429 || status >= 500, 'http', status);
   }
   const announced = Number(response.headers['content-length'] ?? 0);
   if (Number.isFinite(announced) && announced > maxBytes) {
     response.destroy();
-    throw new SafeFetchError(`응답이 리소스당 ${maxBytes}바이트 한도를 초과합니다.`);
+    throw new SafeFetchError(`응답이 리소스당 ${maxBytes}바이트 한도를 초과합니다.`, false, 'size');
   }
   const stream = decodedStream(response);
   const chunks: Buffer[] = [];
@@ -362,20 +364,20 @@ async function handleResponse(response: IncomingMessage, maxBytes: number, share
       if (bytes > maxBytes) {
         stream.destroy();
         response.destroy();
-        throw new SafeFetchError(`압축 해제된 응답이 리소스당 ${maxBytes}바이트 한도를 초과합니다.`);
+        throw new SafeFetchError(`압축 해제된 응답이 리소스당 ${maxBytes}바이트 한도를 초과합니다.`, false, 'size');
       }
       if (sharedBudget && chunk.byteLength > sharedBudget.remaining) {
         sharedBudget.remaining = 0;
         stream.destroy();
         response.destroy();
-        throw new SafeFetchError('전체 네트워크 바이트 예산을 초과했습니다.');
+        throw new SafeFetchError('전체 네트워크 바이트 예산을 초과했습니다.', false, 'size');
       }
       if (sharedBudget) sharedBudget.remaining -= chunk.byteLength;
       chunks.push(chunk);
     }
   } catch (error) {
     if (error instanceof SafeFetchError) throw error;
-    throw new SafeFetchError('응답 본문을 읽지 못했습니다.', true);
+    throw new SafeFetchError('응답 본문을 읽지 못했습니다.', true, 'body');
   }
   const contentType = String(response.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase();
   return { body: Buffer.concat(chunks), status, mimeType: contentType, headers };
