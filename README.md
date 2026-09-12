@@ -1,6 +1,6 @@
 # Mr.Robot — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 릴리스: **0.4.11**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.11.md](docs/RELEASE_NOTES_0.4.11.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.2.md](docs/PLUGIN_COMPARISON_0.4.2.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
+> 현재 릴리스: **0.4.27**. 빠른 사용법은 [docs/USER_GUIDE_0.3.md](docs/USER_GUIDE_0.3.md), 변경 사항은 [docs/RELEASE_NOTES_0.4.27.md](docs/RELEASE_NOTES_0.4.27.md), 새 플러그인의 독립 구현·기능 비교는 [docs/PLUGIN_COMPARISON_0.4.2.md](docs/PLUGIN_COMPARISON_0.4.2.md), 설계·연구·라이선스 근거는 [docs/RESEARCH_AND_LICENSES.md](docs/RESEARCH_AND_LICENSES.md)를 먼저 보세요.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 

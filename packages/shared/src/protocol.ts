@@ -376,6 +376,8 @@ export interface WorkspaceInfo {
   path: string;
   isDefault: boolean;
   createdAt: number;
+  /** Project context, saved by the host administrator. Never an access grant. */
+  instructions?: string;
 }
 
 export interface ChatRunState {
@@ -384,6 +386,21 @@ export interface ChatRunState {
   startedAt?: number;
   status?: string;
   steeringQueued: number;
+  runId?: string;
+  phase?: ChatRunPhase;
+  updatedAt?: number;
+  activity?: ChatRunActivity[];
+  partialText?: string;
+  partialTextTruncated?: boolean;
+}
+
+export type ChatRunPhase = 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+export interface ChatRunActivity {
+  id: string;
+  label: string;
+  state: 'running' | 'done' | 'error';
+  startedAt: number;
+  finishedAt?: number;
 }
 
 export interface CalendarEvent {

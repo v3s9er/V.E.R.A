@@ -1,0 +1,88 @@
+.run-panel { border: 1px solid #ffffff12; border-radius: 12px; background: #141923; margin: 0 0 10px; color: #e7eaf2; min-width: 0; }
+.run-panel summary { display: flex; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; list-style: none; min-width: 0; }
+.run-panel summary::-webkit-details-marker { display: none; }
+.run-panel summary:focus-visible, .tool-history summary:focus-visible { outline: 2px solid #a99bff; outline-offset: 2px; border-radius: 10px; }
+.run-panel-indicator { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: #8f7af51c; color: #b4a6ff; flex-shrink: 0; }
+.run-panel.phase-approval .run-panel-indicator { color: #ffd27a; background: #ffd27a15; }
+.run-panel.phase-failed .run-panel-indicator { color: #ff9b9b; background: #ff9b9b15; }
+.run-panel.phase-completed .run-panel-indicator { color: #6fd6af; background: #6fd6af15; }
+.run-panel-heading { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.run-panel-heading b { font-size: 12px; font-weight: 600; }
+.run-panel-heading small { font-size: 11px; color: #9da8bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-panel-chevron { color: #9da8bd; transition: transform .15s; }
+.run-panel[open] .run-panel-chevron { transform: rotate(180deg); }
+.run-panel ol { list-style: none; margin: 0; padding: 4px 14px; max-height: min(180px, 24dvh); overflow: auto; border-top: 1px solid #ffffff0a; }
+.run-panel li { display: flex; gap: 9px; align-items: baseline; padding: 7px 0; font-size: 12px; overflow-wrap: anywhere; }
+.run-panel li > span:nth-child(2) { flex: 1; min-width: 0; }
+.run-panel li small { color: #9da8bd; flex-shrink: 0; }
+.run-panel li.done > span:first-child { color: #6fd6af; }
+.run-panel li.error > span:first-child { color: #ff9b9b; }
+.run-panel p { color: #9da8bd; font-size: 10px; margin: 6px 14px 12px; }
+.conversation-layout { --text-faint: #8b96ab; --text-dim: #a2aec3; }
+.chat-navigation,.navigation-close,.navigation-scrim { display:none; }
+.conversation-layout .chat-commandbar { padding: 16px 24px; gap: 12px; background: #0f131cec; border-bottom: 1px solid #ffffff0a; }
+.conversation-layout .chat-title-group { flex: 1; min-width: 0; }
+.conversation-layout .conversation-title-input { font-size: 15px; font-weight: 600; }
+.conversation-layout .chat-scroll { padding-left: clamp(16px, 4vw, 56px); padding-right: clamp(16px, 4vw, 56px); scroll-padding-bottom: 24px; }
+.conversation-layout .msg-row { max-width: 880px; margin-left: auto; margin-right: auto; }
+.conversation-layout .msg-body { min-width: 0; }
+.conversation-layout .msg-bubble { line-height: 1.75; overflow-wrap: anywhere; }
+.conversation-layout .msg-row.assistant .msg-bubble { background: transparent; border: 0; box-shadow: none; }
+.conversation-layout .msg-row.user .msg-bubble { background: #27263e; border: 1px solid #a698fa25; border-radius: 16px 16px 5px 16px; box-shadow: none; }
+.conversation-layout .msg-meta { color: #8b96ab; font-size: 11px; letter-spacing: .02em; }
+.conversation-layout .chat-inputbar.composer-minimal { width: calc(100% - 48px); max-width: 920px; margin: 0 auto 18px; padding: 12px; background: #151923; border: 1px solid #ffffff18; border-radius: 20px; box-shadow: 0 8px 28px #00000024; }
+.conversation-layout .chat-inputbar.composer-minimal:focus-within { border-color: #a698fa65; }
+.conversation-layout .chat-inputbar.composer-minimal { max-height:none; overflow:visible; scrollbar-gutter:auto; }
+.conversation-layout .chat-input { min-height: 64px; max-height: min(180px, 25dvh); padding: 12px 10px; line-height: 1.6; font-size: 14px; resize: vertical; }
+.conversation-layout .chat-actions { gap: 8px; flex-wrap: wrap; align-items: center; }
+.conversation-layout .composer-options { flex: 1 1 300px; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.conversation-layout .composer-model-controls { flex: 1 1 140px; min-width: 100px; max-width: 240px; }
+.conversation-layout .composer-select-control { min-height: 36px; border: 0; background: transparent; }
+.conversation-layout .composer-send-actions { margin-left: auto; flex: 0 0 auto; gap: 5px; }
+.conversation-layout .composer-control-label, .conversation-layout .composer-control-icon { display: none; }
+.conversation-layout .composer-control-select { max-width: 132px; }
+.conversation-layout .tool-history { margin-top: 10px; color: #9da8bd; font-size: 12px; }
+.conversation-layout .tool-history summary { cursor: pointer; list-style: none; display: inline-flex; gap: 12px; padding: 5px 0; }
+.conversation-layout .tool-history .tool-list { max-height: 220px; overflow: auto; }
+.conversation-layout .tool-chip { background: #ffffff04; border-color: #ffffff0c; box-shadow: none; }
+@media (max-width: 760px) {
+  .conversation-layout .chat-commandbar { padding: 12px 14px; }
+  .conversation-layout .context-trigger { max-width: 145px; }
+  .conversation-layout .chat-inputbar.composer-minimal { width: calc(100% - 20px); margin-bottom: 10px; padding: 8px; border-radius: 17px; }
+  .conversation-layout .composer-options { flex-basis: 100%; flex-wrap:nowrap; gap:1px; }
+  .conversation-layout .composer-model-controls { min-width:65px; flex:1 1 90px; }
+  .conversation-layout .composer-model-controls select { min-width:0; }
+  .conversation-layout .composer-send-actions { width: 100%; justify-content: flex-end; }
+  .conversation-layout .chat-input { min-height: 52px; font-size: 16px; }
+}
+@media (max-height: 540px) {
+  .conversation-layout .chat-commandbar { padding:5px 12px; min-height:44px; }
+  .conversation-layout .chat-input { min-height: 42px; max-height: 90px; }
+  .conversation-layout .chat-inputbar.composer-minimal { padding:6px 8px; }
+  .conversation-layout .chat-actions { gap:2px; }
+  .conversation-layout .run-panel { margin-bottom:3px; position:relative; }
+  .run-panel summary { padding: 6px 9px; }
+  .run-panel-heading small { display:none; }
+  .run-panel p { display:none; }
+  .run-panel[open] ol { position:absolute; bottom:100%; left:0; right:0; max-height:95px; background:#1b202e; border:1px solid #ffffff20; border-radius:10px; z-index:20; }
+  .conversation-layout .chat-inputbar.composer-minimal { margin-bottom: 6px; }
+}
+/* A real navigation drawer leaves the conversation viewport to the messages.
+   It replaces the old 3-row compressed sidebar on narrow desktop windows. */
+@media (max-width:900px) {
+  div.conversation-layout { grid-template-columns:minmax(0,1fr); grid-template-rows:40px minmax(0,1fr); padding-bottom:0; }
+  .conversation-layout .chat-navigation { display:flex; justify-content:space-between; align-items:center; padding:2px 12px; background:#10141e; border-bottom:1px solid #ffffff0a; }
+  .chat-navigation button,.navigation-close { border:0; background:transparent; color:var(--text-dim); min-height:36px; cursor:pointer; border-radius:8px; }
+  .chat-navigation button:first-child { display:flex; align-items:center; gap:10px; min-width:0; }
+  .chat-navigation span { max-width:240px; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
+  .conversation-layout .conversation-list { display:none; }
+  .conversation-layout.navigation-open .conversation-list { display:flex; position:fixed; z-index:190; inset:0 auto 0 0; height:100dvh; width:min(300px,86vw); max-height:none; padding:12px 0; background:#11151f; overflow:auto; border-right:1px solid #ffffff20; }
+  .conversation-layout.navigation-open .conversation-brand { display:flex; }
+  .conversation-layout.navigation-open .conversation-items { display:flex; flex-direction:column; overflow:auto; padding:8px; min-height:60px; }
+  .conversation-layout.navigation-open .conversation-item { width:100%; min-width:0; max-width:none; }
+  .conversation-layout.navigation-open .conversation-spaces { margin:4px 12px; }
+  .conversation-layout.navigation-open .conversation-list-head { padding:8px 12px; }
+  .conversation-layout.navigation-open .profile-menu.embedded { position:static; margin-top:auto; padding:8px; }
+  .conversation-layout.navigation-open .navigation-close { display:block; align-self:flex-end; margin-right:12px; }
+  .conversation-layout .navigation-scrim { display:block; position:fixed; inset:0; background:#0009; z-index:180; border:0; }
+}

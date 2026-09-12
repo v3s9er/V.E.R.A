@@ -163,6 +163,7 @@ export interface ChatConfirmRequest {
 }
 
 export interface ToolEvent {
+  callId?: string;
   name: string;
   input: unknown;
   status: 'start' | 'done' | 'error';
@@ -175,6 +176,12 @@ export interface ChatRunState {
   startedAt?: number;
   status?: string;
   steeringQueued: number;
+  runId?: string;
+  phase?: 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+  updatedAt?: number;
+  activity?: Array<{ id: string; label: string; state: 'running' | 'done' | 'error'; startedAt: number; finishedAt?: number }>;
+  partialText?: string;
+  partialTextTruncated?: boolean;
 }
 
 export interface ConversationSummary {
@@ -219,6 +226,7 @@ export interface WorkspaceInfo {
   path: string;
   isDefault: boolean;
   createdAt: number;
+  instructions?: string;
 }
 
 export interface ConversationDetail extends ConversationSummary {

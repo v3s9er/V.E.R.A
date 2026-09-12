@@ -38,6 +38,7 @@ export class ChatSession {
   private abort: AbortController | null = null;
   private pending: PendingConfirm | null = null;
   private steering: string[] = [];
+  private steeringListeners = new Set<() => void>();
   private cancelReason?: ChatCancelReason;
 
   begin(): AbortController {
@@ -65,12 +66,28 @@ export class ChatSession {
   }
 
   steer(text: string): number {
+    if (!this.busy || this.abort?.signal.aborted) throw new Error('종료 중이거나 실행 중인 작업이 없습니다. 완료 후 새 메시지를 보내세요.');
     const clean = text.trim().slice(0, 8_000);
     if (!clean) return this.steering.length;
+    if (this.steering.length >= 20) throw new Error('추가 지시가 20개 대기 중입니다. 반영된 후 다시 보내세요.');
     this.steering.push(clean);
-    if (this.steering.length > 20) this.steering.splice(0, this.steering.length - 20);
+    for (const listener of this.steeringListeners) listener();
     return this.steering.length;
   }
+
+  readonly nativeSteering = {
+    peek: (): string[] => [...this.steering],
+    commit: (inputs: readonly string[]): boolean => {
+      if (!this.busy || this.abort?.signal.aborted) return false;
+      if (!inputs.length || inputs.some((text, index) => this.steering[index] !== text)) return false;
+      this.steering.splice(0, inputs.length);
+      return true;
+    },
+    subscribe: (listener: () => void): (() => void) => {
+      this.steeringListeners.add(listener);
+      return () => { this.steeringListeners.delete(listener); };
+    },
+  };
 
   takeSteering(): string[] {
     return this.steering.splice(0);
@@ -91,6 +108,7 @@ export class ChatSession {
 
   end(): void {
     this.settlePending(false);
+    this.steeringListeners.clear();
     this.steering.length = 0;
     this.abort = null;
     this.busy = false;

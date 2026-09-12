@@ -1,6 +1,8 @@
 import { uploadSecureFile } from '../secureFiles';
 import { ChatFiles } from '../components/ChatFiles';
+import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
+import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -28,6 +30,7 @@ import { httpBaseForPc, pcAuthenticatedHeaders } from '../pcs';
 const QUESTION_LABELS: Record<ConversationTokenPolicy, string> = { adaptive: '자동', economy: '절약 6.4만', standard: '표준 25.6만', quality: '고품질 100만', 'audit-only': '무제한' };
 
 interface UiTool {
+  callId?: string;
   key: string;
   name: string;
   summary: string;
@@ -116,6 +119,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [showTokenPolicy, setShowTokenPolicy] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
+  const [projectScope, setProjectScope] = useState('*');
+  const [showProjects, setShowProjects] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [savingReasoning, setSavingReasoning] = useState(false);
   const [savingConfiguration, setSavingConfiguration] = useState(false);
@@ -313,7 +318,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
     const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
     setMessages(active?.running
-      ? [...restored, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }]
+      ? [...restored, { id: nextId(), role: 'assistant', content: `${active.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${active.partialText ?? ''}`, tools: [], done: false }]
       : restored);
     stickToBottom.current = true;
     setUnseenMessages(false);
@@ -447,9 +452,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           let tools = last.tools;
           if (info.status === 'start') {
             toolCounter.current += 1;
-            tools = [...tools, { key: `${info.name}#${toolCounter.current}`, name: info.name, summary: describe(info.input), status: 'start' }];
+            tools = [...tools.slice(-63), { key: `${info.name}#${toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: 'start' }];
           } else {
-            const idx = [...tools].reverse().findIndex((tool) => tool.name === info.name && tool.status === 'start');
+            const idx = [...tools].reverse().findIndex((tool) => (info.callId ? tool.callId === info.callId : tool.name === info.name) && tool.status === 'start');
             if (idx >= 0) {
               const realIdx = tools.length - 1 - idx;
               tools = tools.map((tool, index) => index === realIdx ? { ...tool, status: info.status } : tool);
@@ -458,6 +463,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           return [...items.slice(0, -1), { ...last, tools }];
         });
         scrollIfFollowing();
+      }),
+      client.on('chat.progress', (data) => {
+        const event = data as Partial<ChatRunState>;
+        if (!event.conversationId) return;
+        setRuns(current => ({ ...current, [event.conversationId!]: {
+          ...(current[event.conversationId!] ?? { conversationId: event.conversationId!, steeringQueued: 0, running: true }), ...event,
+          cancelling: event.phase === 'cancelling',
+        } }));
       }),
       client.on('chat.status', (data) => {
         const event = data as { conversationId?: string; status?: string };
@@ -486,7 +499,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           setMessages((items) => {
             const last = items[items.length - 1];
             if (!last || last.role !== 'assistant' || last.done) return [...items, { id: nextId(), role: 'assistant', content: d.text || '', tools: [], done: true }];
-            return [...items.slice(0, -1), { ...last, content: last.content || d.text || '', done: true }];
+            return [...items.slice(0, -1), { ...last, content: d.text || last.content || '', done: true }];
           });
         }
         void refreshConversations();
@@ -567,15 +580,22 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     }
   };
 
-  const createConversation = async (): Promise<void> => {
+  const createConversation = async (projectId = projectScope): Promise<void> => {
     if (configurationSaveInFlightRef.current) return;
-    const created = await client.call('conversations.create', {}) as ConversationDetail;
+    const created = await client.call('conversations.create', { workspaceId: projectId === '*' ? undefined : projectId }) as ConversationDetail;
     setConversations((list) => [created, ...list]);
     activeId.current = created.id;
     setConversation(created);
     setReasoningSaveFailed(false);
     setConfigurationSaveFailed(false);
     setMessages([]);
+    setInput('');
+  };
+  const selectProject = async (id: string): Promise<void> => {
+    setProjectScope(id); setShowProjects(false); setShowChatOptions(false);
+    const target = conversations.find(c => id === '*' || c.workspaceId === id);
+    try { if (target) { setInput(''); await loadConversation(target.id); } else await createConversation(id); }
+    catch (error) { setLoadError(error instanceof Error ? error.message : String(error)); }
   };
 
   const selectReasoningEffort = async (reasoningEffort: ReasoningEffort): Promise<void> => {
@@ -765,7 +785,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const attachFile = async (): Promise<void> => {
-    const workspace = workspaces.find((item) => item.id === conversation?.workspaceId) ?? workspaces.find((item) => item.isDefault);
+    const workspace = resolveProjectWorkspace(workspaces, conversation?.workspaceId);
     if (uploading) return;
     const picked = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
     if (picked.canceled) return;
@@ -910,6 +930,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
       {!shortKeyboardViewport && <View style={styles.chatHeader}>
+        <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="프로젝트 선택과 관리" onPress={() => { Keyboard.dismiss(); setShowProjects(true); }}><Text style={styles.toolBtnText}>▱</Text></TouchableOpacity>
         <TouchableOpacity style={styles.chatHeading} accessibilityRole="button" accessibilityLabel="대화 목록과 추가 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}>
           <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversation?.title || '새 대화'} ⌄</Text>
           {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
@@ -967,9 +988,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       />
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
-      {(busy || activity.length > 0) && !shortKeyboardViewport ? <View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : '✓'}</Text><Text numberOfLines={2} style={styles.runStatusText}>{activity.at(-1) || activeRun?.status || '요청 분석 중'}{activeRun?.steeringQueued ? ` · 추가 명령 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
-        {showActivity && <ScrollView style={{ maxHeight: 140, paddingHorizontal: 18 }} nestedScrollEnabled>{activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}</ScrollView>}
+      {(busy || activity.length > 0 || activeRun?.phase) ? <View>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : ['failed', 'cancelled'].includes(activeRun?.phase ?? '') ? '!' : '✓'}</Text><Text numberOfLines={1} style={styles.runStatusText}>{activeRun?.phase === 'approval' ? '승인이 필요해요' : activeRun?.phase === 'cancelling' ? '안전하게 중지하는 중…' : activeRun?.phase === 'completed' ? '작업 완료' : activeRun?.phase === 'failed' ? '작업 오류 확인' : activeRun?.phase === 'cancelled' ? '작업 중지됨' : activity.at(-1) || activeRun?.status || '요청 준비 중'}{activeRun?.steeringQueued ? ` · 추가 지시 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
+        {showActivity && !shortKeyboardViewport && <ScrollView style={{ maxHeight: 140, paddingHorizontal: 18 }} nestedScrollEnabled>{activeRun?.activity?.length ? activeRun.activity.map(entry => <Text key={entry.id} style={{ color: entry.state === 'error' ? colors.err : colors.dim, paddingVertical: 5 }}>{entry.state === 'done' ? '✓' : entry.state === 'error' ? '!' : '·'} {entry.label}</Text>) : activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}</ScrollView>}
       </View> : null}
       <View
         ref={composerRef}
@@ -1036,6 +1057,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
 
+      <ProjectPicker client={client} visible={showProjects} projects={workspaces} active={projectScope} onClose={() => setShowProjects(false)} onSelect={id => void selectProject(id)} onChanged={setWorkspaces} />
       <Modal visible={showChatOptions} transparent animationType="slide" onRequestClose={() => setShowChatOptions(false)} accessibilityViewIsModal>
         <View style={[styles.optionsBackdrop, { paddingBottom: Math.max(12, insets.bottom), paddingTop: Math.max(12, insets.top) }]}>
           <View style={styles.optionsSheet}>
@@ -1049,7 +1071,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.optionsLabel}>{conversation?.pinned ? '대화 고정 해제' : '대화 고정'}</Text><Text style={styles.optionsValue}>⌖</Text></TouchableOpacity>
               <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); void archiveConversation(); }}><Text style={styles.optionsLabel}>보관함으로 이동</Text><Text style={styles.optionsValue}>›</Text></TouchableOpacity>
               <Text style={styles.optionsSection}>최근 대화</Text>
-              {conversations.map(c => <TouchableOpacity key={c.id} style={[styles.optionsRow, c.id === conversation?.id && styles.optionsRowOn]} disabled={savingConfiguration} onPress={() => { setShowChatOptions(false); void loadConversation(c.id); }}><Text style={styles.optionsLabel} numberOfLines={1}>{c.pinned ? '⌖ ' : ''}{c.title}</Text><Text style={styles.optionsValue}>{c.id === conversation?.id ? '✓' : '›'}</Text></TouchableOpacity>)}
+              {conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope).map(c => <TouchableOpacity key={c.id} style={[styles.optionsRow, c.id === conversation?.id && styles.optionsRowOn]} disabled={savingConfiguration} onPress={() => { setShowChatOptions(false); void loadConversation(c.id); }}><Text style={styles.optionsLabel} numberOfLines={1}>{c.pinned ? '⌖ ' : ''}{c.title}</Text><Text style={styles.optionsValue}>{c.id === conversation?.id ? '✓' : '›'}</Text></TouchableOpacity>)}
             </ScrollView>
           </View>
         </View>
@@ -1247,16 +1269,16 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'column', alignItems: 'flex-start', gap: 6 },
   rowUser: { alignItems: 'flex-end' },
   bubble: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
     borderColor: colors.border,
     borderRadius: radius.md,
     padding: 12,
-    maxWidth: '86%',
+    maxWidth: '96%',
     minWidth: 60,
   },
-  bubbleUser: { backgroundColor: 'rgba(124,92,255,0.25)', borderColor: 'rgba(124,92,255,0.45)' },
-  bubbleText: { color: colors.text, fontSize: 14.5, lineHeight: 21 },
+  bubbleUser: { backgroundColor: '#27263e', borderColor: 'rgba(166,152,250,0.18)', borderWidth: 1, maxWidth: '90%', borderBottomRightRadius: 5 },
+  bubbleText: { color: colors.text, fontSize: 15, lineHeight: 24 },
   errorText: { color: colors.err, fontSize: 12.5, marginTop: 6 },
   tools: { gap: 4, maxWidth: '92%', alignSelf: 'flex-start' },
   toolChip: {
@@ -1280,7 +1302,7 @@ const styles = StyleSheet.create({
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
   inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
   inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
-  composerCard: { borderWidth: 1, borderColor: colors.border, borderRadius: 22, backgroundColor: colors.inputBg, padding: 8, gap: 2 },
+  composerCard: { borderWidth: 1, borderColor: 'rgba(255,255,255,.14)', borderRadius: 18, backgroundColor: '#151923', padding: 8, gap: 2 },
   composerToolbar: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 4 },
   composerCompactControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   chatHeader: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
@@ -1302,7 +1324,7 @@ const styles = StyleSheet.create({
   composerIconBtn: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
   composerSelectBtn: { minHeight: 40, maxWidth: 140, flexShrink: 1, justifyContent: 'center', borderRadius: 9, backgroundColor: 'transparent', paddingHorizontal: 7 },
   composerSelectError: { borderColor: 'rgba(248,113,113,.6)', backgroundColor: 'rgba(248,113,113,.08)' },
-  composerSelectText: { color: colors.dim, fontSize: 10.5, fontWeight: '800' },
+  composerSelectText: { color: colors.dim, fontSize: 11.5, fontWeight: '600' },
   composerSettingError: { color: colors.err, fontSize: 10.5, lineHeight: 15, paddingHorizontal: 3 },
   toolBtn: { width: 44, minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.inputBg },
   toolBtnCancel: { borderColor: 'rgba(248,113,113,.5)', backgroundColor: 'rgba(248,113,113,.16)' },

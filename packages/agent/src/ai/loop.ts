@@ -12,6 +12,7 @@ import type {
 import type { ProviderRegistry } from './registry.js';
 import { ToolExecutor, type ConfirmFn } from './executor.js';
 import { neutralTool } from './tools.js';
+import { executeToolBatch, toolResultSucceeded } from './tool-batch.js';
 import {
   parseToolArgs,
   type AiProvider,
@@ -111,7 +112,7 @@ export interface LoopCallbacks {
   /** Trusted host policy, checked before every actual provider invocation. */
   beforeModelCall?(source: { providerId: string; model: string }): void;
   onText?(delta: string): void;
-  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string }): void;
+  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }): void;
   /** Ask the human to approve a destructive tool call (safety mode: confirm). */
   confirm?: ConfirmFn;
   onStatus?(status: string): void;
@@ -119,6 +120,7 @@ export interface LoopCallbacks {
   signal?: AbortSignal;
   /** User instructions queued while the current run is in progress. */
   takeSteering?: () => string[];
+  nativeSteering?: import('./provider.js').NativeSteeringControl;
   /**
    * Atomically reserve one real provider invocation inside the already
    * admitted user run. Settlement keeps at least this host-owned reservation.
@@ -328,7 +330,9 @@ export class AgentLoop {
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
-    const tools = options.isolation?.tools ?? [...toolsFor(userMessage).map(neutralTool), ...extraTools];
+    const semanticDesktop = !options.isolation && extraTools.some(tool => tool.name === 'orca.computer.observe');
+    const rawDesktopTools = new Set(['screenshot', 'get_screen_size', 'mouse_move', 'mouse_click', 'mouse_scroll', 'type_text', 'key_press']);
+    const tools = options.isolation?.tools ?? [...toolsFor(userMessage).filter(tool => !semanticDesktop || !rawDesktopTools.has(tool.name)).map(neutralTool), ...extraTools];
     const repeatedCalls = new Map<string, number>();
     let previousToolRound = '';
     let consecutiveNoProgressRounds = 0;
@@ -626,7 +630,7 @@ export class AgentLoop {
     // unless the user explicitly selected full machine access.
     const requestedNativePermission = options.permissionMode ?? 'ask';
     const nativeAllowedByPolicy = provider.type === 'codex-cli' || requestedNativePermission === 'full';
-    if (!options.isolation && executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
+    if (!options.isolation && !semanticDesktop && executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
       const nativeProvider = provider;
       let nativePermission = options.permissionMode ?? 'ask';
       if (nativePermission === 'ask') {
@@ -668,6 +672,7 @@ export class AgentLoop {
         const actualEffort = effortFor(actualProvider);
         cb.onStatus?.(`네이티브 에이전트 실행 · ${actualProvider.label} · ${options.workspacePath}`);
         let streamed = '';
+        const appliedSteering: Turn[] = [];
         const result = await budgetedNativeAgent(actualProvider, {
           prompt: identifiedSystem(prompt, actualProvider),
           ...(options.cacheKey && options.nativeSessionDirectory ? { session: {
@@ -681,8 +686,10 @@ export class AgentLoop {
           signal: runSignal,
           onStatus: cb.onStatus,
           onText: text => { streamed += text; cb.onText?.(text); },
+          steering: cb.nativeSteering,
+          onSteeringApplied: inputs => { appliedSteering.push(...inputs.map(content => ({ role: 'user' as const, content }))); },
         });
-        sessionHistory = [...sessionHistory, { role: 'user', content: input }, { role: 'assistant', content: result.text }];
+        sessionHistory = [...sessionHistory, { role: 'user', content: input }, ...appliedSteering, { role: 'assistant', content: result.text }];
         return { result, provider: actualProvider, effort: actualEffort, streamed };
       };
       let nativeCall = await runNative(originalPrompt, userMessage);
@@ -695,9 +702,8 @@ export class AgentLoop {
       let native = nativeCall.result;
       let actualNativeProvider = nativeCall.provider;
       let actualNativeEffort = nativeCall.effort;
-      // Native CLIs cannot accept stdin steering reliably in print/exec mode.
-      // Consume queued instructions immediately after each run and start a
-      // compact continuation with the verified result, bounded to three passes.
+      // App-server applies acknowledged steering within the active turn. Only
+      // unsupported/late inputs remain for the print-CLI continuation fallback.
       for (let steeringRound = 1; steeringRound <= 3; steeringRound++) {
         const steering = cb.takeSteering?.() ?? [];
         if (steering.length === 0) break;
@@ -716,7 +722,9 @@ export class AgentLoop {
         actualNativeProvider = nativeCall.provider;
         actualNativeEffort = nativeCall.effort;
       }
-      turns.push({ role: 'assistant', content: native.text });
+      // Persist the exact acknowledged transcript used by the native checkpoint,
+      // including follow-ups, so the next request can reuse the same session.
+      turns.splice(0, turns.length, ...sessionHistory);
       const streamed = nativeCall?.streamed ?? '';
       if (native.text.startsWith(streamed) && native.text.length > streamed.length) cb.onText?.(native.text.slice(streamed.length));
       return {
@@ -1004,15 +1012,14 @@ export class AgentLoop {
       turns.push({ role: 'assistant', content: res.text, toolCalls: res.toolCalls });
       cb.onStatus?.('running tools…');
 
-      const toolResults: Array<{ id: string; name: string; content: string }> = [];
       const roundInputs = res.toolCalls.map((call) => parseToolArgs(call.args));
       const roundSignatures = res.toolCalls.map((call, index) => toolSignature(call.name, roundInputs[index]));
       const roundFingerprint = roundSignatures.join('\n');
       let blockedRepeats = 0;
       let madeToolProgress = false;
-      for (const [callIndex, call] of res.toolCalls.entries()) {
+      const toolResults = await executeToolBatch(res.toolCalls, async (call, callIndex) => {
         const input = roundInputs[callIndex];
-        cb.onTool?.({ name: call.name, input, status: 'start' });
+        cb.onTool?.({ name: call.name, input, status: 'start', callId: call.id });
         let content: string;
         try {
           const signature = roundSignatures[callIndex];
@@ -1026,21 +1033,22 @@ export class AgentLoop {
               trustedPermissionOverride: options.trustedPermissionOverride,
               workspaceRoot: options.workspacePath,
             });
-            madeToolProgress = true;
+            madeToolProgress ||= toolResultSucceeded(content);
           }
-          cb.onTool?.({ name: call.name, input, status: 'done' });
+          cb.onTool?.({ name: call.name, input, status: toolResultSucceeded(content) ? 'done' : 'error', callId: call.id,
+            ...(!toolResultSucceeded(content) ? { detail: content.slice(0, 2000) } : {}) });
         } catch (err) {
           if (runSignal.aborted) throw runSignal.reason ?? err;
           content = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-          cb.onTool?.({ name: call.name, input, status: 'error', detail: content });
+          cb.onTool?.({ name: call.name, input, status: 'error', detail: content, callId: call.id });
         }
-        toolResults.push({ id: call.id, name: call.name, content });
-      }
+        return { id: call.id, name: call.name, content };
+      }, runSignal);
       turns.push({ role: 'tool', content: '', toolResults });
       // One tranche per productive round, not per requested tool, so a model
       // cannot inflate its budget by batching many trivial calls.
       if (madeToolProgress) cb.noteModelProgress?.('tool');
-      const noProgress = blockedRepeats === res.toolCalls.length;
+      const noProgress = !madeToolProgress || blockedRepeats === res.toolCalls.length;
       consecutiveNoProgressRounds = noProgress && roundFingerprint === previousToolRound
         ? consecutiveNoProgressRounds + 1
         : noProgress ? 1 : 0;

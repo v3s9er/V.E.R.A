@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { randomInt, randomUUID } from 'node:crypto';
 import type { AppSettings, DeviceCapability, PermissionMode, ProviderConfig, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
 import { hashToken } from './auth.js';
@@ -1148,7 +1148,7 @@ export class ConfigStore {
     return this.toolPortalStatus();
   }
 
-  addWorkspace(path: string, name?: string): WorkspaceInfo {
+  addWorkspace(path: string, name?: string, instructions?: string): WorkspaceInfo {
     const cleanPath = path.trim();
     if (!cleanPath) throw new Error('작업 폴더 경로를 입력하세요.');
     const absolutePath = resolve(cleanPath);
@@ -1166,23 +1166,54 @@ export class ConfigStore {
       path: absolutePath,
       isDefault: this.data.workspaces.length === 0,
       createdAt: Date.now(),
+      instructions: instructions?.trim() || undefined,
     };
+    const previous = clone(this.data);
     this.data.workspaces.push(item);
     const roots = new Set([...(this.data.settings.safety.allowedRoots ?? []), absolutePath]);
     this.data.settings.safety.allowedRoots = [...roots];
-    this.save();
+    try { this.save(); } catch (error) { this.data = previous; throw error; }
     return clone(item);
   }
 
   removeWorkspace(id: string): boolean {
     const item = this.data.workspaces.find((workspace) => workspace.id === id);
     if (!item) return false;
+    const previous = clone(this.data);
     this.data.workspaces = this.data.workspaces.filter((workspace) => workspace.id !== id);
     this.data.settings.safety.allowedRoots = (this.data.settings.safety.allowedRoots ?? [])
       .filter((root) => root.toLowerCase() !== item.path.toLowerCase());
     if (item.isDefault && this.data.workspaces[0]) this.data.workspaces[0].isDefault = true;
-    this.save();
+    try { this.save(); } catch (error) { this.data = previous; throw error; }
     return true;
+  }
+
+  createProject(name: string, path?: string, instructions?: string): WorkspaceInfo {
+    const cleanName = name.trim();
+    if (!cleanName || cleanName.length > 80 || /[\x00-\x1f]/.test(cleanName)) throw new Error('프로젝트 이름은 1~80자로 입력하세요.');
+    if ((instructions?.length ?? 0) > 8000 || instructions?.includes('\0')) throw new Error('프로젝트 지침은 8,000자 이내로 입력하세요.');
+    let directory = path?.trim();
+    if (directory && !isAbsolute(directory)) throw new Error('PC 폴더의 절대 경로를 입력하세요.');
+    if (!directory) {
+      // The display name never becomes a filesystem path. Creating a project
+      // cannot traverse out of this application-owned projects directory.
+      directory = join(homedir(), 'MrRobot-Projects', randomUUID());
+      mkdirSync(directory, { recursive: true });
+    }
+    const existing = this.workspaces.find(item => item.path.toLowerCase() === resolve(directory).toLowerCase());
+    if (existing) throw new Error('이미 연결된 폴더입니다. 기존 프로젝트를 선택하세요.');
+    return this.addWorkspace(directory, cleanName, instructions);
+  }
+
+  updateProject(id: string, name: string, instructions: string): WorkspaceInfo {
+    const selected = this.data.workspaces.find(item => item.id === id);
+    if (!selected) throw new Error('프로젝트를 찾을 수 없습니다.');
+    if (!name.trim() || name.trim().length > 80 || /[\x00-\x1f]/.test(name)) throw new Error('프로젝트 이름은 1~80자로 입력하세요.');
+    if (instructions.length > 8000 || instructions.includes('\0')) throw new Error('프로젝트 지침은 8,000자 이내로 입력하세요.');
+    const previous = clone(this.data);
+    selected.name = name.trim(); selected.instructions = instructions.trim() || undefined;
+    try { this.save(); } catch (error) { this.data = previous; throw error; }
+    return clone(selected);
   }
 
   setDefaultWorkspace(id: string): WorkspaceInfo {

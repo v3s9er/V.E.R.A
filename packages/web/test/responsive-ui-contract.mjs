@@ -136,7 +136,8 @@ requireAll(ui, [
 requireAll(chat, [
   'aria-label="대화 공간"',
   'inConversationSpace(c, spaceRef.current)',
-  'selectConversationInSpace(list, space,',
+  'selectConversationInSpace(projectList, space,',
+  "list.filter(c => projectScopeRef.current === '*' || c.workspaceId === projectScopeRef.current)",
   "client.on('chat.confirm', (data) => { if (isCurrent(data))",
   'request !== loadRequest.current',
   'selectedId.current !== conversation.id',

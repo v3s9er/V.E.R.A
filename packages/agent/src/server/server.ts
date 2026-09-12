@@ -64,6 +64,9 @@ import { computer } from '../computer/index.js';
 import { Scheduler, SchedulerStore } from '../scheduler.js';
 import { DependencyManager } from '../dependencies.js';
 import { ChatSession } from './chat.js';
+import { RunProgress } from './run-progress.js';
+import { projectRunConflicts } from './project-runs.js';
+import { resolveProjectWorkspace } from '@mr-robot/shared';
 import { ScreenStreamController } from './stream.js';
 import { WsHub, WsClient, WsUpgradeTickets, canUseAuditOnly, type AuthContext, type RpcHandler } from './ws.js';
 import { createHttpApi, type PairingInfo } from './http.js';
@@ -717,7 +720,7 @@ export class AgentServer {
       const conversation = this.conversations.get(id);
       if (!conversation || this.config.settings.safety.mode === 'read-only') throw new Error('파일 접근 권한이 없습니다.');
       if (isolated) return readIsolatedArtifact(id, path, offset, limit, version);
-      const workspace = (this.workspacesList().find(w => w.id === conversation.workspaceId) ?? this.workspacesList().find(w => w.isDefault))?.path;
+      const workspace = resolveProjectWorkspace(this.workspacesList(), conversation.workspaceId)?.path;
       // The private Discord host calls this only after current scope full-access
       // validation; the conversation's initial default can predate /robot access.
       const root = chatFileRoot(path, conversation.messages, workspace, joinFilePath(homedir(), 'Downloads'), true);
@@ -769,11 +772,13 @@ export class AgentServer {
   private busyConversations = new Set<string>();
   private activeRuns = new Map<string, {
     session: ChatSession;
+    progress: RunProgress;
     startedAt: number;
     status: string;
     ownerClientId: string;
     ownerLinkId?: string;
     permissionMode: PermissionMode;
+    workspaceId?: string;
   }>();
   private busSubscriptions: Array<() => void> = [];
 
@@ -2209,16 +2214,40 @@ export class AgentServer {
       return this.disableToolPortal();
     });
     h.set('workspaces.list', () => this.workspacesList());
+    h.set('projects.list', () => this.workspacesList());
+    h.set('projects.create', (params, client) => {
+      assertAdmin(client);
+      const body = p(params);
+      const project = this.config.createProject(str(body.name), typeof body.path === 'string' ? body.path : undefined, typeof body.instructions === 'string' ? body.instructions : undefined);
+      this.bus.emit('workspaces.changed', this.config.workspaces);
+      return project;
+    });
+    h.set('projects.update', (params, client) => {
+      assertAdmin(client);
+      const body = p(params);
+      const id = str(body.id);
+      if ([...this.activeRuns.keys()].some(key => (this.conversations.get(key)?.workspaceId ?? this.config.workspaces.find(w => w.isDefault)?.id) === id)) throw new Error('이 프로젝트의 작업을 마친 뒤 지침을 수정하세요.');
+      const project = this.config.updateProject(id, str(body.name), str(body.instructions));
+      this.bus.emit('workspaces.changed', this.config.workspaces);
+      return project;
+    });
+    h.set('projects.delete', (params, client) => {
+      assertAdmin(client);
+      const id = str(p(params).id);
+      if ([...this.activeRuns.keys()].some(key => (this.conversations.get(key)?.workspaceId ?? this.config.workspaces.find(w => w.isDefault)?.id) === id)) throw new Error('실행 중인 프로젝트는 연결 해제할 수 없습니다.');
+      // Registration only. Retain files, conversations and explicit workspace
+      // IDs; orphaned conversations must be deliberately reassigned before use.
+      const ok = this.config.removeWorkspace(id);
+      this.bus.emit('workspaces.changed', this.config.workspaces);
+      return { ok };
+    });
     h.set('workspaces.add', (params, client) => {
       assertAdmin(client);
       const body = p(params);
       return this.workspaceAdd(str(body.path), typeof body.name === 'string' ? body.name : undefined);
     });
     h.set('workspaces.remove', (params, client) => {
-      assertAdmin(client);
-      const ok = this.config.removeWorkspace(str(p(params).id));
-      if (ok) this.bus.emit('workspaces.changed', this.config.workspaces);
-      return { ok };
+      return h.get('projects.delete')!(params, client);
     });
     h.set('workspaces.setDefault', (params, client) => {
       assertAdmin(client);
@@ -2285,6 +2314,7 @@ export class AgentServer {
     h.set('conversations.create', (params, client) => {
       assertContentWrite(client);
       const input = p(params) as ConversationCreateInput;
+      if (input.workspaceId && !this.config.workspaces.some(w => w.id === input.workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
       const requested = ['read-only', 'ask', 'workspace', 'full'].includes(String(input.permissionMode)) ? input.permissionMode : undefined;
       const created = this.conversations.create({
         ...input,
@@ -2303,6 +2333,10 @@ export class AgentServer {
     h.set('conversations.update', (params, client) => {
       assertContentWrite(client);
       const body = p(params);
+      if (body.workspaceId !== undefined) {
+        if (this.busyConversations.has(str(body.id))) throw new Error('작업 중에는 프로젝트를 바꿀 수 없습니다.');
+        if (body.workspaceId && !this.config.workspaces.some(w => w.id === body.workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
+      }
       const requestedPermission = ['read-only', 'ask', 'workspace', 'full'].includes(String(body.permissionMode)) ? body.permissionMode as PermissionMode : undefined;
       const item = this.conversations.update(str(body.id), {
         origin: (client.state.auth?.isAdmin === true || client.state.auth?.trustedDiscord === true) && (body.origin === 'discord' || body.origin === null) ? body.origin : undefined,
@@ -2415,6 +2449,7 @@ export class AgentServer {
           providerId: typeof body.providerId === 'string' ? body.providerId : undefined,
           providerModel: typeof body.providerModel === 'string' ? body.providerModel : undefined,
           routingPresetId: typeof body.routingPresetId === 'string' ? body.routingPresetId : undefined,
+          workspaceId: typeof body.workspaceId === 'string' ? body.workspaceId : undefined,
           permissionMode: clientPermission(client, requestedPermission),
           tokenPolicy: clientTokenPolicy(client, requestedTokenPolicy(body.tokenPolicy)),
         }).id;
@@ -2425,8 +2460,8 @@ export class AgentServer {
       const discordIsolation = client.state.auth?.trustedDiscord === true && (body.discordIsolation === 'isolated' || body.discordIsolation === 'search');
       const isolation = discordIsolation ? createDiscordIsolation(conversationId, body.discordIsolation === 'search' || this.config.settings.safety.mode === 'read-only', body.discordAttachmentIds) : undefined;
       const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : conversation.workspaceId;
-      const workspace = this.config.workspaces.find((item) => item.id === workspaceId)
-        ?? this.config.workspaces.find((item) => item.isDefault);
+      const workspace = resolveProjectWorkspace(this.config.workspaces, workspaceId);
+      if (!isolation && workspaceId && !workspace) throw new Error('연결 해제된 프로젝트입니다. 이 대화에서 프로젝트를 다시 선택하세요.');
       // Discord model selection must not inherit a PC-edited routing preset.
       const routingPresetId = client.state.auth?.trustedDiscord ? undefined : typeof body.routingPresetId === 'string' ? body.routingPresetId : conversation.routingPresetId;
       const conversationRouting = routingPresetId ? this.config.routingForPreset(routingPresetId) : null;
@@ -2445,27 +2480,37 @@ export class AgentServer {
         requestedTokenPolicy(body.tokenPolicy),
         conversation.tokenPolicy,
       );
+      const runWorkspaceId = isolation ? undefined : workspace?.id;
+      if (projectRunConflicts(this.activeRuns.values(), { workspaceId: runWorkspaceId, permissionMode: effectivePermissionMode })) {
+        throw new Error('이 프로젝트에서 다른 작업이 실행 중입니다. 해당 대화에 지시를 추가하거나 작업을 마친 뒤 시작하세요. 서로 다른 프로젝트는 동시에 사용할 수 있습니다.');
+      }
       this.busyConversations.add(conversationId);
       session.begin();
       const runStartedAt = Date.now();
+      const progress = new RunProgress();
       this.activeRuns.set(conversationId, {
         session,
+        progress,
         startedAt: runStartedAt,
         status: '시작 중',
         ownerClientId: client.id,
         ownerLinkId: client.state.auth?.linkId,
         permissionMode: effectivePermissionMode,
+        workspaceId: runWorkspaceId,
       });
       const sendRunEvent = (event: string, data: unknown): void => {
         const run = this.activeRuns.get(conversationId);
-        if (!run) return;
+        if (!run || run.progress !== progress) return;
         for (const target of this.hub?.clients ?? []) {
-          if (target.state.authed && canControlRun(target, run)) target.sendEvent(event, data);
+          if (target.state.authed && canControlRun(target, run)) target.sendEvent(event, { ...(data as object), runId: progress.runId });
         }
       };
+      const publishProgress = () => sendRunEvent('chat.progress', { conversationId, startedAt: progress.startedAt, ...progress.snapshot(), partialText: undefined });
+      publishProgress();
       try {
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
         const retained = [
+          !isolation && workspace ? `현재 프로젝트: ${workspace.name}\n작업 폴더: ${workspace.path}\n${workspace.instructions ? `사용자가 저장한 프로젝트 지침 (접근 권한을 확대하지 않음):\n${workspace.instructions}` : ''}` : '',
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
           !isolation && this.memory.context(text) ? `사용자가 저장한 장기 기억:\n${this.memory.context(text)}` : '',
         ].filter(Boolean).join('\n\n');
@@ -2477,23 +2522,25 @@ export class AgentServer {
             beforeModelCall: client.state.auth?.trustedDiscord
               ? ({ model }) => assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), model)
               : undefined,
-            onText: (delta) => sendRunEvent('chat.delta', { conversationId, text: delta }),
-            onTool: (info) => sendRunEvent('chat.tool', { conversationId, ...info }),
+            onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
+            onTool: (info) => { progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress(); },
             onStatus: (status) => {
               const active = this.activeRuns.get(conversationId);
               if (active) active.status = status;
               sendRunEvent('chat.status', { conversationId, status });
+              publishProgress();
             },
             takeSteering: () => session.takeSteering(),
+            nativeSteering: session.nativeSteering,
             configureModelBudget: (profile) => admission.configureModelBudget(profile),
             noteModelProgress: (kind) => admission.noteModelProgress(kind),
             reserveModelCall: (kind, maximumTokens) => admission.reserveModelCall(kind, maximumTokens),
             onModelUsage: (delta) => { chargedUsage = accumulateProviderUsage(chargedUsage, delta); },
-            confirm: (req) => session.askConfirm(sendRunEvent, {
-              ...req,
-              conversationId,
-              conversationTitle: conversation.title,
-            }),
+            confirm: async (req) => {
+              progress.transition('approval'); publishProgress();
+              try { return await session.askConfirm(sendRunEvent, { ...req, conversationId, conversationTitle: conversation.title }); }
+              finally { progress.transition('working'); publishProgress(); }
+            },
           },
           extraTools,
           {
@@ -2511,6 +2558,7 @@ export class AgentServer {
             trustedPermissionOverride: auth.trustedDiscord === true,
           },
         );
+        session.signal()?.throwIfAborted();
         chargedUsage ??= result.usage;
         session.turns = result.turns;
         const updated = this.conversations.appendResult(conversationId, result.turns, result.usage);
@@ -2529,6 +2577,7 @@ export class AgentServer {
           estimatedCost, ok: true,
         });
         this.bus.emit('conversations.changed', this.conversations.list());
+        progress.transition('completed'); publishProgress();
         sendRunEvent('chat.done', { conversationId, text: result.text, usage: result.usage, route: result.route, conversation: updated });
         return { ok: true, conversationId, text: result.text, route: result.route };
       } catch (err) {
@@ -2559,6 +2608,7 @@ export class AgentServer {
           toolCalls: 0, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
           ok: false, error: message.slice(0, 500),
         });
+        progress.transition(session.signal()?.aborted ? 'cancelled' : 'failed'); publishProgress();
         sendRunEvent('chat.error', { conversationId, message });
         return { ok: false, error: message };
       } finally {
@@ -2575,7 +2625,11 @@ export class AgentServer {
       const run = conversationId ? this.activeRuns.get(conversationId) : undefined;
       if (run) {
         assertRunControl(client, run);
+        run.progress.transition('cancelling');
         run.session.cancel(reason);
+        for (const target of this.hub?.clients ?? []) if (target.state.authed && canControlRun(target, run)) {
+          target.sendEvent('chat.progress', { conversationId, ...run.progress.snapshot(), partialText: undefined });
+        }
       } else if (!conversationId || conversationId === client.state.chat.conversationId) {
         client.state.chat.cancel(reason);
       }
@@ -2593,7 +2647,7 @@ export class AgentServer {
     h.set('chat.runs', (_params, client): ChatRunState[] => [...this.activeRuns.entries()]
       .filter(([, run]) => canControlRun(client, run))
       .map(([conversationId, run]) => ({
-        conversationId, running: true, startedAt: run.startedAt, status: run.status, steeringQueued: run.session.steeringQueued,
+        conversationId, running: true, startedAt: run.startedAt, status: run.status, steeringQueued: run.session.steeringQueued, ...run.progress.snapshot(),
       })));
     h.set('chat.pendingConfirm', (params, client) => {
       const conversationId = str(p(params).conversationId);

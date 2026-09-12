@@ -11,6 +11,7 @@ const home = mkdtempSync(join(tmpdir(), 'mr-robot-core-hardening-'));
 process.env.MR_ROBOT_HOME = home;
 
 const { ChatSession } = await import(pathToFileURL(join(dist, 'server', 'chat.js')).href);
+const { RunProgress } = await import(pathToFileURL(join(dist, 'server', 'run-progress.js')).href);
 const { canUseAuditOnly, cleanupDisconnectedClientState, WsUpgradeTickets, webSocketTicketBinding } = await import(pathToFileURL(join(dist, 'server', 'ws.js')).href);
 const { FileTransferAdmission } = await import(pathToFileURL(join(dist, 'server', 'transfer-admission.js')).href);
 const { ContextBroker } = await import(pathToFileURL(join(dist, 'context-broker.js')).href);
@@ -557,6 +558,7 @@ console.log('6. active runs are isolated by device ownership');
   const session = new ChatSession();
   session.begin();
   server.activeRuns.set('owned-run', {
+    progress: new RunProgress(),
     session,
     startedAt: Date.now(),
     status: 'running',
@@ -621,6 +623,7 @@ console.log('7b. device permission changes invalidate live sessions');
     summary: 'write a protected file',
   });
   server.activeRuns.set('live-device-run', {
+    progress: new RunProgress(),
     session: running,
     startedAt: Date.now(),
     status: 'running',
@@ -680,6 +683,7 @@ console.log('7b. device permission changes invalidate live sessions');
     summary: 'run a protected command',
   });
   server.activeRuns.set('revoked-run', {
+    progress: new RunProgress(),
     session: revokedRun,
     startedAt: Date.now(),
     status: 'awaiting approval',
@@ -702,6 +706,7 @@ console.log('7b. device permission changes invalidate live sessions');
     summary: 'write after credential rotation',
   });
   server.activeRuns.set('global-run', {
+    progress: new RunProgress(),
     session: globalRun,
     startedAt: Date.now(),
     status: 'awaiting approval',

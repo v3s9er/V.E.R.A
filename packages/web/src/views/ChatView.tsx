@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
+import { resolveProjectWorkspace } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
 import { BrandIcon } from '../components/BrandIcon';
+import { ProjectNavigation } from '../components/ProjectNavigation';
 import { loadModelCatalog } from '../model-catalog';
 import { inConversationSpace, selectConversationInSpace, type ConversationSpace } from '../conversation-spaces';
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
-interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string }
+import { RunActivityPanel } from '../components/RunActivityPanel.js';
+interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
 interface RouteInfo { providerLabel: string; model: string; role: string; effort: ReasoningEffort; reason: string; advisor?: { providerLabel: string; model: string } }
 interface ConversationMenu { conversation: ConversationSummary; x: number; y: number }
@@ -144,8 +147,20 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const modelRefreshInFlight = useRef(false);
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
+  const [projectScope, setProjectScope] = useState('*');
+  const projectScopeRef = useRef('*');
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => {
+    if (!navigationOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setNavigationOpen(false); };
+    window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close);
+  }, [navigationOpen]);
   const [input, setInput] = useState('');
+  const inputRef = useRef(input); inputRef.current = input;
+  const drafts = useRef(new Map<string, string>());
+  const [runningIds, setRunningIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [runProgress, setRunProgress] = useState<Partial<ChatRunState>>({});
   const [status, setStatus] = useState('');
   const [activity, setActivity] = useState<string[]>([]);
   useEffect(() => setActivity([]), [selected?.id]);
@@ -260,7 +275,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     }
     if (!conversation) {
       try {
-        conversation = await client.call('conversations.create', {}) as ConversationDetail;
+        conversation = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
         selectedId.current = conversation.id;
         selectedRef.current = conversation;
         setSelected(conversation);
@@ -286,6 +301,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     runningConversationRef.current = conversation.id;
     setBusy(true);
     setActivity([]);
+    setRunProgress({ phase: 'starting', startedAt: Date.now(), activity: [] });
     setStatus('모델 선택 중…');
     setRoute(null);
     stickToBottomRef.current = true;
@@ -304,6 +320,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }, 10 * 60_000) as { ok?: boolean; error?: string; text?: string; route?: RouteInfo };
       if (selectedId.current !== conversation.id) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
+      setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
       if (result.route) setRoute(result.route);
       if (result.text) {
         setMessages((items) => {
@@ -315,6 +332,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }
     } catch (error) {
       if (selectedId.current !== conversation.id) return;
+      setRunProgress(value => value.phase === 'cancelled' ? value : { ...value, phase: 'failed' });
       setMessages((items) => {
         const copy = [...items];
         const last = copy[copy.length - 1];
@@ -366,11 +384,22 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         .catch(() => null) as Promise<ChatConfirmRequest | null>
     )));
     if (request !== loadRequest.current || !inConversationSpace(detail, spaceRef.current)) return;
+    if (selectedId.current !== id) {
+      if (selectedId.current) {
+        drafts.current.delete(selectedId.current); drafts.current.set(selectedId.current, inputRef.current);
+        if (drafts.current.size > 30) drafts.current.delete(drafts.current.keys().next().value!);
+      }
+      setInput(drafts.current.get(id) ?? '');
+    }
+    setRunningIds(runs.filter(run => run.running).map(run => run.conversationId));
     selectedId.current = id;
     selectedRef.current = detail;
     setSelected(detail);
+    if (projectScopeRef.current !== '*' && detail.workspaceId !== projectScopeRef.current) { projectScopeRef.current = '*'; setProjectScope('*'); }
+    setComposerError(''); setNavigationOpen(false);
     const restored = fromDetail(detail);
-    setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: '', tools: [], done: false }] : restored);
+    setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: `${selectedRun.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${selectedRun.partialText ?? ''}`, tools: [], done: false }] : restored);
+    setRunProgress(controlledRun ?? {});
     setVisibleMessageLimit(160);
     setRoute(null);
     runningConversationRef.current = controlledRun?.conversationId ?? null;
@@ -394,10 +423,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setRoutingPresets(presets);
     setWorkspaces(workspaceList);
     void discoverProviderModels(provs);
-    const target = selectConversationInSpace(list, space, preferredId ?? selectedId.current);
+    if (projectScopeRef.current !== '*' && !workspaceList.some(w => w.id === projectScopeRef.current)) { projectScopeRef.current = '*'; setProjectScope('*'); }
+    const projectList = list.filter(c => projectScopeRef.current === '*' || c.workspaceId === projectScopeRef.current);
+    const target = selectConversationInSpace(projectList, space, preferredId ?? selectedId.current);
     if (target) await loadConversation(target);
     else if (!showArchived && space === 'personal') {
-      const created = await client.call('conversations.create', {}) as ConversationDetail;
+      const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
       if (spaceRef.current !== space) return;
       setConversations([created, ...visible]);
       selectedId.current = created.id;
@@ -452,11 +483,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     });
     const offTool = client.on('chat.tool', (data) => {
       if (!isCurrent(data)) return;
-      const info = data as { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string };
+      const info = data as { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string };
       setMessages((items) => {
         const copy = [...items]; const last = copy[copy.length - 1]; if (!last || last.role !== 'assistant') return copy;
-        if (info.status === 'start') last.tools = [...last.tools, { key: `${info.name}#${++toolCounter.current}`, name: info.name, summary: describe(info.input), status: 'start' }];
-        else { const found = [...last.tools].reverse().findIndex((t) => t.name === info.name && t.status === 'start'); if (found >= 0) { const index = last.tools.length - 1 - found; last.tools[index] = { ...last.tools[index], status: info.status, detail: info.detail }; } }
+        if (info.status === 'start') last.tools = [...last.tools.slice(-63), { key: `${info.name}#${++toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: 'start' }];
+        else { const index = last.tools.findIndex(t => (info.callId ? t.callId === info.callId : t.name === info.name) && t.status === 'start'); if (index >= 0) last.tools[index] = { ...last.tools[index], status: info.status, detail: info.detail }; }
         return copy;
       });
     });
@@ -466,9 +497,18 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       setStatus(next);
       if (next) setActivity(items => items.at(-1) === next ? items : [...items.slice(-19), next]);
     });
+    const offProgress = client.on('chat.progress', data => {
+      const event = data as Partial<ChatRunState>;
+      if (event.conversationId) setRunningIds(ids => {
+        const remaining = ids.filter(id => id !== event.conversationId);
+        return ['completed', 'failed', 'cancelled'].includes(event.phase ?? '') ? remaining : [...remaining, event.conversationId!].slice(-200);
+      });
+      if (isCurrent(data)) setRunProgress(current => ({ ...current, ...(data as Partial<ChatRunState>) }));
+    });
     const offDone = client.on('chat.done', (data) => {
       flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
+      setRunningIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
         busyRef.current = false;
@@ -477,13 +517,15 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }
       if (!isCurrent(data)) return;
       const done = data as { text: string; route?: RouteInfo; conversation?: ConversationDetail };
-      setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { if (!last.content) last.content = done.text; last.done = true; } return copy; });
+      setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
+      setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { if (done.text) last.content = done.text; last.done = true; } return copy; });
       if (done.conversation) { selectedRef.current = done.conversation; setSelected(done.conversation); }
       setRoute(done.route ?? null);
     });
     const offError = client.on('chat.error', (data) => {
       flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
+      setRunningIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
         busyRef.current = false;
@@ -506,7 +548,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const offVoiceTimeout = client.on('voice.command.timeout', (data) => {
       if ((data as { kind?: string }).kind === 'pc') setVoiceAck('음성 명령 대기 시간이 끝났습니다. 다시 “로봇”이라고 불러주세요.');
     });
-    return () => { offList(); offProviders(); offPresets(); offWorkspaces(); offDelta(); offTool(); offStatus(); offDone(); offError(); offConfirm(); offVoice(); offVoiceReady(); offVoiceTimeout(); };
+    return () => { offList(); offProviders(); offPresets(); offWorkspaces(); offDelta(); offTool(); offStatus(); offProgress(); offDone(); offError(); offConfirm(); offVoice(); offVoiceReady(); offVoiceTimeout(); };
   }, [client, discoverProviderModels, flushDelta, later, showArchived]);
 
   useEffect(() => {
@@ -597,8 +639,20 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   }, [conversationMenu]);
 
   const createConversation = async (): Promise<void> => {
-    const created = await client.call('conversations.create', {}) as ConversationDetail;
-    setConversations((list) => [created, ...list]); selectedId.current = created.id; selectedRef.current = created; setSelected(created); setMessages([]); setShowArchived(false);
+    try {
+      const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
+      setConversations((list) => [created, ...list.filter(c => c.id !== created.id)]);
+      await loadConversation(created.id); setShowArchived(false);
+    } catch (error) { setComposerError(error instanceof Error ? error.message : String(error)); }
+  };
+  const selectProject = async (id: string): Promise<void> => {
+    projectScopeRef.current = id; setProjectScope(id); setConversationMenu(null);
+    const target = conversations.find(c => id === '*' || c.workspaceId === id);
+    try {
+      if (target) await loadConversation(target.id);
+      else if (!showArchived) await createConversation();
+      else { selectedId.current = null; selectedRef.current = null; setSelected(null); setMessages([]); }
+    } catch (error) { setComposerError(error instanceof Error ? error.message : String(error)); }
   };
   const updateConversation = (patch: Record<string, unknown>, onError?: () => void, onSuccess?: (detail: ConversationDetail) => void): Promise<void> => {
     const target = selectedRef.current;
@@ -755,7 +809,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   const uploadAttachment = async (files: FileList | File[] | null): Promise<void> => {
     const picked = Array.from(files ?? []).slice(0, 20);
-    const workspace = workspaces.find((item) => item.id === selected?.workspaceId) ?? workspaces.find((item) => item.isDefault);
+    const workspace = resolveProjectWorkspace(workspaces, selected?.workspaceId);
     if (!picked.length || uploading) return;
     if (!workspace) { setComposerError('파일을 올리려면 먼저 이 대화의 컨텍스트에서 작업 폴더를 선택하세요.'); return; }
     setComposerError('');
@@ -863,7 +917,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const reasoningProvider = selected?.routingPresetId ? undefined : selectedProvider ?? defaultProvider;
   const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider);
   const displayedReasoningEffort = availableReasoningEfforts.some(({ value }) => value === selected?.reasoningEffort) ? selected?.reasoningEffort ?? 'auto' : 'auto';
-  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selected?.workspaceId) ?? workspaces.find((workspace) => workspace.isDefault);
+  const selectedWorkspace = resolveProjectWorkspace(workspaces, selected?.workspaceId);
   const requestedPermissionMode = selected?.permissionMode ?? 'ask';
   const effectivePermissionMode = permissionWithinCap(requestedPermissionMode, client.permissionCap) ? requestedPermissionMode : client.permissionCap;
   const selectedAccess = ACCESS.find((access) => access.value === effectivePermissionMode) ?? ACCESS[0];
@@ -877,8 +931,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
 
   return (
-    <div className="conversation-layout">
+    <div className={`conversation-layout ${navigationOpen ? 'navigation-open' : ''}`}>
+      <div className="chat-navigation"><button type="button" aria-label="프로젝트와 대화 목록 열기" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>☰ <span>{workspaces.find(w => w.id === projectScope)?.name ?? 'Mr.Robot'}</span></button><button type="button" onClick={() => void createConversation()} aria-label="새 대화 만들기">＋</button></div>
+      {navigationOpen && <button className="navigation-scrim" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)} />}
       <aside className="conversation-list">
+        <button className="navigation-close" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)}>닫기 ×</button>
         <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>Mr.Robot</b></div>
         <div className="conversation-spaces" role="tablist" aria-label="대화 공간">
           {(['personal', 'discord'] as const).map(key => <button key={key} role="tab" aria-selected={space === key} onClick={() => {
@@ -886,13 +943,14 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             loadRequest.current++;
             spaceRef.current = key; selectedId.current = null; selectedRef.current = null;
             runningConversationRef.current = null; busyRef.current = false;
-            setBusy(false); setStatus(''); setConfirm(null); setComposerError('');
+            setBusy(false); setStatus(''); setConfirm(null); setComposerError(''); setRunProgress({}); projectScopeRef.current = '*'; setProjectScope('*');
             setSelected(null); setMessages([]); setConversations([]); setConversationMenu(null); setShowArchived(false); setSpace(key);
           }}>{key === 'personal' ? '내 대화' : 'Discord'}</button>)}
         </div>
+        {space === 'personal' && <ProjectNavigation projects={workspaces} conversations={conversations} active={projectScope} running={runningIds} onSelect={id => void selectProject(id)} onChanged={setWorkspaces} />}
         <div className="conversation-list-head">{space === 'personal' ? <Button onClick={() => void createConversation()}>＋ 새 대화</Button> : <span className="conversation-space-label">티켓 대화 기록</span>}<button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
         <div className="conversation-items">
-          {conversations.map((c) => <div
+          {conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope).map((c) => <div
             key={c.id}
             className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
             onContextMenu={(event) => {
@@ -934,7 +992,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? (status || '작업 준비 중') : activeModeLabel}</span>
             </div>
             <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
-              <span className="context-trigger-icon">◎</span><span><b>작업 폴더</b><small>{selectedWorkspace?.name ?? '폴더 선택'}</small></span><em>⌄</em>
+              <span className="context-trigger-icon">▱</span><span><b>프로젝트</b><small>{selectedWorkspace?.name ?? (selected.workspaceId ? '연결 해제됨' : '폴더 선택')}</small></span><em>⌄</em>
             </button>
             <button type="button" className={`icon-action ${selected.pinned ? 'active' : ''}`} title={selected.pinned ? '대화 고정 해제' : '대화 고정'} aria-label={selected.pinned ? '대화 고정 해제' : '대화 고정'} onClick={() => void pinConversation(selected)} disabled={busy}>⌖</button>
           </header>
@@ -956,18 +1014,18 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
               <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{status || '요청을 분석하고 있습니다'}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
               {m.role === 'assistant' && activePc && selected && <ChatFiles key={`${activePc.id}:${selected.id}:${m.id}`} text={m.content} pc={activePc} conversationId={selected.id} />}
-              {m.tools.length > 0 && <div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? '↳' : t.status === 'done' ? '✓' : '!'}</span></div>)}</div>}
+              {m.tools.length > 0 && <details className="tool-history"><summary>작업 내역 {m.tools.length}개 <span>⌄</span></summary><div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? '↳' : t.status === 'done' ? '✓' : '!'}</span></div>)}</div></details>}
             </div>
           </div>)}
-          {activity.length > 0 && <details className="chat-activity"><summary>{busy ? '✦ 작업 진행' : '✓ 작업 기록'} · {activity.at(-1)}</summary><ol>{activity.map((entry, index) => <li key={index}>{entry}</li>)}</ol></details>}
+          {!runProgress.runId && activity.length > 0 && <details className="chat-activity"><summary>{busy ? '✦ 작업 진행' : '✓ 작업 기록'} · {activity.at(-1)}</summary><ol>{activity.map((entry, index) => <li key={index}>{entry}</li>)}</ol></details>}
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><span className="run-status-icon"><Spinner size={13} /></span><span><b>모델 실행 설정 저장 중…</b><small>저장이 끝나면 새 설정으로 명령을 보낼 수 있습니다.</small></span></div> : (status || route) && <div className={`run-status ${busy ? 'live' : 'complete'}`}><span className="run-status-icon">{busy ? '✦' : '✓'}</span><span><b>{busy ? status || '작업 준비 중' : '마지막 실행 완료'}</b>{route && <small>{route.advisor ? `${route.advisor.providerLabel} 자문 → ` : ''}{route.providerLabel} · {route.model} · {route.reason}</small>}</span></div>}
+          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} startedAt={runProgress.startedAt} busy={busy} fallback={status || route?.model} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}
-          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '실행 중인 작업에 추가할 명령을 입력하세요…' : 'PC 에이전트에게 시킬 일을 입력하세요…'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '추가 지시를 입력하세요. 진행 중인 작업은 유지됩니다.' : '무엇을 도와드릴까요?'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
             <div className="composer-options" aria-label="대화 실행 설정">
 {selected && <div className="composer-model-controls">

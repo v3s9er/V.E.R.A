@@ -23,6 +23,7 @@ interface OrcaConfig {
   defaultRepo: string;
   setup: 'run' | 'skip' | 'inherit';
   autoOpen: boolean;
+  computerUse?: boolean;
 }
 
 interface OrcaStatus {
@@ -1070,6 +1071,8 @@ export function PluginsView() {
               <div className="type-row">
                 <label><input type="checkbox" checked={orcaConfig.enabled} onChange={(event) => setOrcaConfig({ ...orcaConfig, enabled: event.target.checked })} /> Mr.Robot 코딩 위임 활성화</label>
                 <label><input type="checkbox" checked={orcaConfig.autoOpen} onChange={(event) => setOrcaConfig({ ...orcaConfig, autoOpen: event.target.checked })} /> 위임할 때 Orca 자동 실행</label>
+                <label><input type="checkbox" checked={orcaConfig.computerUse === true} onChange={(event) => setOrcaConfig({ ...orcaConfig, computerUse: event.target.checked })} /> 접근성 기반 PC 조작 사용 · 별도 선택</label>
+                <p className="muted">앱·창 확인 → 최신 요소 선택 → 조작 후 다시 확인합니다. 각 조작은 대화의 PC 접근 권한을 따르며, 오래된 화면의 요소는 사용할 수 없습니다.</p>
                 <Button onClick={() => void saveOrca()} disabled={orcaBusy}>{orcaBusy ? '확인 중…' : '저장 및 연결 확인'}</Button>
               </div>
               <p className="panel-hint">코딩 요청에서만 Orca 도구가 모델에 노출됩니다. 작업 위임은 현재 Mr.Robot 권한 정책의 승인을 거친 뒤 새 Git worktree를 만듭니다.</p>

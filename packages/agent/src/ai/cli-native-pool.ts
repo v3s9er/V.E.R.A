@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from '
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { CliSessionEvents } from './cli-session-events.js';
+import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { normalizeProviderUsageReport, type NativeAgentRequest, type ProviderResult, type Turn } from './provider.js';
 
@@ -15,6 +16,8 @@ const fingerprints = (turns: Turn[]) => turns.map(t => digest(t));
 const emptyUsage = (): Totals => ({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 });
 const workers = new Map<string, NativeWorker>();
 const MAX_WORKERS = 4;
+const scheduler = new NativeRunScheduler(MAX_WORKERS);
+let runtimeEpoch = 0;
 const IDLE_MS = 5 * 60_000;
 const RETENTION_MS = 7 * 24 * 60 * 60_000;
 
@@ -68,15 +71,23 @@ class NativeWorker {
   private checkpoint?: Checkpoint;
   private idle?: NodeJS.Timeout;
   private store: Checkpoints;
+  private readonly model: string;
   private active?: {
     req: NativeAgentRequest; resolve(r: ProviderResult): void; reject(e: Error): void;
     abort(): void; timer: NodeJS.Timeout; heartbeat: NodeJS.Timeout; startedAt: number;
     status: string; text: string; turn: string; total: Totals; baseline: Totals;
     usage: ProviderResult['usage']; deltas: Map<string, string>; phases: Map<string, string>; completed: Set<string>;
+    streamed: Map<string, string>; applied: string[]; unsubscribe?: () => void;
+    steering?: { id: number; inputs: string[]; timer: NodeJS.Timeout };
+    steeringDisabled?: boolean; turnCompleted?: boolean; cancelling?: boolean; interruptTimer?: NodeJS.Timeout;
   };
   closed = false;
+  lastUsed = Date.now();
   get busy() { return !!this.active; }
-  constructor(private key: string, private options: Options) {
+  constructor(private key: string, options: Options) {
+    // Warm workers must not retain the first request's transcript, callbacks,
+    // abort signal or server admission closures while idle.
+    this.model = options.model;
     this.store = new Checkpoints(options.req.session!.directory);
     this.checkpoint = this.store.get(key);
     const config: Record<string, unknown> = {
@@ -127,7 +138,7 @@ class NativeWorker {
     if (!this.matches(req)) { this.checkpoint = undefined; this.thread = ''; }
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const abort = () => this.close(new Error('네이티브 작업이 중지되었습니다.'));
+      const abort = () => this.interrupt();
       const timer = setTimeout(() => this.close(new Error('네이티브 작업 시간이 초과되었습니다.')), 30 * 60_000);
       const heartbeat = setInterval(() => {
         if (this.active) this.status(`${this.active.status.replace(/ · \d+초$/, '')} · ${Math.floor((Date.now() - startedAt) / 1000)}초`);
@@ -135,7 +146,8 @@ class NativeWorker {
       heartbeat.unref();
       this.active = { req, resolve, reject, abort, timer, heartbeat, startedAt, status: '', text: '', turn: '',
         baseline: this.checkpoint?.usage ?? emptyUsage(), total: this.checkpoint?.usage ?? emptyUsage(),
-        usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Set() };
+        usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Set(), streamed: new Map(), applied: [] };
+      this.active.unsubscribe = req.steering?.subscribe(() => this.steer());
       req.signal?.addEventListener('abort', abort, { once: true });
       this.status(this.checkpoint ? '기존 대화 세션 연결 중' : '새 대화 세션 연결 중');
       try {
@@ -146,6 +158,42 @@ class NativeWorker {
   }
   private send(value: unknown) { if (!this.closed) this.child.stdin.write(JSON.stringify(value) + '\n'); }
   private status(text: string) { if (this.active) { this.active.status = text; this.active.req.onStatus?.(text); } }
+  private interrupt() {
+    const a = this.active;
+    if (!a || a.cancelling) return;
+    a.cancelling = true;
+    if (!a.turn) { this.close(new Error('네이티브 작업이 중지되었습니다.')); return; }
+    this.status('중지 요청 전달 · 실행 종료 확인 중');
+    this.send({ id: ++this.sequence, method: 'turn/interrupt', params: { threadId: this.thread, turnId: a.turn } });
+    // A stuck/old CLI must not keep tools alive indefinitely after cancellation.
+    a.interruptTimer = setTimeout(() => this.close(new Error('네이티브 작업이 중지되었습니다.')), 1500);
+  }
+  private steer() {
+    const a = this.active;
+    if (!a?.turn || a.cancelling || a.turnCompleted || a.steering || a.steeringDisabled) return;
+    const inputs = a.req.steering?.peek() ?? [];
+    if (!inputs.length) return;
+    const id = ++this.sequence;
+    const timer = setTimeout(() => this.close(new Error('추가 지시 수신 확인이 지연되어 실행을 중단했습니다. 중복 실행을 막기 위해 자동 재전송하지 않습니다.')), 10_000);
+    a.steering = { id, inputs, timer };
+    this.send({ id, method: 'turn/steer', params: { threadId: this.thread, expectedTurnId: a.turn,
+      input: inputs.map(text => ({ type: 'text', text, text_elements: [] })),
+    } });
+    this.status(`추가 지시 ${inputs.length}개 전달 중 · 현재 작업 유지`);
+  }
+  private finish() {
+    const a = this.active;
+    if (!a?.turnCompleted || a.steering || a.cancelling) return;
+    const s = a.req.session!;
+    this.checkpoint = { thread: this.thread, history: fingerprints([...s.history, { role: 'user', content: s.input },
+      ...a.applied.map(content => ({ role: 'user' as const, content })), { role: 'assistant', content: a.text }]), context: digest(s.context), usage: a.total, at: Date.now() };
+    try { this.store.set(this.key, this.checkpoint); }
+    catch { this.status('답변 완료 · 세션 저장 실패, 다음 요청은 대화 기록으로 복구합니다'); this.checkpoint = undefined; this.thread = ''; }
+    this.events.complete();
+    this.release(); this.active = undefined; this.lastUsed = Date.now();
+    this.idle = setTimeout(() => this.close(), IDLE_MS); this.idle.unref();
+    a.resolve({ text: a.text, toolCalls: [], usage: a.usage });
+  }
   private openThread() {
     const req = this.active!.req;
     if (this.thread) { this.startTurn(); return; }
@@ -153,7 +201,7 @@ class NativeWorker {
     this.events.beginThread();
     this.send({ id: 2, method: this.checkpoint ? 'thread/resume' : 'thread/start', params: {
       ...(this.checkpoint ? { threadId: this.checkpoint.thread } : { ephemeral: false }),
-      model: this.options.model, allowProviderModelFallback: false, cwd: req.cwd, approvalPolicy: 'never', sandbox,
+      model: this.model, allowProviderModelFallback: false, cwd: req.cwd, approvalPolicy: 'never', sandbox,
       baseInstructions: req.session!.instructions,
     } });
   }
@@ -174,6 +222,26 @@ class NativeWorker {
     } });
   }
   private receive(m: any) {
+    const active = this.active;
+    if (active?.cancelling) {
+      if (m.method === 'turn/completed' && this.events.accept(m)) this.close(new Error('네이티브 작업이 중지되었습니다.'));
+      return; // No stale output or steering acknowledgements after cancellation.
+    }
+    if (active?.steering && m.id === active.steering.id && !m.method) {
+      const pending = active.steering;
+      clearTimeout(pending.timer); active.steering = undefined;
+      if (m.error) {
+        // Definitive rejection: retain host inputs for the continuation fallback.
+        active.steeringDisabled = true;
+        this.status('추가 지시는 현재 응답 뒤에 이어서 반영합니다');
+      } else {
+        if (m.result?.turnId !== active.turn || !active.req.steering?.commit(pending.inputs)) return this.close(new Error('추가 지시 실행 식별자 또는 대기열 검증에 실패했습니다.'));
+        active.applied.push(...pending.inputs);
+        active.req.onSteeringApplied?.(pending.inputs);
+        this.status(`추가 지시 ${pending.inputs.length}개 반영 · 같은 실행에서 계속`);
+      }
+      this.finish(); this.steer(); return;
+    }
     if (m.error) {
       // A failed resume has not started a turn: safely rebuild from host history.
       // Never retry a failed turn automatically (it may already have side effects).
@@ -201,6 +269,7 @@ class NativeWorker {
       const queued = this.events.bindTurn(m.result?.turn?.id);
       a.turn = this.events.turn;
       for (const event of queued) { if (!this.closed && this.active === a) this.receive(event); }
+      this.steer();
       return;
     }
     if (!this.events.accept(m)) return;
@@ -217,9 +286,13 @@ class NativeWorker {
       const text = (a.deltas.get(p.itemId) ?? '') + p.delta;
       if (text.length > 384 * 1024 || a.deltas.size > 128) return this.close(new Error('네이티브 응답 크기 초과'));
       a.deltas.set(p.itemId, text);
-      if (a.phases.get(p.itemId) === 'final_answer') a.req.onText?.(p.delta);
-      else if (a.phases.get(p.itemId) === 'commentary') this.status(text.slice(-1000));
-      else this.status('답변 작성 중');
+      if (a.phases.get(p.itemId) === 'commentary') this.status(text.slice(-1000));
+      else {
+        // agentMessage is public output, unlike reasoning payloads. Older CLIs
+        // omit phase; do not hold their text until item/completed.
+        a.streamed.set(p.itemId, (a.streamed.get(p.itemId) ?? '') + p.delta);
+        a.req.onText?.(p.delta);
+      }
     } else if (m.method === 'item/started' || m.method === 'item/completed') {
       const item = m.params?.item;
       if (item?.type === 'agentMessage' && m.method === 'item/started' && typeof item.id === 'string') {
@@ -228,10 +301,10 @@ class NativeWorker {
       }
       if (item?.type === 'agentMessage' && m.method === 'item/completed') {
         if (typeof item.text !== 'string' || item.text.length > 384 * 1024) return this.close(new Error('네이티브 응답 형식 오류'));
-        if (item.phase === 'commentary') this.status(item.text.slice(0, 1000));
+        if ((item.phase ?? a.phases.get(item.id)) === 'commentary') this.status(item.text.slice(0, 1000));
         else if (!a.completed.has(item.id)) {
           a.completed.add(item.id); a.text = item.text;
-          const streamed = a.phases.get(item.id) === 'final_answer' ? a.deltas.get(item.id) ?? '' : '';
+          const streamed = a.streamed.get(item.id) ?? '';
           if (!item.text.startsWith(streamed)) return this.close(new Error('네이티브 응답 스트림 불일치'));
           if (item.text.length > streamed.length) a.req.onText?.(item.text.slice(streamed.length));
         }
@@ -241,17 +314,14 @@ class NativeWorker {
       }
     } else if (m.method === 'turn/completed') {
       if (m.params?.turn?.status !== 'completed') return this.close(new Error('네이티브 작업이 완료되지 않았습니다.'));
-      const s = a.req.session!;
-      this.checkpoint = { thread: this.thread, history: fingerprints([...s.history, { role: 'user', content: s.input }, { role: 'assistant', content: a.text }]), context: digest(s.context), usage: a.total, at: Date.now() };
-      try { this.store.set(this.key, this.checkpoint); }
-      catch { this.status('답변 완료 · 세션 저장 실패, 다음 요청은 대화 기록으로 복구합니다'); this.checkpoint = undefined; this.thread = ''; }
-      this.events.complete();
-      this.release(); this.active = undefined;
-      this.idle = setTimeout(() => this.close(), IDLE_MS); this.idle.unref();
-      a.resolve({ text: a.text, toolCalls: [], usage: a.usage });
+      a.turnCompleted = true;
+      this.finish();
     }
   }
-  private release() { const a = this.active; if (a) { clearTimeout(a.timer); clearInterval(a.heartbeat); a.req.signal?.removeEventListener('abort', a.abort); } }
+  private release() { const a = this.active; if (a) {
+    clearTimeout(a.timer); clearInterval(a.heartbeat); clearTimeout(a.interruptTimer); clearTimeout(a.steering?.timer);
+    a.unsubscribe?.(); a.req.signal?.removeEventListener('abort', a.abort);
+  } }
   close(error?: Error) {
     if (this.closed) return;
     this.closed = true; clearTimeout(this.idle); this.release();
@@ -266,13 +336,16 @@ class NativeWorker {
 }
 
 export async function pooledNativeCodex(options: Options): Promise<ProviderResult> {
+  const epoch = runtimeEpoch;
   const s = options.req.session;
   if (!s || options.req.permissionMode === 'ask') throw new Error('검증된 네이티브 세션과 실행 승인이 필요합니다.');
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
     options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions]);
-  while (true) {
+  const release = await scheduler.acquire(key, options.req.signal, position => options.req.onStatus?.(`네이티브 실행 대기 · ${position}번째 · 앞선 작업 완료 시 자동 시작`));
+  try { while (true) {
     await waitForCliRetirements(options.env, options.req.signal);
+    if (epoch !== runtimeEpoch) throw new Error('네이티브 실행이 종료되었습니다.');
     options.req.signal?.throwIfAborted();
     let worker = workers.get(key);
     if (worker?.busy) throw new Error('같은 대화의 네이티브 작업이 이미 실행 중입니다.');
@@ -281,13 +354,13 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
     if (worker && !worker.accepts(options.req)) { worker.close(); continue; }
     if (!worker) {
       if (workers.size >= MAX_WORKERS) {
-        const idle = [...workers.values()].find(w => !w.busy);
+        const idle = [...workers.values()].filter(w => !w.busy).sort((a, b) => a.lastUsed - b.lastUsed)[0];
         if (!idle) throw new Error('네이티브 실행 슬롯이 사용 중입니다. 잠시 후 다시 요청하세요.');
         idle.close(); continue;
       }
       worker = new NativeWorker(key, options); workers.set(key, worker);
     }
-    return worker.run(options.req);
-  }
+    return await worker.run(options.req);
+  } } finally { release(); }
 }
-export function closeNativeWorkers() { for (const worker of [...workers.values()]) worker.close(); }
+export function closeNativeWorkers() { runtimeEpoch++; scheduler.cancelPending(); for (const worker of [...workers.values()]) worker.close(); }

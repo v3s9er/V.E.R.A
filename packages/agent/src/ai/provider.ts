@@ -111,6 +111,13 @@ export interface ChatRequest {
   onEvent?: (e: ProviderEvent) => void;
 }
 
+/** Host-owned queue: inputs are removed only after the CLI acknowledges them. */
+export interface NativeSteeringControl {
+  peek(): string[];
+  commit(inputs: readonly string[]): boolean;
+  subscribe(listener: () => void): () => void;
+}
+
 export interface NativeAgentRequest {
   prompt: string;
   /** Host-only conversation identity and verified transcript, never a client CLI thread id. */
@@ -121,6 +128,8 @@ export interface NativeAgentRequest {
   signal?: AbortSignal;
   onStatus?: (status: string) => void;
   onText?: (text: string) => void;
+  steering?: NativeSteeringControl;
+  onSteeringApplied?: (inputs: readonly string[]) => void;
 }
 
 /** Host-owned capability executor. Never constructed from client/model JSON. */
