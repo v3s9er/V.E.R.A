@@ -4,6 +4,7 @@ import type { MrRobotClient } from '../rpc';
 import type { RuntimeHookAction } from '../tool-portal-contract';
 import { Badge, Button, Input, Select } from './ui';
 import { RuntimeHookPanel, type RuntimeHookTransport } from './RuntimeHookPanel';
+import { SchedulesView } from '../views/SchedulesView';
 import './PluginWorkbench.css';
 
 type WorkbenchResult = { label: string; value: unknown; completedAt: number };
@@ -491,6 +492,7 @@ function GenericPluginPanel({ plugin, client, onCompleted, setGlobalError }: {
 }
 
 export function PluginWorkbench({ plugin, client, initialResult, onClose, onResult }: PluginWorkbenchProps) {
+  const isCalendar = plugin.builtin && plugin.id === 'calendar';
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [error, setError] = useState('');
   const [result, setResult] = useState<WorkbenchResult | null>(initialResult === undefined ? null : { label: '최근 결과', value: initialResult, completedAt: Date.now() });
@@ -539,10 +541,11 @@ export function PluginWorkbench({ plugin, client, initialResult, onClose, onResu
       </header>
       {!plugin.enabled && <div className="dependency-warning">플러그인이 꺼져 있습니다. 목록에서 켠 뒤 작업을 실행하세요.</div>}
       {progress && <div className="plugin-workbench-progress" role="progressbar" aria-label={`${plugin.name} ${progressLabel(progress.phase)}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent}><div><b>{progressLabel(progress.phase)}</b><span>{progress.detail ?? `${progress.percent}%`}</span></div><em>{progress.percent}%</em><i style={{ width: `${progress.percent}%` }} /></div>}
-      <div className="plugin-workbench-layout">
+      <div className={`plugin-workbench-layout${isCalendar ? ' plugin-workbench-calendar' : ''}`}>
         <div className="plugin-workbench-controls">
           {!plugin.enabled
             ? <div className="workbench-disabled"><span>○</span><div><b>작업 화면이 일시 중지되었습니다</b><p>아래 플러그인 목록에서 이 모듈을 켜면 입력과 실행 도구가 나타납니다.</p></div></div>
+            : isCalendar ? <SchedulesView embedded />
             : plugin.id === 'resource-archiver'
             ? <ResourceArchiverPanel client={client} plugin={plugin} onCompleted={completed} setGlobalError={setError} />
             : plugin.id === 'sslscan-auditor'
@@ -552,7 +555,7 @@ export function PluginWorkbench({ plugin, client, initialResult, onClose, onResu
               : <GenericPluginPanel plugin={plugin} client={client} onCompleted={completed} setGlobalError={setError} />}
           {error && <div className="gate-error workbench-error" role="alert">{error}</div>}
         </div>
-        <WorkbenchResultView result={result} />
+        {!isCalendar && <WorkbenchResultView result={result} />}
       </div>
     </section>
   );

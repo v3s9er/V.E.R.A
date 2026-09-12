@@ -41,6 +41,7 @@ import { ProviderRegistry } from '../ai/registry.js';
 import { MAX_PROVIDER_RECORDED_TOKENS, type ProviderUsage } from '../ai/provider.js';
 import { effectiveMode, ToolExecutor } from '../ai/executor.js';
 import { AgentLoop, ModelBudgetExceededError, type ModelBudgetProfile, type ModelProgressKind } from '../ai/loop.js';
+import { desktopCoordinator } from '../computer/desktop-session.js';
 import { ModelRouter } from '../ai/router.js';
 import { ConversationStore } from '../conversations.js';
 import { MemoryStore } from '../memory.js';
@@ -87,7 +88,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.19';
+export const VERSION = '0.4.29';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -1989,6 +1990,7 @@ export class AgentServer {
     closeTextWorkers();
     const { closeNativeWorkers } = await import('../ai/cli-native-pool.js');
     closeNativeWorkers();
+    desktopCoordinator.reset();
     const { closeDiscordSandboxes } = await import('./discord-sandbox.js');
     await closeDiscordSandboxes();
     this.revokeRemoteHandoff('agent stopped');

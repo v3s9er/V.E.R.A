@@ -80,6 +80,7 @@ class NativeWorker {
     streamed: Map<string, string>; applied: string[]; unsubscribe?: () => void;
     steering?: { id: number; inputs: string[]; timer: NodeJS.Timeout };
     steeringDisabled?: boolean; turnCompleted?: boolean; cancelling?: boolean; interruptTimer?: NodeJS.Timeout;
+    toolAbort: AbortController; toolCalls: Set<string>; pendingTool?: string; toolTimer?: NodeJS.Timeout;
   };
   closed = false;
   lastUsed = Date.now();
@@ -122,7 +123,9 @@ class NativeWorker {
   }
   private count(n: number) {
     this.bytes += n;
-    if (this.bytes > 8 * 1024 * 1024) this.close(new Error('네이티브 출력 안전 한도를 초과했습니다.'));
+    // Image tool results are echoed in completed events, not retained in memory.
+    // Keep the text-only ceiling while allowing a bounded visual workflow.
+    if (this.bytes > (this.active?.req.hostTools ? 64 : 8) * 1024 * 1024) this.close(new Error('네이티브 출력 안전 한도를 초과했습니다.'));
     return !this.closed;
   }
   private matches(req: NativeAgentRequest) {
@@ -146,13 +149,16 @@ class NativeWorker {
       heartbeat.unref();
       this.active = { req, resolve, reject, abort, timer, heartbeat, startedAt, status: '', text: '', turn: '',
         baseline: this.checkpoint?.usage ?? emptyUsage(), total: this.checkpoint?.usage ?? emptyUsage(),
-        usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Set(), streamed: new Map(), applied: [] };
+        usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Set(), streamed: new Map(), applied: [],
+        toolAbort: new AbortController(), toolCalls: new Set() };
       this.active.unsubscribe = req.steering?.subscribe(() => this.steer());
       req.signal?.addEventListener('abort', abort, { once: true });
       this.status(this.checkpoint ? '기존 대화 세션 연결 중' : '새 대화 세션 연결 중');
       try {
         if (this.ready) this.openThread();
-        else this.send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'mrrobot_native', version: '1.0.0' } } });
+        else this.send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'mrrobot_native', version: '1.0.0' },
+          ...(req.hostTools ? { capabilities: { experimentalApi: true } } : {}),
+        } });
       } catch { this.close(new Error('네이티브 세션 저장소를 사용할 수 없습니다.')); }
     });
   }
@@ -162,6 +168,7 @@ class NativeWorker {
     const a = this.active;
     if (!a || a.cancelling) return;
     a.cancelling = true;
+    a.toolAbort.abort(new Error('네이티브 작업이 중지되었습니다.'));
     if (!a.turn) { this.close(new Error('네이티브 작업이 중지되었습니다.')); return; }
     this.status('중지 요청 전달 · 실행 종료 확인 중');
     this.send({ id: ++this.sequence, method: 'turn/interrupt', params: { threadId: this.thread, turnId: a.turn } });
@@ -183,7 +190,7 @@ class NativeWorker {
   }
   private finish() {
     const a = this.active;
-    if (!a?.turnCompleted || a.steering || a.cancelling) return;
+    if (!a?.turnCompleted || a.steering || a.cancelling || a.pendingTool) return;
     const s = a.req.session!;
     this.checkpoint = { thread: this.thread, history: fingerprints([...s.history, { role: 'user', content: s.input },
       ...a.applied.map(content => ({ role: 'user' as const, content })), { role: 'assistant', content: a.text }]), context: digest(s.context), usage: a.total, at: Date.now() };
@@ -203,6 +210,9 @@ class NativeWorker {
       ...(this.checkpoint ? { threadId: this.checkpoint.thread } : { ephemeral: false }),
       model: this.model, allowProviderModelFallback: false, cwd: req.cwd, approvalPolicy: 'never', sandbox,
       baseInstructions: req.session!.instructions,
+      ...(!this.checkpoint && req.hostTools ? { dynamicTools: req.hostTools.tools.map(tool => ({
+        type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters,
+      })) } : {}),
     } });
   }
   private startTurn() {
@@ -260,6 +270,10 @@ class NativeWorker {
       this.thread = id; this.startTurn(); return;
     }
     if (m.id !== undefined && m.method) {
+      if (m.method === 'item/tool/call' && active?.req.hostTools) {
+        if (this.events.deferToolRequest(m)) return;
+        this.hostTool(m); return;
+      }
       this.send({ id: m.id, error: { code: -32601, message: 'Interactive requests require host approval; not supported on this transport.' } });
       return this.close(new Error('추가 권한이 필요한 네이티브 요청을 차단했습니다.'));
     }
@@ -309,7 +323,7 @@ class NativeWorker {
           if (item.text.length > streamed.length) a.req.onText?.(item.text.slice(streamed.length));
         }
       } else if (m.method === 'item/started') {
-        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', mcpToolCall: '연결 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
+        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', mcpToolCall: '연결 도구 실행 중', dynamicToolCall: 'PC 화면 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
         if (labels[item?.type]) this.status(labels[item.type]);
       }
     } else if (m.method === 'turn/completed') {
@@ -318,9 +332,36 @@ class NativeWorker {
       this.finish();
     }
   }
+  private hostTool(m: any) {
+    const a = this.active, p = m.params;
+    if (!a?.req.hostTools || a.req.permissionMode !== 'full' || !a.turn || a.turnCompleted
+      || p?.threadId !== this.thread || p?.turnId !== a.turn || p.namespace != null
+      || typeof p.callId !== 'string' || p.callId.length > 200 || !p.callId
+      || !a.req.hostTools.tools.some(tool => tool.name === p.tool)
+      || a.pendingTool || a.toolCalls.has(p.callId) || a.toolCalls.size >= 512
+      || Buffer.byteLength(JSON.stringify(p.arguments ?? {})) > 32_768) {
+      this.send({ id: m.id, error: { code: -32602, message: 'Host desktop capability correlation failed.' } });
+      this.close(new Error('PC 화면 도구의 대화·권한·중복 요청 검증에 실패했습니다.')); return;
+    }
+    a.toolCalls.add(p.callId); a.pendingTool = p.callId;
+    this.status(p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
+    const timer = setTimeout(() => this.close(new Error('PC 화면 도구가 응답하지 않아 중단했습니다.')), 25_000);
+    a.toolTimer = timer;
+    void Promise.resolve().then(() => a.req.hostTools!.execute(p.tool, p.arguments, a.toolAbort.signal)).then(result => {
+      if (this.active === a && !a.cancelling && !this.closed) this.send({ id: m.id, result });
+    }, error => {
+      if (this.active === a && !a.cancelling && !this.closed) this.send({ id: m.id, result: { success: false,
+        contentItems: [{ type: 'inputText', text: JSON.stringify({ error: error instanceof Error ? error.message.slice(0, 500) : '화면 작업 실패', retry: 'Observe current state before retrying; never repeat an uncertain action blindly.' }) }],
+      } });
+    }).finally(() => {
+      clearTimeout(timer);
+      if (this.active === a) { a.pendingTool = undefined; a.toolTimer = undefined; this.finish(); }
+    });
+  }
   private release() { const a = this.active; if (a) {
     clearTimeout(a.timer); clearInterval(a.heartbeat); clearTimeout(a.interruptTimer); clearTimeout(a.steering?.timer);
     a.unsubscribe?.(); a.req.signal?.removeEventListener('abort', a.abort);
+    clearTimeout(a.toolTimer); a.toolAbort.abort(); a.req.hostTools?.dispose();
   } }
   close(error?: Error) {
     if (this.closed) return;
@@ -339,9 +380,10 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   const epoch = runtimeEpoch;
   const s = options.req.session;
   if (!s || options.req.permissionMode === 'ask') throw new Error('검증된 네이티브 세션과 실행 승인이 필요합니다.');
+  if (options.req.hostTools && options.req.permissionMode !== 'full') throw new Error('PC 화면 도구는 전체 접근 권한에서만 사용할 수 있습니다.');
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
-    options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions]);
+    options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null]);
   const release = await scheduler.acquire(key, options.req.signal, position => options.req.onStatus?.(`네이티브 실행 대기 · ${position}번째 · 앞선 작업 완료 시 자동 시작`));
   try { while (true) {
     await waitForCliRetirements(options.env, options.req.signal);

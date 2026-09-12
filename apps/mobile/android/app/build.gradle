@@ -111,8 +111,8 @@ android {
         applicationId 'com.mrrobot.mobile'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 27
-        versionName "0.4.22"
+        versionCode 28
+        versionName "0.4.29"
         testInstrumentationRunner 'com.mrrobot.mobile.KeyboardAudit'
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""

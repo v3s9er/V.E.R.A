@@ -528,8 +528,12 @@ export function SchedulesScreen({
   return (
     <View style={styles.root}>
       <ScrollView
+        style={styles.scroll}
         contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, 20) + 12 }]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        nestedScrollEnabled
+        removeClippedSubviews={false}
       >
         <View style={styles.calendarCard}>
           <View style={styles.calendarHead}>
@@ -562,7 +566,9 @@ export function SchedulesScreen({
             ))}
           </View>
           <View style={styles.grid}>
-            {grid.map((date, index) => {
+            {Array.from({ length: Math.ceil(grid.length / 7) }, (_, week) => <View key={week} style={styles.calendarWeek}>
+            {grid.slice(week * 7, week * 7 + 7).map((date, column) => {
+              const index = week * 7 + column;
               if (!date) return <View key={`blank-${index}`} style={styles.dayCell} accessibilityElementsHidden />;
               const day = byDate.get(date);
               const weekday = index % 7;
@@ -606,6 +612,7 @@ export function SchedulesScreen({
                 </TouchableOpacity>
               );
             })}
+            </View>)}
           </View>
           {!privateWorkAuthenticated ? (
             <Text style={styles.permissionNote}>PC 인증 연결이 복구되면 근무 일정을 다시 불러옵니다.</Text>
@@ -947,9 +954,10 @@ function Sheet({ children, insets }: { children: ReactNode; insets: { bottom: nu
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  content: { padding: 14, gap: 12 },
-  calendarCard: { backgroundColor: colors.card, borderWidth: 1, borderColor: 'rgba(124,92,255,.45)', borderRadius: radius.md, padding: 14, gap: 9 },
+  root: { flex: 1, minHeight: 0, minWidth: 0 },
+  scroll: { flex: 1, minHeight: 0 },
+  content: { flexGrow: 1, padding: 14, gap: 12 },
+  calendarCard: { flexShrink: 0, backgroundColor: colors.card, borderWidth: 1, borderColor: 'rgba(124,92,255,.45)', borderRadius: radius.md, padding: 12, gap: 9 },
   calendarHead: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   eyebrow: { color: colors.accent2, fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
   title: { color: colors.text, fontSize: 19, fontWeight: '800', marginTop: 2 },
@@ -965,8 +973,9 @@ const styles = StyleSheet.create({
   weekName: { width: '14.2857%', color: colors.dim, textAlign: 'center', fontSize: 11, fontWeight: '700' },
   sun: { color: '#f87171' },
   sat: { color: '#79b8ff' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap' },
-  dayCell: { width: '14.2857%', minHeight: 62, alignItems: 'center', paddingTop: 5, borderRadius: radius.sm },
+  grid: { alignSelf: 'stretch' },
+  calendarWeek: { flexDirection: 'row', flexShrink: 0 },
+  dayCell: { flex: 1, minWidth: 0, minHeight: 64, alignItems: 'center', paddingVertical: 5, borderRadius: radius.sm },
   selectedCell: { borderWidth: 1, borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,.26)' },
   number: { color: colors.text, fontSize: 12, fontWeight: '700' },
   todayNumber: { color: '#fff', backgroundColor: colors.accent, borderRadius: 12, overflow: 'hidden', paddingHorizontal: 5, paddingVertical: 1 },

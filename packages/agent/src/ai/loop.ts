@@ -25,6 +25,7 @@ import {
 } from './provider.js';
 import { taskComplexityScore, type ModelRouter } from './router.js';
 import type { ContextBroker } from '../context-broker.js';
+import { desktopCoordinator, DESKTOP_GUIDANCE } from '../computer/desktop-session.js';
 
 export const SYSTEM_PROMPT = `You are Mr.Robot, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
 For conversation, explanations, summaries and status questions, answer directly from available context. Use tools only when needed for the current request. Do not restart completed tasks or inspect files merely because a prior turn mentioned them.
@@ -630,7 +631,7 @@ export class AgentLoop {
     // unless the user explicitly selected full machine access.
     const requestedNativePermission = options.permissionMode ?? 'ask';
     const nativeAllowedByPolicy = provider.type === 'codex-cli' || requestedNativePermission === 'full';
-    if (!options.isolation && !semanticDesktop && executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
+    if (!options.isolation && (!semanticDesktop || provider.type === 'codex-cli') && executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
       const nativeProvider = provider;
       let nativePermission = options.permissionMode ?? 'ask';
       if (nativePermission === 'ask') {
@@ -673,12 +674,33 @@ export class AgentLoop {
         cb.onStatus?.(`네이티브 에이전트 실행 · ${actualProvider.label} · ${options.workspacePath}`);
         let streamed = '';
         const appliedSteering: Turn[] = [];
-        const result = await budgetedNativeAgent(actualProvider, {
+        const desktopEnabled = process.platform === 'win32' && actualProvider.type === 'codex-cli'
+          && nativePermission === 'full' && !!options.cacheKey && !!options.nativeSessionDirectory;
+        const hostTools = desktopEnabled ? desktopCoordinator.create(() => {
+          runSignal.throwIfAborted();
+          cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
+          this.executor.assertDesktopAuthority(nativePermission, options.trustedPermissionOverride);
+        }) : undefined;
+        if (hostTools) {
+          const execute = hostTools.execute;
+          hostTools.execute = async (name, input, signal) => {
+            // Do not expose entered text or screenshot data in progress logs.
+            const summary = { action: name === 'desktop_act' ? String((input as any)?.action ?? '') : name === 'desktop_open_browser' ? 'open_browser' : 'observe' };
+            cb.onTool?.({ name, input: summary, status: 'start' });
+            try {
+              const result = await execute(name, input, signal);
+              cb.onTool?.({ name, input: summary, status: 'done' }); cb.noteModelProgress?.('tool');
+              return result;
+            } catch (error) { cb.onTool?.({ name, input: summary, status: 'error' }); throw error; }
+          };
+        }
+        let result: ProviderResult;
+        try { result = await budgetedNativeAgent(actualProvider, {
           prompt: identifiedSystem(prompt, actualProvider),
           ...(options.cacheKey && options.nativeSessionDirectory ? { session: {
             key: options.cacheKey, directory: options.nativeSessionDirectory,
             history: sessionHistory, input, context: retainedContext,
-            instructions: identifiedSystem(NATIVE_AGENT_PROMPT, actualProvider),
+            instructions: identifiedSystem(NATIVE_AGENT_PROMPT + (desktopEnabled ? DESKTOP_GUIDANCE : ''), actualProvider),
           } } : {}),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
@@ -688,7 +710,8 @@ export class AgentLoop {
           onText: text => { streamed += text; cb.onText?.(text); },
           steering: cb.nativeSteering,
           onSteeringApplied: inputs => { appliedSteering.push(...inputs.map(content => ({ role: 'user' as const, content }))); },
-        });
+          hostTools,
+        }); } finally { hostTools?.dispose(); }
         sessionHistory = [...sessionHistory, { role: 'user', content: input }, ...appliedSteering, { role: 'assistant', content: result.text }];
         return { result, provider: actualProvider, effort: actualEffort, streamed };
       };

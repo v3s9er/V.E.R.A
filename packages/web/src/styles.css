@@ -425,6 +425,14 @@ fieldset.permission-fieldset:disabled { opacity: .72; }
   flex: 1;
 }
 
+/* Calendar cards must contribute their natural height to the outer scroll area.
+   Shrinking a tall flex child with overflow:hidden used to hide the month. */
+.schedules-view { min-height: 0; min-width: 0; overscroll-behavior-y: contain; }
+.schedules-view > *, .stack > .plugin-workbench { flex-shrink: 0; }
+.schedules-view-embedded { flex: none; overflow: visible; padding: 0; }
+.schedules-view-embedded > .automation-hero { display: none; }
+.schedules-view .work-calendar-panel { overflow: visible; }
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -2085,8 +2093,12 @@ body::before {
   .route-preview { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 480px) {
+  .schedules-view:not(.schedules-view-embedded) { padding: 6px 10px 20px; }
+  .schedules-view > .panel { padding: 12px 8px; }
   .month-nav h4 { min-width: 105px; font-size: 14px; }
   .work-calendar-day, .work-calendar-blank { min-height: 73px; }
+  .work-calendar-day { align-items: center; padding: 7px 2px; }
+  .work-status { max-width: 100%; padding: 3px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .work-holiday, .work-destination { display: none; }
   .work-override { top: 7px; right: 5px; }
 }

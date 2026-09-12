@@ -77,7 +77,7 @@ function fmtNext(ts: number | null): string {
   return `${rel} (${new Date(ts).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' })})`;
 }
 
-export function SchedulesView() {
+export function SchedulesView({ embedded = false }: { embedded?: boolean } = {}) {
   const { client } = useMrRobot();
   const canManageJobs = client.isAdmin;
   const [jobs, setJobs] = useState<ScheduledJobView[]>([]);
@@ -406,7 +406,7 @@ export function SchedulesView() {
   };
 
   return (
-    <div className="stack">
+    <div className={`stack schedules-view${embedded ? ' schedules-view-embedded' : ''}`}>
       <section className="automation-hero panel"><div><span className="eyebrow">LOCAL AUTOMATION</span><h2>일정과 에이전트 작업을 한곳에서</h2><p>로컬 캘린더는 토큰 없이 저장되고, 예약 작업은 정해진 시각에 선택한 PC에서 실행됩니다.</p></div><div className="automation-metrics"><span><b>{calendarEvents.length}</b> 일정</span><span><b>{enabledJobs}</b> 활성 작업</span><span><b>{nextJob ? fmtNext(nextJob.nextRun).split(' (')[0] : '없음'}</b> 다음 실행</span></div></section>
       {error && <div className="page-error"><span>!</span><div><b>작업을 완료하지 못했습니다.</b><small>{error}</small></div><button type="button" onClick={() => setError('')} aria-label="오류 닫기">×</button></div>}
       <Card className="panel work-calendar-panel">

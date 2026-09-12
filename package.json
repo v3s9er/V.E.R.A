@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.4.27",
+  "version": "0.4.29",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -37,6 +37,9 @@
     "test:discord-audio-installed": "tsx packages/agent/test/discord-audio-installed.test.ts",
     "test:codex-installed": "tsx packages/agent/test/cli-pool-installed.test.ts && tsx packages/agent/test/cli-broker-installed.test.ts && tsx packages/agent/test/cli-native-installed.test.ts",
     "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts && tsx --test packages/agent/test/native-orchestration.test.ts",
+    "test:desktop-native": "tsx --test packages/agent/test/desktop-runtime.test.ts packages/agent/test/native-desktop.test.ts packages/agent/test/desktop-browser.test.ts",
+    "test:calendar-ui": "node packages/web/test/calendar-layout.mjs",
+    "test:desktop-installed": "tsx packages/agent/test/native-desktop-installed.test.ts",
     "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts && tsx packages/web/test/model-catalog.test.ts",
     "test:agent-runtime": "tsx --test packages/agent/test/agent-runtime.test.ts packages/agent/test/projects.test.ts",
     "test:runtime-ui": "node packages/web/test/runtime-ui.mjs",

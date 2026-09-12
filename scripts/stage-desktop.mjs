@@ -54,6 +54,8 @@ for (const name of ['index.mjs', 'scripts/site_manager.py', 'scripts/build_worke
   copyFileSync(join(root, 'plugins', 'mr-robot', name), destination);
 }
 mkdirSync(join(stage, 'integrations', 'lid-display'), { recursive: true });
+mkdirSync(join(stage, 'integrations', 'computer-use'), { recursive: true });
+copyFileSync(join(root, 'integrations', 'computer-use', 'runtime.ps1'), join(stage, 'integrations', 'computer-use', 'runtime.ps1'));
 for (const name of ['bridge.ps1', 'LidDisplay.cs', 'README.md']) copyFileSync(join(root, 'integrations', 'lid-display', name), join(stage, 'integrations', 'lid-display', name));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });
 copyFileSync(join(root, 'integrations', 'discordbot', 'LICENSE'), join(stage, 'integrations', 'discordbot', 'LICENSE'));

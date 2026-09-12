@@ -31,6 +31,8 @@
 .plugin-workbench-progress em { color: #67e8f9; font-family: var(--mono); font-size: 9px; font-style: normal; }
 .plugin-workbench-progress i { position: absolute; bottom: 0; left: 0; height: 2px; max-width: 100%; background: linear-gradient(90deg, #22d3ee, #8b74ff); box-shadow: 0 0 10px rgba(34, 211, 238, .45); transition: width .18s ease; }
 .plugin-workbench-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(290px, .65fr); min-width: 0; }
+.plugin-workbench-layout.plugin-workbench-calendar { display: block; }
+.plugin-workbench-calendar > .plugin-workbench-controls { border-right: 0; }
 .plugin-workbench-controls { min-width: 0; padding: 20px; border-right: 1px solid var(--border); }
 .workbench-form, .workbench-generic { display: grid; min-width: 0; gap: 15px; }
 .workbench-disabled { min-height: 210px; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--text-faint); text-align: left; }
@@ -145,6 +147,7 @@
 }
 
 @media (max-width: 520px) {
+  .plugin-workbench-calendar > .plugin-workbench-controls { padding: 8px; }
   .workbench-mode-picker { grid-template-columns: 1fr; }
   .workbench-confirm { align-items: stretch; flex-direction: column; }
   .workbench-confirm > div:last-child { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

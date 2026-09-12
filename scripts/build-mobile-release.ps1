@@ -138,6 +138,8 @@ try {
 
 $apkPath = Join-Path $androidRoot 'app\build\outputs\apk\release\app-release.apk'
 if (-not (Test-Path -LiteralPath $apkPath)) { throw '릴리스 APK가 생성되지 않았습니다.' }
+& $node.Source (Join-Path $repoRoot 'scripts\verify-mobile-bundle.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'APK에 현재 체크아웃의 앱 코드가 포함되지 않았습니다. 게시하지 않습니다.' }
 $apksigner = Get-ChildItem -Path (Join-Path $androidSdk 'build-tools\*\apksigner.bat') -File |
   Sort-Object { [version]$_.Directory.Name } -Descending |
   Select-Object -First 1

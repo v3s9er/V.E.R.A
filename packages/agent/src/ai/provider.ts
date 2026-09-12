@@ -119,6 +119,8 @@ export interface NativeSteeringControl {
 }
 
 export interface NativeAgentRequest {
+  /** Host-only capability, never deserialized from remote requests. */
+  hostTools?: NativeHostTools;
   prompt: string;
   /** Host-only conversation identity and verified transcript, never a client CLI thread id. */
   session?: { key: string; directory: string; history: Turn[]; input: string; instructions: string; context: string };
@@ -130,6 +132,16 @@ export interface NativeAgentRequest {
   onText?: (text: string) => void;
   steering?: NativeSteeringControl;
   onSteeringApplied?: (inputs: readonly string[]) => void;
+}
+
+export interface NativeToolResult {
+  success: boolean;
+  contentItems: Array<{ type: 'inputText'; text: string } | { type: 'inputImage'; imageUrl: string }>;
+}
+export interface NativeHostTools {
+  tools: NeutralTool[];
+  execute(name: string, input: unknown, signal: AbortSignal): Promise<NativeToolResult>;
+  dispose(): void;
 }
 
 /** Host-owned capability executor. Never constructed from client/model JSON. */

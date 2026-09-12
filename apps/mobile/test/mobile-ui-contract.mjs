@@ -127,4 +127,12 @@ check('text-entry sheets use scrollable keyboard insets on iOS and native resize
   settings.includes('automaticallyAdjustKeyboardInsets={Platform.OS === \'ios\'}')
   && schedules.includes('automaticallyAdjustKeyboardInsets={Platform.OS === \'ios\'}'));
 
+check('calendar keeps complete week rows inside an unclipped bounded scroll area',
+  schedules.includes('removeClippedSubviews={false}')
+  && schedules.includes('scroll: { flex: 1, minHeight: 0 }')
+  && schedules.includes('calendarCard: { flexShrink: 0,')
+  && schedules.includes('grid.slice(week * 7, week * 7 + 7)')
+  && schedules.includes("calendarWeek: { flexDirection: 'row', flexShrink: 0 }")
+  && schedules.includes('dayCell: { flex: 1, minWidth: 0, minHeight: 64,'));
+
 console.log('MOBILE UI CONTRACT PASSED');

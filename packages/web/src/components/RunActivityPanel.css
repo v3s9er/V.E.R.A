@@ -6,6 +6,7 @@
 .run-panel.phase-approval .run-panel-indicator { color: #ffd27a; background: #ffd27a15; }
 .run-panel.phase-failed .run-panel-indicator { color: #ff9b9b; background: #ff9b9b15; }
 .run-panel.phase-completed .run-panel-indicator { color: #6fd6af; background: #6fd6af15; }
+.run-panel.has-errors .run-panel-indicator { color: #ffd27a; background: #ffd27a15; }
 .run-panel-heading { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .run-panel-heading b { font-size: 12px; font-weight: 600; }
 .run-panel-heading small { font-size: 11px; color: #9da8bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

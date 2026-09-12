@@ -46,6 +46,13 @@ function serializeToolResult(result: unknown): string {
 export class ToolExecutor {
   constructor(private readonly opts: ToolExecutorOptions) {}
 
+  /** Re-evaluated at EACH host desktop tool invocation, not a captured grant. */
+  assertDesktopAuthority(cap?: PermissionMode, trustedOverride = false): void {
+    const safety = this.opts.safety().mode;
+    const mode = effectiveMode(trustedOverride && safety !== 'read-only' ? 'full' : safety, cap);
+    if (mode !== 'full') throw new Error('현재 PC 접근 정책에서는 화면 제어를 허용하지 않습니다. 전체 접근 권한이 필요합니다.');
+  }
+
   async execute(
     name: string,
     input: unknown,
