@@ -69,3 +69,5 @@ The bootstrap intervals are descriptive and are not corrected for multiple compa
 Service load, regional/network changes, prompt caching, model revision and Windows antivirus/background activity can influence timings. Repeat useful changes with alternating runs on the same host. Do not select the fastest trial and discard slower runs. Microbenchmarks are deliberately much smaller than a real conversation and cannot be converted into a claimed multi-second inference gain.
 
 See [the measured September 23 report](performance-results-2026-09-23.md) for actual observations and their evidence boundaries.
+
+For external public tasks, use the separate [BFCL subset workflow](external-agent-benchmarks.md). It reports tool-call accuracy and held-out effort comparisons, not this suite's tiny instruction-following score or an official leaderboard score. Its strict custom grader, pinned upstream hashes and disjoint partitions are covered by `npm run test:benchmarks`.
