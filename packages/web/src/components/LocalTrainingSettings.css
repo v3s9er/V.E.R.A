@@ -1,0 +1,17 @@
+.local-training-settings { min-width: 0; }
+.local-training-settings summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.local-training-settings details > * + * { margin-top: 14px; }
+.training-filename, .training-export code { display: block; overflow-wrap: anywhere; word-break: break-word; }
+.training-counts { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text-secondary, #b1b6cc); }
+.training-counts b { color: var(--text-primary, #e9edf9); }
+.training-check { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; line-height: 1.6; }
+.training-check input { flex: 0 0 auto; margin-top: 4px; }
+.training-datasets { list-style: none; padding: 0; }
+.training-datasets li { display: flex; gap: 12px; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #ffffff14; }
+.training-datasets li > div { min-width: 0; overflow-wrap: anywhere; }
+.training-datasets span { display: block; font-size: 12px; color: #a4abc1; margin-top: 5px; }
+.training-datasets .btn { flex-shrink: 0; }
+.training-issues { padding-left: 20px; font-size: 13px; line-height: 1.6; }
+.training-export { border: 1px solid #ffffff20; border-radius: 12px; padding: 14px; font-size: 13px; line-height: 1.6; }
+.training-export code { margin-top: 8px; }
+@media (max-width: 500px) { .training-datasets li { align-items: stretch; flex-direction: column; } }

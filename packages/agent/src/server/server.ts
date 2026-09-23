@@ -46,6 +46,8 @@ import { ModelRouter } from '../ai/router.js';
 import { ConversationStore } from '../conversations.js';
 import { MemoryStore } from '../memory.js';
 import { TelemetryStore } from '../telemetry.js';
+import { LocalTuningDatasets } from '../tuning-datasets.js';
+import { activeTuningProfile, getTuningCapabilities, normalizeProviderTuningSettings, resolveModelTuning } from '../ai/model-tuning.js';
 import { PluginManager } from '../plugins/manager.js';
 import { createOrcaPlugin } from '../plugins/orca.js';
 import { createCalendarPlugin } from '../plugins/calendar.js';
@@ -2054,6 +2056,10 @@ export class AgentServer {
     const assertAdmin = (client: WsClient): void => {
       if (!client.state.auth?.isAdmin) throw new Error('관리자 권한이 필요한 설정입니다.');
     };
+    const assertLocalAdmin = (client: WsClient): void => {
+      assertAdmin(client);
+      if (!client.directLoopback || client.state.auth?.trustedDiscord) throw new Error('학습 데이터는 이 PC의 로컬 관리자 연결에서만 관리할 수 있습니다.');
+    };
     const assertDirectWrite = (client: WsClient): void => {
       if (effectiveMode(this.config.settings.safety.mode, client.state.auth?.permissionCap) !== 'full') {
         throw new Error('직접 PC 조작은 전체 허용 모드에서만 사용할 수 있습니다. 에이전트 대화를 사용하면 권한 정책에 따라 승인됩니다.');
@@ -2289,6 +2295,31 @@ export class AgentServer {
     h.set('providers.models', async (params, client) => { assertAdmin(client); return this.providersModels(str(p(params).id), p(params).refresh === true); });
     h.set('providers.catalog', async (params, client) => { assertAdmin(client); return this.registry.modelCatalog(str(p(params).id), p(params).refresh === true); });
     h.set('providers.updateModel', (params, client) => { assertAdmin(client); return this.providersUpdateModel(str(p(params).id), str(p(params).model)); });
+    h.set('providers.tuning.get', (params, client) => {
+      assertAdmin(client);
+      const id = str(p(params).id);
+      const provider = this.registry.get(id);
+      if (!provider) throw new Error('공급자를 찾을 수 없습니다.');
+      const settings = this.config.getProviderTuning(id);
+      let warning = this.config.getProviderTuningWarning(id);
+      try { resolveModelTuning(activeTuningProfile(settings), provider); }
+      catch (error) { warning = error instanceof Error ? error.message : '튜닝 설정을 확인하세요.'; }
+      return { settings, capabilities: getTuningCapabilities(provider), warning };
+    });
+    h.set('providers.tuning.set', (params, client) => {
+      assertAdmin(client);
+      const id = str(p(params).id);
+      const provider = this.registry.get(id);
+      if (!provider) throw new Error('공급자를 찾을 수 없습니다.');
+      const settings = normalizeProviderTuningSettings(p(params).settings);
+      resolveModelTuning(activeTuningProfile(settings), provider);
+      return this.config.saveProviderTuning(id, settings);
+    });
+    const datasets = new LocalTuningDatasets(this.config.dir);
+    h.set('tuning.datasets.validate', (params, client) => { assertLocalAdmin(client); return datasets.validate(p(params) as unknown as Parameters<LocalTuningDatasets['validate']>[0]); });
+    h.set('tuning.datasets.import', (params, client) => { assertLocalAdmin(client); return datasets.import(p(params) as unknown as Parameters<LocalTuningDatasets['import']>[0]); });
+    h.set('tuning.datasets.list', (_params, client) => { assertLocalAdmin(client); return datasets.list(); });
+    h.set('tuning.datasets.export', (params, client) => { assertLocalAdmin(client); return datasets.export(str(p(params).id)); });
 
     h.set('plugins.list', () => this.pluginsList());
     h.set('plugins.load', async (params, client) => { assertAdmin(client); return this.plugins.load(str(p(params).path)); });
@@ -2382,8 +2413,8 @@ export class AgentServer {
       this.bus.emit('memory.changed', this.memory.list());
       return { ok };
     });
-    h.set('telemetry.summary', () => this.telemetry.summary());
-    h.set('telemetry.list', (params) => this.telemetry.list(Math.min(500, Number(p(params).limit) || 100)));
+    h.set('telemetry.summary', (_params, client) => { assertAdmin(client); return this.telemetry.summary(); });
+    h.set('telemetry.list', (params, client) => { assertAdmin(client); return this.telemetry.list(Math.min(500, Number(p(params).limit) || 100)); });
 
     // ---- scheduler ----
     h.set('scheduler.list', (_params, client) => {
@@ -2494,6 +2525,20 @@ export class AgentServer {
       session.begin();
       const runStartedAt = Date.now();
       const progress = new RunProgress();
+      let observedToolCalls = 0;
+      const observedModelSources = new Map<string, { providerId: string; providerLabel?: string; model: string }>();
+      const noteModelSource = (source: { providerId: string; providerLabel?: string; model: string }): void => {
+        const key = JSON.stringify([source.providerId, source.model]);
+        observedModelSources.set(key, { ...observedModelSources.get(key), ...source });
+      };
+      const failedModelSource = (): { providerId?: string; providerLabel?: string; model?: string } => {
+        if (observedModelSources.size > 1) return { model: '복수 모델' };
+        return observedModelSources.values().next().value ?? {};
+      };
+      const recordTelemetry = (trace: Parameters<TelemetryStore['record']>[0]): void => {
+        try { this.telemetry.record(trace); }
+        catch (error) { this.logger.error(`failed to persist chat telemetry: ${error instanceof Error ? error.message : String(error)}`); }
+      };
       this.activeRuns.set(conversationId, {
         session,
         progress,
@@ -2515,21 +2560,25 @@ export class AgentServer {
       publishProgress();
       try {
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
+        const memoryContext = isolation ? '' : this.memory.context(text);
         const retained = [
           !isolation && workspace ? `현재 프로젝트: ${workspace.name}\n작업 폴더: ${workspace.path}\n${workspace.instructions ? `사용자가 저장한 프로젝트 지침 (접근 권한을 확대하지 않음):\n${workspace.instructions}` : ''}` : '',
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
-          !isolation && this.memory.context(text) ? `사용자가 저장한 장기 기억:\n${this.memory.context(text)}` : '',
+          memoryContext ? `사용자가 저장한 장기 기억:\n${memoryContext}` : '',
         ].filter(Boolean).join('\n\n');
         const result = await this.loop.run(
           this.conversations.turns(conversationId),
           text,
           {
             signal: session.signal(),
-            beforeModelCall: client.state.auth?.trustedDiscord
-              ? ({ model }) => assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), model)
-              : undefined,
+            beforeModelCall: (source) => {
+              // Record only after the existing Discord authorization succeeds.
+              // A denied selection is not evidence that this model ran.
+              if (client.state.auth?.trustedDiscord) assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), source.model);
+              noteModelSource(source);
+            },
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
-            onTool: (info) => { progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress(); },
+            onTool: (info) => { if (info.status === 'start') observedToolCalls++; progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress(); },
             onAgentUpdate: agent => { progress.agent(agent); publishProgress(); },
             onStatus: (status) => {
               const active = this.activeRuns.get(conversationId);
@@ -2542,7 +2591,10 @@ export class AgentServer {
             configureModelBudget: (profile) => admission.configureModelBudget(profile),
             noteModelProgress: (kind) => admission.noteModelProgress(kind),
             reserveModelCall: (kind, maximumTokens) => admission.reserveModelCall(kind, maximumTokens),
-            onModelUsage: (delta) => { chargedUsage = accumulateProviderUsage(chargedUsage, delta); },
+            onModelUsage: (delta, source) => {
+              chargedUsage = accumulateProviderUsage(chargedUsage, delta);
+              if (source) noteModelSource(source);
+            },
             confirm: async (req) => {
               progress.transition('approval'); publishProgress();
               try { return await session.askConfirm(sendRunEvent, { ...req, conversationId, conversationTitle: conversation.title }); }
@@ -2572,7 +2624,7 @@ export class AgentServer {
         usagePersisted = true;
         const providerConfig = result.route ? this.config.providers.find((provider) => provider.id === result.route?.providerId) : undefined;
         const estimatedCost = ((result.usage.promptTokens * (providerConfig?.inputCostPerMillion ?? 0)) + (result.usage.completionTokens * (providerConfig?.outputCostPerMillion ?? 0))) / 1_000_000;
-        this.telemetry.record({
+        recordTelemetry({
           id: randomUUID(), at: Date.now(), conversationId, providerId: result.route?.providerId, providerLabel: result.route?.providerLabel,
           model: result.route?.model, role: result.route?.role, effort: result.route?.effort,
           promptTokens: result.usage.promptTokens, completionTokens: result.usage.completionTokens,
@@ -2580,7 +2632,8 @@ export class AgentServer {
           cachedPromptTokens: result.usage.cachedPromptTokens,
           cacheWritePromptTokens: result.usage.cacheWritePromptTokens,
           reasoningTokens: result.usage.reasoningTokens,
-          toolCalls: result.turns.reduce((sum, turn) => sum + (turn.toolCalls?.length ?? 0), 0), latencyMs: Date.now() - runStartedAt,
+          toolCalls: observedToolCalls, latencyMs: Date.now() - runStartedAt,
+          firstTextMs: progress.firstTextLatencyMs(),
           estimatedCost, ok: true,
           agents: progress.snapshot().agents,
         });
@@ -2605,15 +2658,17 @@ export class AgentServer {
             this.logger.error(`failed to persist partial provider usage: ${usageError instanceof Error ? usageError.message : String(usageError)}`);
           }
         }
-        this.telemetry.record({
+        recordTelemetry({
           id: randomUUID(), at: Date.now(), conversationId,
+          ...failedModelSource(),
           promptTokens: chargedUsage?.promptTokens ?? 0,
           completionTokens: chargedUsage?.completionTokens ?? 0,
           accountedTokens: chargedUsage?.accountedTokens,
           cachedPromptTokens: chargedUsage?.cachedPromptTokens,
           cacheWritePromptTokens: chargedUsage?.cacheWritePromptTokens,
           reasoningTokens: chargedUsage?.reasoningTokens,
-          toolCalls: 0, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
+          toolCalls: observedToolCalls, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
+          firstTextMs: progress.firstTextLatencyMs(), cancelled: session.signal()?.aborted === true,
           agents: progress.snapshot().agents,
           ok: false, error: message.slice(0, 500),
         });

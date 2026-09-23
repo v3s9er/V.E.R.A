@@ -55,6 +55,10 @@ for (const name of ['index.mjs', 'scripts/site_manager.py', 'scripts/build_worke
 }
 mkdirSync(join(stage, 'integrations', 'lid-display'), { recursive: true });
 mkdirSync(join(stage, 'integrations', 'computer-use'), { recursive: true });
+// Exact offline-training allowlist: never bundle datasets, weights or private state.
+mkdirSync(join(stage, 'integrations', 'local-training'), { recursive: true });
+copyFileSync(join(root, 'scripts', 'local-finetune.py'), join(stage, 'integrations', 'local-training', 'local-finetune.py'));
+copyFileSync(join(root, 'docs', 'local-finetuning.md'), join(stage, 'integrations', 'local-training', 'README.md'));
 copyFileSync(join(root, 'integrations', 'computer-use', 'runtime.ps1'), join(stage, 'integrations', 'computer-use', 'runtime.ps1'));
 for (const name of ['bridge.ps1', 'LidDisplay.cs', 'README.md']) copyFileSync(join(root, 'integrations', 'lid-display', name), join(stage, 'integrations', 'lid-display', name));
 mkdirSync(join(stage, 'integrations', 'discordbot'), { recursive: true });

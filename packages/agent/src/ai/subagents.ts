@@ -31,6 +31,8 @@ export interface SubagentManagerOptions {
   providerId: string;
   model: string;
   signal?: AbortSignal;
+  /** Host-owned tuning may reduce, never exceed the existing two-worker cap. */
+  maxParallel?: 1 | 2;
   /** Must honor cancellation; admission remains held until this promise settles. */
   execute(input: SubagentExecutionInput): Promise<{
     text: string;
@@ -253,7 +255,7 @@ export class SubagentManager {
     for (const listener of [...this.listeners]) listener();
   }
   private pump(): void {
-    while (!this.disposed && this.running.size < MAX_PARALLEL && this.pending.length) {
+    while (!this.disposed && this.running.size < (this.options.maxParallel === 1 ? 1 : MAX_PARALLEL) && this.pending.length) {
       const worker = this.pending.shift()!;
       if (worker.controller.signal.aborted) continue;
       const task = this.run(worker).finally(() => { this.running.delete(task); this.pump(); });

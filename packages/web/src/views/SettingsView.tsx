@@ -6,6 +6,7 @@ import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } fro
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
 import { DependencySetup } from '../components/DependencySetup';
 import { ToolPortalSettings } from '../components/ToolPortalSettings';
+import { ModelTuningSettings } from '../components/ModelTuningSettings';
 import { loadModelCatalog, modelCatalogSummary } from '../model-catalog';
 
 interface PairingInfo {
@@ -111,7 +112,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const { client } = useMrRobot();
   const canManage = client.isAdmin;
   const nativePortalAdmin = canManage && Boolean(window.mrRobotDesktop);
-  const [section, setSection] = useState<'models' | 'routing' | 'dependencies' | 'voice' | 'safety' | 'memory' | 'network' | 'portal' | 'pairing'>('models');
+  const [section, setSection] = useState<'models' | 'tuning' | 'routing' | 'dependencies' | 'voice' | 'safety' | 'memory' | 'network' | 'portal' | 'pairing'>('models');
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
@@ -227,7 +228,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         client.call('routing.get', {}) as Promise<RoutingSettings>,
         client.call('routing.presets.list', {}) as Promise<RoutingPreset[]>,
         client.call('memory.list', {}) as Promise<MemoryItem[]>,
-        client.call('telemetry.summary', {}) as Promise<TelemetrySummary>,
+        canManage ? client.call('telemetry.summary', {}) as Promise<TelemetrySummary> : Promise.resolve(null),
       ]);
       setProviders(provs);
       setModelDrafts((current) => Object.fromEntries(provs.map((provider) => [provider.id, current[provider.id] ?? provider.model])));
@@ -338,7 +339,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   }, [canManage, client, providers, section]);
 
   useEffect(() => {
-    if ((!canManage && (section === 'voice' || section === 'safety' || section === 'network' || section === 'pairing')) || (section === 'portal' && !nativePortalAdmin)) {
+    if ((!canManage && (section === 'tuning' || section === 'voice' || section === 'safety' || section === 'network' || section === 'pairing')) || (section === 'portal' && !nativePortalAdmin)) {
       setSection('models');
     }
   }, [canManage, nativePortalAdmin, section]);
@@ -835,6 +836,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   );
   const settingsSections = [
     { id: 'models', title: '모델 및 연결', adminOnly: false },
+    ...(canManage ? [{ id: 'tuning', title: '튜닝 · 성능', adminOnly: true } as const] : []),
     { id: 'routing', title: '모델 라우팅', adminOnly: false },
     { id: 'dependencies', title: '외부 도구', adminOnly: false },
     { id: 'voice', title: '음성 호출', adminOnly: true },
@@ -1004,6 +1006,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         </fieldset>
       </Card></div>
 
+      {canManage && section === 'tuning' && <ModelTuningSettings client={client} providers={providers} nativeDesktopAdmin={nativePortalAdmin} />}
       <div className={section === 'routing' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head">

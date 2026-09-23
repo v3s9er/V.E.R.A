@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ModelRole, ProviderAddInput, ProviderConfig, ProviderInfo, ProviderModelCatalog } from '@mr-robot/shared';
+import type { ModelRole, ModelTuningProfile, ProviderAddInput, ProviderConfig, ProviderInfo, ProviderModelCatalog } from '@mr-robot/shared';
 import { ConfigStore, defaultProviderBaseUrl } from '../config.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAICompatibleProvider } from './openai.js';
 import { CliProvider } from './cli.js';
 import type { AiProvider } from './provider.js';
+import { activeTuningProfile } from './model-tuning.js';
 
 function instantiate(c: ProviderConfig): AiProvider {
   switch (c.type) {
@@ -100,6 +101,10 @@ export class ProviderRegistry {
 
   get(id: string): AiProvider | undefined {
     return this.providers.get(id);
+  }
+
+  tuningProfile(providerId: string): ModelTuningProfile | undefined {
+    return activeTuningProfile(this.config.getProviderTuning(providerId));
   }
 
   getForModel(id: string, model?: string): AiProvider | undefined {

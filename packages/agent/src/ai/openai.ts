@@ -12,6 +12,7 @@ import {
 } from './provider.js';
 import { toOpenAiTools } from './tools.js';
 import { createProviderRequestDeadline, readErrorBody, readSse } from './sse.js';
+import { validateSamplingTemperature } from './model-tuning.js';
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '');
@@ -189,6 +190,7 @@ export class OpenAICompatibleProvider implements AiProvider {
   }
 
   async chat(req: ChatRequest): Promise<ProviderResult> {
+    validateSamplingTemperature(this, req.temperature, req.reasoningEffort);
     const deadline = createProviderRequestDeadline(req.signal);
     const boundedRequest: ChatRequest = { ...req, signal: deadline.signal };
     try {
@@ -288,6 +290,7 @@ export class OpenAICompatibleProvider implements AiProvider {
       stream: true,
       store: false,
       parallel_tool_calls: true,
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       ...(req.system ? { instructions: req.system } : {}),
       ...(req.maxTokens !== undefined ? { max_output_tokens: req.maxTokens } : {}),
       ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { reasoning: { effort: req.reasoningEffort } } : {}),

@@ -2,7 +2,8 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { homedir, hostname } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { randomInt, randomUUID } from 'node:crypto';
-import type { AppSettings, DeviceCapability, PermissionMode, ProviderConfig, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
+import type { AppSettings, DeviceCapability, PermissionMode, ProviderConfig, ProviderTuningSettings, RoutingPreset, RoutingPresetSettings, RoutingSettings, WorkspaceInfo } from '@mr-robot/shared';
+import { normalizeProviderTuningSettings } from './ai/model-tuning.js';
 import { hashToken } from './auth.js';
 import { SecretVault } from './secrets.js';
 import {
@@ -25,7 +26,7 @@ export interface PairingConfig {
 }
 
 export interface ConfigRecoveryDiagnostic {
-  code: 'config-corrupt-quarantined' | 'config-backup-recovered' | 'config-fresh-recovery' | 'provider-secret-unavailable' | 'pairing-secret-unavailable' | 'config-persistence-blocked';
+  code: 'config-corrupt-quarantined' | 'config-backup-recovered' | 'config-fresh-recovery' | 'provider-secret-unavailable' | 'pairing-secret-unavailable' | 'config-persistence-blocked' | 'tuning-profile-unavailable';
   message: string;
   at: number;
   path?: string;
@@ -52,6 +53,8 @@ export interface DeviceLinkConfig {
 export interface MrRobotConfigData {
   settings: AppSettings;
   providers: ProviderConfig[];
+  /** Local administrator inference profiles; never part of device work sync. */
+  modelTuning: Record<string, ProviderTuningSettings>;
   routing: RoutingSettings;
   routingPresets: RoutingPreset[];
   workspaces: WorkspaceInfo[];
@@ -678,6 +681,9 @@ export class ConfigStore {
   private persistedPairingSecret: string | undefined;
   private persistedPairingCiphertext: string | undefined;
   private readonly unavailableProviderSecrets = new Map<string, string>();
+  /** Invalid optional tuning must not roll the whole account config backward. */
+  private readonly unavailableTuning = new Map<string, unknown>();
+  private readonly tuningWarnings = new Map<string, string>();
   private recoveryDiagnostics: ConfigRecoveryDiagnostic[] = [];
   private writesBlocked = false;
   private toolPortalConfigurationTail: Promise<void> = Promise.resolve();
@@ -748,6 +754,27 @@ export class ConfigStore {
     });
     const pairingSecret = this.pairingSecret(parsed.pairing?.secret);
     const normalizedPairing = normalizePairing(parsed.pairing, pairingSecret);
+    this.unavailableTuning.clear();
+    this.tuningWarnings.clear();
+    this.recoveryDiagnostics = this.recoveryDiagnostics.filter(item => item.code !== 'tuning-profile-unavailable');
+    const storedTuning = parsed.modelTuning as unknown;
+    const tuningEnvelopeValid = storedTuning === undefined || Boolean(storedTuning && typeof storedTuning === 'object' && !Array.isArray(storedTuning));
+    if (!tuningEnvelopeValid) this.unavailableTuning.set('', storedTuning);
+    const modelTuning = Object.fromEntries(providers.flatMap(provider => {
+      const value = tuningEnvelopeValid && storedTuning && Object.prototype.hasOwnProperty.call(storedTuning, provider.id)
+        ? (storedTuning as Record<string, unknown>)[provider.id] : undefined;
+      if (tuningEnvelopeValid && value === undefined) return [];
+      try {
+        if (!tuningEnvelopeValid) throw new Error('invalid tuning envelope');
+        return [[provider.id, normalizeProviderTuningSettings(value)]];
+      } catch {
+        if (tuningEnvelopeValid) this.unavailableTuning.set(provider.id, value);
+        const message = '저장된 튜닝 설정이 손상되어 이 공급자의 튜닝만 비활성화했습니다. 원본 설정은 보존되며 프로필을 명시적으로 저장하면 교체됩니다.';
+        this.tuningWarnings.set(provider.id, message);
+        this.recordDiagnostic({ code: 'tuning-profile-unavailable', message, providerId: provider.id });
+        return [];
+      }
+    }));
     const data: MrRobotConfigData = {
       settings: {
         ...defaults,
@@ -762,6 +789,7 @@ export class ConfigStore {
         voice: { ...defaults.voice!, ...((rawSettings as Partial<AppSettings>).voice ?? {}) },
       },
       providers,
+      modelTuning,
       routing: { ...defaultRouting(), ...(parsed.routing ?? {}), roles: { ...(parsed.routing?.roles ?? {}) }, graph: parsed.routing?.graph ?? defaultRouting().graph },
       routingPresets: parsed.routingPresets ?? [],
       workspaces: parsed.workspaces ?? [],
@@ -793,6 +821,7 @@ export class ConfigStore {
     return {
       settings: defaultSettings(),
       providers: [],
+      modelTuning: {},
       routing: defaultRouting(),
       routingPresets: [],
       workspaces: [],
@@ -947,11 +976,16 @@ export class ConfigStore {
     }
   }
 
-  private save(data: MrRobotConfigData = this.data): void {
+  private save(data: MrRobotConfigData = this.data, replacingTuningProvider?: string): void {
     if (this.writesBlocked) throw new Error('설정 복구 원본을 보존하기 위해 저장이 차단되었습니다.');
     mkdirSync(this.dir, { recursive: true });
     const persisted = {
       ...data,
+      modelTuning: this.unavailableTuning.has('') && !replacingTuningProvider
+        ? this.unavailableTuning.get('')
+        : Object.fromEntries([...Object.entries(data.modelTuning), ...[...this.unavailableTuning.entries()].filter(([id]) => (
+          id !== '' && id !== replacingTuningProvider && data.providers.some(provider => provider.id === id)
+        ))]),
       // The administrator secret is stored in pairing-secret.dpapi. PINs are
       // process-local and deliberately absent from both config generations.
       pairing: { createdAt: data.pairing.createdAt },
@@ -1018,6 +1052,29 @@ export class ConfigStore {
 
   get providers(): ProviderConfig[] {
     return this.data.providers;
+  }
+
+  getProviderTuning(providerId: string): ProviderTuningSettings {
+    return clone(Object.prototype.hasOwnProperty.call(this.data.modelTuning, providerId) ? this.data.modelTuning[providerId] : { profiles: [] });
+  }
+
+  getProviderTuningWarning(providerId: string): string | undefined {
+    return this.tuningWarnings.get(providerId);
+  }
+
+  saveProviderTuning(providerId: string, value: unknown): ProviderTuningSettings {
+    if (!this.data.providers.some(provider => provider.id === providerId)) throw new Error('공급자를 찾을 수 없습니다.');
+    const normalized = normalizeProviderTuningSettings(value);
+    const next = { ...this.data, modelTuning: { ...this.data.modelTuning, [providerId]: normalized } };
+    // Publish in-memory settings only after their atomic durable write succeeds.
+    this.save(next, providerId);
+    this.data = next;
+    const replacesEnvelope = this.unavailableTuning.delete('');
+    this.unavailableTuning.delete(providerId);
+    if (replacesEnvelope) this.tuningWarnings.clear();
+    else this.tuningWarnings.delete(providerId);
+    this.recoveryDiagnostics = this.recoveryDiagnostics.filter(item => item.code !== 'tuning-profile-unavailable' || (!replacesEnvelope && item.providerId !== providerId));
+    return clone(normalized);
   }
 
   get pairing(): PairingConfig {
@@ -1470,6 +1527,9 @@ export class ConfigStore {
     const before = this.data.providers.length;
     this.data.providers = this.data.providers.filter((p) => p.id !== id);
     if (this.data.providers.length !== before) {
+      delete this.data.modelTuning[id];
+      this.unavailableTuning.delete(id);
+      this.tuningWarnings.delete(id);
       this.clearUnavailableProviderSecret(id);
       this.save();
     }

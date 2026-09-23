@@ -66,6 +66,31 @@ test('independent parents share three global slots in FIFO order and queued canc
   assert.equal(active, 0);
 });
 
+test('a one-worker tuning profile serializes children and still drains cancelled work', async () => {
+  let active = 0, maximum = 0;
+  const started: string[] = [];
+  const pending: Array<ReturnType<typeof pendingWork>> = [];
+  const manager = new SubagentManager({ ...identity, maxParallel: 1, execute: async input => {
+    started.push(input.task); active++; maximum = Math.max(maximum, active);
+    const work = pendingWork(input); pending.push(work);
+    try { return await work.promise; } finally { active--; }
+  } });
+  try {
+    const first = manager.spawn({ task: 'first' });
+    manager.spawn({ task: 'second' }); manager.spawn({ task: 'third' });
+    await tick(); assert.deepEqual(started, ['first']);
+    manager.cancel(first.agentId); await tick();
+    assert.deepEqual(started, ['first', 'second']);
+    pending[1].resolve({ text: 'second result' }); await tick();
+    assert.deepEqual(started, ['first', 'second', 'third']);
+    pending[2].resolve({ text: 'third result' }); await manager.drained();
+    assert.equal(maximum, 1);
+    assert.equal(manager.list()[0].state, 'cancelled');
+    assert.equal(manager.list()[2].result, 'third result');
+  } finally { manager.dispose(); await manager.drained(); }
+  assert.equal(active, 0);
+});
+
 test('global admission rejects a 33rd queued invocation without leaking the remaining queue', async () => {
   let started = 0;
   const managers = Array.from({ length: 18 }, () => new SubagentManager({ ...identity, execute: input => {

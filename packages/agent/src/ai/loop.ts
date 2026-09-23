@@ -30,6 +30,7 @@ import type { ContextBroker } from '../context-broker.js';
 import { desktopCoordinator, DESKTOP_GUIDANCE } from '../computer/desktop-session.js';
 import { SubagentManager } from './subagents.js';
 import { COORDINATION_GUIDANCE, COORDINATION_TOOLS, executeCoordination, isCoordinationTool } from './coordination-tools.js';
+import { applyModelTuning, resolveModelTuning, tuningInstructions, type ResolvedModelTuning } from './model-tuning.js';
 
 export const SYSTEM_PROMPT = `You are Mr.Robot, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
 For conversation, explanations, summaries and status questions, answer directly from available context. Use tools only when needed for the current request. Do not restart completed tasks or inspect files merely because a prior turn mentioned them.
@@ -344,17 +345,25 @@ export class AgentLoop {
     let consecutiveNoProgressRounds = 0;
 
     let coordination: SubagentManager | undefined;
+    const tuningSnapshot = new Map<string, ResolvedModelTuning>();
+    const tuningFor = (actual: AiProvider): ResolvedModelTuning => {
+      // Scenario-specific routing retains its existing independent settings.
+      if (options.routing) return {};
+      const key = JSON.stringify([actual.id, actual.model]);
+      if (!tuningSnapshot.has(key)) tuningSnapshot.set(key, resolveModelTuning(this.registry.tuningProfile?.(actual.id), actual, options.reasoningEffort));
+      return tuningSnapshot.get(key)!;
+    };
     try {
     const budgetedChat = async (actualProvider: AiProvider, request: ChatRequest, isolatedWorker = false, onUsage?: (usage: ProviderUsage) => void): Promise<ProviderResult> => {
       if ((options.isolation || isolatedWorker) && actualProvider.type.endsWith('-cli') && !actualProvider.chatIsolated) throw new Error('이 구독 공급자는 권한 분리 실행을 지원하지 않습니다.');
       cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
-      const boundedRequest: ChatRequest = {
+      const boundedRequest: ChatRequest = applyModelTuning({
         ...request,
         maxTokens: Math.max(1, Math.min(
           MAX_PROVIDER_OUTPUT_TOKENS,
           Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
         )),
-      };
+      }, tuningFor(actualProvider));
       let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
       let settled = false;
       // One subscription turn can perform multiple internal model calls. Keep
@@ -434,7 +443,16 @@ export class AgentLoop {
       let settled = false;
       try {
         callLease = cb.reserveModelCall?.('native', Number.MAX_SAFE_INTEGER);
-        const result = await actualProvider.runAgent(request);
+        const tuning = tuningFor(actualProvider);
+        const preference = tuningInstructions(tuning);
+        const result = await actualProvider.runAgent({
+          ...request,
+          ...(tuning.reasoningEffort ? { reasoningEffort: tuning.reasoningEffort } : {}),
+          ...(preference ? {
+            prompt: `${request.prompt}\n\n${preference}`,
+            ...(request.session ? { session: { ...request.session, instructions: `${request.session.instructions}\n\n${preference}` } } : {}),
+          } : {}),
+        });
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;
         const reportedTokens = addRecordedTokens(result.usage.promptTokens, result.usage.completionTokens);
@@ -482,8 +500,19 @@ export class AgentLoop {
     }
 
     let retainedContext = options.context?.trim() ?? '';
+    const secondaryLimit = tuningFor(provider).contextTokenLimit;
+    if (secondaryLimit && Buffer.byteLength(retainedContext, 'utf8') > secondaryLimit) {
+      // Conservative byte bound: never pretend four Korean characters = a token.
+      // Dialogue and tool-call/result pairs are untouched. The omission is explicit.
+      const marker = '\n[보조 문맥 일부 생략 · 원문 대화는 유지됨]\n';
+      const available = Math.max(0, secondaryLimit - Buffer.byteLength(marker));
+      const bytes = Buffer.from(retainedContext);
+      const head = Math.ceil(available * .65);
+      retainedContext = bytes.subarray(0, head).toString('utf8').replace(/\uFFFD$/u, '') + marker
+        + bytes.subarray(bytes.length - (available - head)).toString('utf8').replace(/^\uFFFD+/u, '');
+    }
     let routeRole: ModelRole = decision?.role ?? 'general';
-    let routeEffort: ReasoningEffort = decision?.effort ?? options.reasoningEffort ?? 'auto';
+    let routeEffort: ReasoningEffort = tuningFor(provider).reasoningEffort ?? decision?.effort ?? options.reasoningEffort ?? 'auto';
     let routeReason = decision?.reason ?? '기본 모델';
 
     const scenario = options.routing;
@@ -540,13 +569,14 @@ export class AgentLoop {
       return fallback;
     };
     const effortFor = (actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): ReasoningEffort =>
-      actualProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto';
+      tuningFor(actualProvider).reasoningEffort ?? (actualProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto');
     const identifiedSystem = (base: string, actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): string =>
       `${base}\n\nYou are currently running through the provider "${actualProvider.label}" with model "${actualProvider.model}". When asked what model you are, answer with this exactly.`;
     // Native parents reserve their whole finite allowance. Do not lend that
     // reservation to concurrent children or silently switch a user's policy.
     // API parents settle each round first, so children use ordinary per-call leases.
     const canCoordinate = (actualProvider: AiProvider, native: boolean) => !options.isolation
+      && tuningFor(actualProvider).helperMode !== 'off'
       && executionMode === 'single' && !scenario && !!options.workspacePath
       && (!actualProvider.type.endsWith('-cli') || !!actualProvider.chatIsolated)
       && (!native || (actualProvider.type === 'codex-cli' && options.tokenPolicy === 'audit-only'
@@ -556,6 +586,7 @@ export class AgentLoop {
       const readTools = COMPUTER_TOOLS.filter(t => t.name === 'read_file' || t.name === 'list_files').map(neutralTool);
       coordination = new SubagentManager({
         providerId: actualProvider.id, model: actualProvider.model, signal: runSignal,
+        maxParallel: tuningFor(actualProvider).maxParallelHelpers,
         onUpdate: ({ result: _result, error: _error, ...snapshot }) => cb.onAgentUpdate?.(snapshot),
         execute: async (job) => {
           const workerTurns: Turn[] = [...job.history, { role: 'user', content: job.messages.length ? job.messages.join('\n\n') : job.task }];

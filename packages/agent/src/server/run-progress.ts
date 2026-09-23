@@ -12,6 +12,7 @@ export class RunProgress {
   private activity: ChatRunActivity[] = [];
   private partialText = '';
   private partialTextTruncated = false;
+  private firstTextAt?: number;
   private serial = 0;
   private agents = new Map<string, CoordinationAgent>();
   constructor(private now = Date.now) { this.startedAt = this.updatedAt = now(); }
@@ -24,13 +25,18 @@ export class RunProgress {
     }
   }
   text(delta: string) {
-    if (TERMINAL.has(this.phase) || this.phase === 'cancelling') return false;
+    if (!delta || TERMINAL.has(this.phase) || this.phase === 'cancelling') return false;
+    this.firstTextAt ??= this.now();
     const changed = this.phase !== 'answering';
     const combined = this.partialText + delta;
     this.partialTextTruncated ||= combined.length > 64000;
     this.partialText = combined.slice(-64000);
     this.transition('answering');
     return changed;
+  }
+  /** First visible answer text, not a status/thinking event. Missing is not zero. */
+  firstTextLatencyMs(): number | undefined {
+    return this.firstTextAt === undefined ? undefined : Math.max(0, this.firstTextAt - this.startedAt);
   }
   tool(info: { name: string; status: 'start' | 'done' | 'error'; callId?: string }) {
     if (TERMINAL.has(this.phase) || this.phase === 'cancelling') return;
