@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { compareExternalRuns, EXTERNAL_CATEGORIES, parseExternalRunReport, summarizeExternalRun, wilsonAccuracyInterval, type ExternalRunReport } from '../src/evaluation/external-scorecard.js';
 
 function report(variant: ExternalRunReport['variant'] = 'baseline', count = 40): ExternalRunReport {
-  const ids = Array.from({ length: count }, (_, index) => `task_${index}`);
+  const ids = Array.from({ length: count }, (_, index) => `${EXTERNAL_CATEGORIES[index % 4]}_${index}`);
   return { schemaVersion: 1, benchmark: 'BFCL-custom-subset-v1', revision: 'a'.repeat(40), datasetHashes: { 'simple.questions.jsonl': 'b'.repeat(64) }, sourceHashes: { 'src/grader.ts': 'c'.repeat(64) }, partitionHash: 'd'.repeat(64), provenanceValid: true, split: 'holdout', seed: 'test-seed', model: 'test-model', effort: variant === 'baseline' ? 'medium' : 'low', variant, cliVersion: 'codex-cli 1.2.3', experimentId: 'same-experiment', expectedSampleIds: ids,
     samples: ids.map((id, index) => ({ id, category: EXTERNAL_CATEGORIES[index % 4]!, completed: true, passed: index % 10 !== 0, failure: index % 10 === 0 ? 'wrong_tool' : null, durationMs: variant === 'baseline' ? 1000 : 850, firstTextMs: 100, promptTokens: 100, completionTokens: 20, cachedPromptTokens: 10, callCount: 1 })) };
 }
@@ -48,7 +48,12 @@ test('summary includes missing and failed tasks in accuracy instead of dropping 
   const summary = summarizeExternalRun(input);
   assert.equal(summary.expectedTasks, 40); assert.equal(summary.attemptedTasks, 39);
   assert.equal(summary.passedTasks, 34); assert.equal(summary.failedTasks, 6); assert.equal(summary.accuracy, .85);
-  assert.equal(summary.coverage.missing, 1); assert.equal(summary.missingTaskCategoriesUnknown, 1);
+  assert.equal(summary.coverage.missing, 1); assert.equal(summary.missingTaskCategoriesUnknown, 0);
+  const missingCategory = summary.perCategory.find(row => row.category === 'irrelevance')!;
+  assert.equal(missingCategory.expectedTasks, 10); assert.equal(missingCategory.observedTasks, 9);
+  assert.equal(missingCategory.missingTasks, 1); assert.equal(missingCategory.failedTasks, 1);
+  assert.equal(missingCategory.accuracy, .9);
+  assert.deepEqual(missingCategory.accuracyWilson95, wilsonAccuracyInterval(9, 10));
   assert.equal(summary.tokensPerSuccess, null);
   assert.equal(summary.officialLeaderboardScore, false);
   assert.equal('samples' in summary, false);
@@ -77,6 +82,7 @@ test('a matched improving holdout is only a review recommendation without requir
   assert.equal(result.eligible, true); assert.equal(result.recommendationOnly, true); assert.equal(result.automaticActivation, false);
   assert.equal(result.statisticalSuperiorityClaimed, false); assert.equal(result.generalAgentRankingClaimed, false);
   assert.equal(result.baseline.accuracy, .9); assert.equal(result.candidate.accuracy, .9);
+  assert.equal(result.gatePreset.id, 'bfcl-custom-holdout-review-v2');
   assert.ok(result.changes.medianCompletionReduction! >= .10);
 });
 
@@ -89,8 +95,64 @@ test('every provenance and workload mismatch blocks later re-comparison', () => 
   const drifted = report('candidate'); drifted.provenanceValid = false;
   assert.ok(compareExternalRuns(report(), drifted).mismatches.includes('invalid source provenance'));
   const category = report('candidate'); category.samples[0]!.category = 'irrelevance';
-  assert.ok(compareExternalRuns(report(), category).mismatches.includes('sample category identities'));
+  assert.throws(() => compareExternalRuns(report(), category), /category does not match id/);
   assert.equal(compareExternalRuns(report('candidate'), report()).eligible, false);
+});
+
+test('BFCL identities reject invented IDs and category spoofing, including matching pair spoofing', () => {
+  for (const id of ['task_0', 'simple_python_1x', 'multiple_-1', 'parallel_1234567', 'irrelevance_', 'other_1']) {
+    const invalid = report(); invalid.expectedSampleIds[0] = id; invalid.samples[0]!.id = id;
+    assert.throws(() => parseExternalRunReport(invalid), /sample id/);
+  }
+  const before = report(), after = report('candidate');
+  before.samples[0]!.category = after.samples[0]!.category = 'irrelevance';
+  assert.throws(() => compareExternalRuns(before, after), /category does not match id/);
+});
+
+test('forty total tasks cannot replace the minimum of ten expected tasks per category', () => {
+  const oneCategory = (variant: ExternalRunReport['variant']) => {
+    const input = report(variant);
+    input.expectedSampleIds = input.samples.map((sample, index) => {
+      sample.id = `simple_python_${index}`; sample.category = 'simple_python'; return sample.id;
+    });
+    return input;
+  };
+  const result = compareExternalRuns(oneCategory('baseline'), oneCategory('candidate'));
+  assert.equal(result.eligible, false);
+  for (const category of ['multiple', 'parallel', 'irrelevance']) assert.ok(result.reasons.includes(`At least 10 expected ${category} holdout tasks are required.`));
+  assert.equal(result.baseline.perCategory[1]!.accuracy, null);
+
+  const uneven = (variant: ExternalRunReport['variant']) => {
+    const input = report(variant);
+    input.samples[39]!.id = 'simple_python_999'; input.samples[39]!.category = 'simple_python';
+    input.expectedSampleIds[39] = 'simple_python_999';
+    return input;
+  };
+  const unevenResult = compareExternalRuns(uneven('baseline'), uneven('candidate'));
+  assert.equal(unevenResult.baseline.expectedTasks, 40); assert.equal(unevenResult.eligible, false);
+  assert.ok(unevenResult.reasons.includes('At least 10 expected irrelevance holdout tasks are required.'));
+  assert.equal(compareExternalRuns(report('baseline', 44), report('candidate', 44)).eligible, true);
+});
+
+test('balanced complete reports retain pre-hardening score values and measurement denominators', () => {
+  const input = report();
+  const summary = summarizeExternalRun(input);
+  assert.equal(summary.accuracy, 36 / 40);
+  assert.deepEqual(summary.accuracyWilson95, wilsonAccuracyInterval(36, 40));
+  assert.deepEqual(summary.completionMs, { samples: 40, p50: 1000, p95: 1000 });
+  assert.deepEqual(summary.firstTextMs, { samples: 40, p50: 100, p95: 100 });
+  assert.equal(summary.tokensPerSuccess, 4800 / 36);
+  assert.equal(summary.reportedTokens.promptTokens.total, 4000);
+  assert.equal(summary.reportedTokens.completionTokens.total, 800);
+  assert.equal(summary.reportedTokens.cachedPromptTokens.total, 400);
+  for (const category of summary.perCategory) {
+    const rows = input.samples.filter(row => row.category === category.category);
+    const successes = rows.filter(row => row.passed).length;
+    assert.equal(category.expectedTasks, rows.length); assert.equal(category.missingTasks, 0);
+    assert.equal(category.accuracy, successes / rows.length);
+    assert.equal(category.failedTasks, rows.length - successes);
+    assert.deepEqual(category.accuracyWilson95, wilsonAccuracyInterval(successes, rows.length));
+  }
 });
 
 test('development, too few tasks, missing tasks, and incomplete execution cannot promote', () => {

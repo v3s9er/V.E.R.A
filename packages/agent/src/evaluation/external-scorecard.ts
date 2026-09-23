@@ -44,6 +44,7 @@ const MAX_DURATION_MS = 86_400_000;
 const MAX_TOKENS = 1_000_000_000;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const SAMPLE_ID_PATTERN = /^(simple_python|multiple|parallel|irrelevance)_[0-9]{1,6}$/;
 
 function fail(label: string): never { throw new Error(`Invalid external benchmark ${label}`); }
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -58,6 +59,11 @@ function exactKeys(source: Record<string, unknown>, keys: string[], label: strin
 function text(value: unknown, label: string, max: number, pattern = ID_PATTERN): string {
   if (typeof value !== 'string' || value.length < 1 || value.length > max || !pattern.test(value)) return fail(label);
   return value;
+}
+/** Match the pinned BFCL loader's category-prefixed identity contract. */
+function categoryFromId(id: string): ExternalCategory {
+  const match = SAMPLE_ID_PATTERN.exec(id);
+  return match ? match[1] as ExternalCategory : fail('sample id category');
 }
 function number(value: unknown, label: string, max: number, integer = false): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || (integer && !Number.isInteger(value))) return fail(label);
@@ -90,7 +96,7 @@ export function parseExternalRunReport(value: unknown): ExternalRunReport {
   if (source.split !== 'dev' && source.split !== 'holdout') fail('split');
   if (source.variant !== 'baseline' && source.variant !== 'candidate') fail('variant');
   if (!Array.isArray(source.expectedSampleIds) || source.expectedSampleIds.length < 1 || source.expectedSampleIds.length > MAX_SAMPLES) fail('expected samples');
-  const expectedSampleIds = source.expectedSampleIds.map(id => text(id, 'expected sample id', 160));
+  const expectedSampleIds = source.expectedSampleIds.map(id => text(id, 'expected sample id', 160, SAMPLE_ID_PATTERN));
   const expected = new Set(expectedSampleIds);
   if (expected.size !== expectedSampleIds.length) fail('duplicate expected sample id');
   if (!Array.isArray(source.samples) || source.samples.length > MAX_SAMPLES) fail('samples');
@@ -98,10 +104,10 @@ export function parseExternalRunReport(value: unknown): ExternalRunReport {
   const samples = source.samples.map(raw => {
     const item = record(raw, 'sample');
     exactKeys(item, SAMPLE_KEYS, 'sample');
-    const id = text(item.id, 'sample id', 160);
+    const id = text(item.id, 'sample id', 160, SAMPLE_ID_PATTERN);
     if (seen.has(id) || !expected.has(id)) fail('duplicate or unexpected sample id');
     seen.add(id);
-    if (!(EXTERNAL_CATEGORIES as readonly unknown[]).includes(item.category)) fail('sample category');
+    if (item.category !== categoryFromId(id)) fail('sample category does not match id');
     const completed = boolean(item.completed, 'sample completed');
     const passed = boolean(item.passed, 'sample passed');
     const failure = item.failure === null ? null : text(item.failure, 'failure code', 80, /^[a-z][a-z0-9_-]*$/);
@@ -166,13 +172,15 @@ function summaryOf(report: ExternalRunReport) {
       ? (promptTokens.total! + completionTokens.total!) / passed : null,
     callCount: report.samples.reduce((sum, sample) => sum + sample.callCount, 0),
     perCategory: EXTERNAL_CATEGORIES.map(category => {
+      const expectedTasks = report.expectedSampleIds.filter(id => categoryFromId(id) === category).length;
       const rows = report.samples.filter(sample => sample.category === category);
       const successes = rows.filter(sample => sample.passed).length;
-      return { category, observedTasks: rows.length, completedTasks: rows.filter(sample => sample.completed).length, passedTasks: successes,
-        failedTasks: rows.length - successes, accuracy: rows.length ? successes / rows.length : null,
-        accuracyWilson95: wilsonAccuracyInterval(successes, rows.length), completionMs: distribution(rows.map(sample => sample.durationMs)) };
+      return { category, expectedTasks, observedTasks: rows.length, missingTasks: expectedTasks - rows.length,
+        completedTasks: rows.filter(sample => sample.completed).length, passedTasks: successes,
+        failedTasks: expectedTasks - successes, accuracy: expectedTasks ? successes / expectedTasks : null,
+        accuracyWilson95: wilsonAccuracyInterval(successes, expectedTasks), completionMs: distribution(rows.map(sample => sample.durationMs)) };
     }),
-    missingTaskCategoriesUnknown: expected - attempted,
+    missingTaskCategoriesUnknown: 0,
   };
 }
 
@@ -180,12 +188,12 @@ export function summarizeExternalRun(value: ExternalRunReport) {
   const report = parseExternalRunReport(value);
   return { benchmark: report.benchmark, split: report.split, model: report.model, effort: report.effort, variant: report.variant,
     provenanceValid: report.provenanceValid, officialLeaderboardScore: false as const, ...summaryOf(report),
-    interpretation: 'Custom BFCL subset and custom grader. Missing tasks count as failures overall; categories of missing tasks are unassigned. Wilson intervals describe task accuracy, not improvement significance or a general agent ranking.' };
+    interpretation: 'Custom BFCL subset and custom grader. Missing tasks count as failures overall and in their expected ID-derived category. Wilson intervals describe task accuracy, not improvement significance or a general agent ranking.' };
 }
 export type ExternalRunSummary = ReturnType<typeof summarizeExternalRun>;
 
 export const EXTERNAL_GATE_PRESET = Object.freeze({
-  id: 'bfcl-custom-holdout-review-v1', minHoldoutTasks: 40, requireAllCompleted: true,
+  id: 'bfcl-custom-holdout-review-v2', minHoldoutTasks: 40, minHoldoutTasksPerCategory: 10, requireAllCompleted: true,
   allowObservedCategoryAccuracyDrop: false, maxCompletionP95Ratio: 1.25, completionP95SlackMs: 100,
   requireCompleteUsage: true, maxTokensPerSuccessRatio: 1.10,
   minMedianLatencyImprovement: .10, minTokensPerSuccessImprovement: .15, minAccuracyImprovement: .05,
@@ -217,6 +225,7 @@ export function compareExternalRuns(baselineValue: ExternalRunReport, candidateV
   if (after.accuracy < before.accuracy) reasons.push('Observed overall accuracy declined.');
   for (const category of EXTERNAL_CATEGORIES) {
     const left = before.perCategory.find(row => row.category === category)!, right = after.perCategory.find(row => row.category === category)!;
+    if (left.expectedTasks < EXTERNAL_GATE_PRESET.minHoldoutTasksPerCategory || right.expectedTasks < EXTERNAL_GATE_PRESET.minHoldoutTasksPerCategory) reasons.push(`At least 10 expected ${category} holdout tasks are required.`);
     if (left.accuracy !== null && (right.accuracy === null || right.accuracy < left.accuracy)) reasons.push(`Observed ${category} accuracy declined.`);
   }
   if (before.completionMs.p95 === null || after.completionMs.p95 === null) reasons.push('Completion latency was not measured.');
