@@ -6,7 +6,9 @@ import type { ReasoningEffort } from '@mr-robot/shared';
 import type { BrokerAgentRequest } from '../packages/agent/src/ai/provider.js';
 import { pooledCodexText, closeTextWorkers } from '../packages/agent/src/ai/cli-text-pool.js';
 import { cliSubscriptionEnvironment, resolveCliInvocation } from '../packages/agent/src/ai/cli.js';
-import { discoverCodexVersion } from '../packages/agent/src/ai/cli-models.js';
+import { discoverCodexVersion, discoverCodexModels } from '../packages/agent/src/ai/cli-models.js';
+import { CliFailure } from '../packages/agent/src/ai/cli-failure.js';
+import { assertBenchmarkModelAvailable } from './benchmark-preflight.js';
 import { waitForCliRetirements } from '../packages/agent/src/ai/cli-process-retirement.js';
 import { parseBenchmarkTasks, parseBenchmarkAnswers, selectBenchmarkTasks, prepareBenchmarkTask, validateBenchmarkCall, gradeBenchmarkCalls } from '../packages/agent/src/evaluation/external-tool-benchmark.js';
 import { parseExternalRunReport, summarizeExternalRun, compareExternalRuns, type ExternalRunReport } from '../packages/agent/src/evaluation/external-scorecard.js';
@@ -55,7 +57,7 @@ if (options.mode === 'prepare') {
   for (const suffix of ['manifest', 'baseline', 'candidate', 'comparison']) if (existsSync(`${outputPrefix}.${suffix}.json`)) throw new Error('Evidence output already exists; refusing overwrite.');
   if (existsSync(`${outputPrefix}.progress.jsonl`)) throw new Error('Progress evidence already exists; refusing overwrite.');
   const timeoutMs = integer(options['timeout-ms'], 90_000, 10_000, 120_000);
-  const files = ['scripts/benchmark-bfcl.ts', 'scripts/benchmark-bfcl-data.ts', 'packages/agent/src/evaluation/external-tool-benchmark.ts',
+  const files = ['scripts/benchmark-bfcl.ts', 'scripts/benchmark-bfcl-data.ts', 'scripts/benchmark-preflight.ts', 'packages/agent/src/ai/cli-failure.ts', 'packages/agent/src/evaluation/external-tool-benchmark.ts',
     'packages/agent/src/evaluation/external-scorecard.ts', 'packages/agent/src/ai/cli-text-pool.ts', 'packages/agent/src/ai/cli-isolated.ts',
     'packages/agent/src/ai/cli-session-events.ts', 'packages/agent/src/ai/cli.ts', 'packages/agent/src/ai/provider.ts',
     'packages/agent/src/ai/cli-process-retirement.ts', 'packages/agent/src/ai/native-run-scheduler.ts',
@@ -71,6 +73,7 @@ if (options.mode === 'prepare') {
   // Grader references never enter the request. These tools RECORD selection/arguments only.
   const system = 'Use the registered tools to address the user request when their documented capabilities are relevant and all required information is available. Do not invent missing arguments. If no tool is suitable, respond without calling one. This is a simulated tool-selection evaluation: tools only record requested calls and do not perform real external actions. After requested calls are recorded, finish your response. No other tools or environment are available.';
   try {
+    assertBenchmarkModelAvailable(options.model, await discoverCodexModels({ ...cli, env }));
     cliVersion = await discoverCodexVersion({ ...cli, env }) ?? '';
     if (!cliVersion) throw new Error('Cannot verify installed CLI version.');
     writeFileSync(`${outputPrefix}.manifest.json`, JSON.stringify({ benchmark: 'BFCL-custom-subset-v1', revision: BFCL_REVISION, seed, split,
@@ -114,8 +117,8 @@ if (options.mode === 'prepare') {
             sample.promptTokens = result.usage.promptTokens; sample.completionTokens = result.usage.completionTokens;
             sample.cachedPromptTokens = result.usage.cachedPromptTokens ?? null;
           }
-        } catch {
-          sample.failure = controller.signal.aborted ? 'deadline_or_call_limit' : 'transport';
+        } catch (error) {
+          sample.failure = controller.signal.aborted ? 'deadline_or_call_limit' : error instanceof CliFailure ? error.code : 'transport';
           // Do not burn the remaining budget through failed authentication/transport.
           if (!controller.signal.aborted) stop = true;
         } finally {

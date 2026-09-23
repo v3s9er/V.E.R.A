@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { pooledCodexText, closeTextWorkers } from '../src/ai/cli-text-pool.js';
 import type { BrokerAgentRequest } from '../src/ai/provider.js';
+import { CliFailure } from '../src/ai/cli-failure.js';
 let toolCalls = 0;
 const base: BrokerAgentRequest = { tools: [{ name: 'public_search', description: 'fixture', parameters: { type: 'object' } }], turns: [],
   executeTool: async (_n, _v, signal) => { signal.throwIfAborted(); toolCalls++; return 'evidence'; } };
 const call = (mode: string, extra: Partial<BrokerAgentRequest> = {}) => pooledCodexText({ command: process.execPath, prefixArgs: [fileURLToPath(new URL('./fixtures/broker-app-server.mjs', import.meta.url))], env: process.env, model: 'fixture', providerId: 'fixture', req: { ...base, turns: [{ role: 'user', content: mode }], ...extra } });
 try {
+  for (const [mode, code] of [['model-unavailable', 'model_unavailable'], ['quota-unavailable', 'usage_limit']]) {
+    await assert.rejects(call(mode!), error => error instanceof CliFailure && error.code === code && !error.message.includes('private-value'));
+  }
   const texts: string[] = [];
   assert.equal((await call('normal', { onEvent: e => { if (e.type === 'text') texts.push(e.text); } })).text, 'finished');
   assert.deepEqual(texts, ['finished'], 'streamed final not duplicated');

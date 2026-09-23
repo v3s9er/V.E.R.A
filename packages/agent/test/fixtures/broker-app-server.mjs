@@ -14,6 +14,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (m.params.environments.length || m.params.outputSchema) throw Error('unexpected native env/schema');
     mode = m.params.input[0].text;
     send({ id: m.id, result: { turn: { id: turnId } } });
+    if (mode.includes('model-unavailable')) return send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: "The 'fixture' model is not supported with this account. private-value" } } } });
+    if (mode.includes('quota-unavailable')) return send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Usage limit exceeded: private-value' } } } });
     if (mode.includes('native')) return send({ method: 'item/started', params: { threadId, turnId, item: { type: 'commandExecution' } } });
     const p = { threadId, turnId, callId: 'call-1', namespace: null, tool: 'public_search', arguments: { query: 'fixture' } };
     if (mode.includes('other-thread')) p.threadId = 'other';

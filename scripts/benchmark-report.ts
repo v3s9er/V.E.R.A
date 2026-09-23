@@ -39,6 +39,7 @@ export function renderBenchmarkReport(baseline: ExternalRunReport, candidate: Ex
   const lines = [
     '# BFCL V4 공개 부분집합 · Mr.Robot 자체 채점', '',
     '공식 BFCL 리더보드 점수가 아니다. 도구 선택·인자를 기록한 제한된 실험이며 GUI·코딩·전체 에이전트 성능으로 환산하지 않는다.', '',
+    ...(left.completedTasks !== left.expectedTasks || right.completedTasks !== right.expectedTasks ? ['**실행 불완전: 아래 집계는 모델의 능력 점수가 아니다. 먼저 모델 접근·인증·실행 실패 원인을 확인해야 한다.**', ''] : []),
     '## 비교 요약', '',
     '| 지표 | 기준 | 후보 |', '| --- | ---: | ---: |',
     `| 모델 / 추론 | ${code(left.model)} / ${code(left.effort)} | ${code(right.model)} / ${code(right.effort)} |`,

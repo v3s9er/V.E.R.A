@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { CliSessionEvents } from './cli-session-events.js';
+import { classifyCliFailure } from './cli-failure.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { CODEX_BROKER_CONFIG, codexThreadConfig, codexTextArgs, isolatedPrompt, ISOLATED_OUTPUT_SCHEMA, parseIsolatedReply } from './cli-isolated.js';
@@ -98,7 +99,7 @@ export class TextWorker {
     this.send({ id: this.sequence, method: 'turn/start', params: { threadId: this.thread, environments: [], runtimeWorkspaceRoots: [], input: [{ type: 'text', text, text_elements: [] }], ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { effort: req.reasoningEffort } : {}), ...(!this.broker ? { outputSchema: ISOLATED_OUTPUT_SCHEMA } : {}) } });
   }
   private receive(m: any) {
-    if (m.error) return this.close(new Error('구독 요청이 거부되었습니다. CLI 로그인·모델 권한을 확인하세요.'));
+    if (m.error) return this.close(classifyCliFailure(m.error, 'request_rejected'));
     if (m.id === 1 && !m.method) {
       this.send({ method: 'initialized', params: {} });
       this.send({ id: 4, method: 'skills/list', params: { cwds: [this.cwd], forceReload: true } });
@@ -166,7 +167,7 @@ export class TextWorker {
         }
       }
     } else if (m.method === 'turn/completed') {
-      if (m.params?.turn?.status !== 'completed') return this.close(new Error('구독 모델 작업이 완료되지 않았습니다.'));
+      if (m.params?.turn?.status !== 'completed') return this.close(classifyCliFailure(m.params?.turn?.error));
       if (active.pending) return this.close(new Error('도구 실행 중 구독이 종료되었습니다.'));
       try {
         const result = this.broker ? { text: active.text, toolCalls: [], usage: active.usage } : parseIsolatedReply(active.text, active.req, active.usage);

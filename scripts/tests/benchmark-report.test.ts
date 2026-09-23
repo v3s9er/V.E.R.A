@@ -35,6 +35,7 @@ test('missing tasks and unknown usage are shown without converting them to succe
   assert.ok(output.includes('| 정답 1개당 토큰 | 112.82 | 미측정 |'));
   assert.ok(output.includes('| irrelevance | 10/10 (10) | 9/10 (9) | 100.0% | 90.0% |'));
   assert.ok(output.includes('범주별 분모는 예정 문항 수다'));
+  assert.ok(output.includes('실행 불완전: 아래 집계는 모델의 능력 점수가 아니다'));
 });
 test('strict parser prevents exporting injected raw responses or unknown fields', () => {
   const candidate = report('candidate'); (candidate.samples[0] as any).answer = 'SECRET_RESPONSE_DO_NOT_EXPORT';

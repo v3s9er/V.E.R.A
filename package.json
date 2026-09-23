@@ -55,7 +55,7 @@
     "benchmark:paired": "node --import tsx scripts/performance-paired-live.ts",
     "benchmark:compare": "node --import tsx scripts/performance-compare.ts",
     "benchmark:bfcl": "node --import tsx scripts/benchmark-bfcl.ts",
-    "test:benchmarks": "node --import tsx --test packages/agent/test/external-tool-benchmark.test.ts packages/agent/test/external-scorecard.test.ts scripts/tests/benchmark-bfcl-data.test.ts scripts/tests/benchmark-report.test.ts && tsc -p scripts/performance-tsconfig.json",
+    "test:benchmarks": "node --import tsx --test packages/agent/test/external-tool-benchmark.test.ts packages/agent/test/external-scorecard.test.ts packages/agent/test/cli-failure.test.ts scripts/tests/benchmark-bfcl-data.test.ts scripts/tests/benchmark-report.test.ts scripts/tests/benchmark-preflight.test.ts && tsc -p scripts/performance-tsconfig.json",
     "benchmark:report": "node --import tsx scripts/benchmark-report.ts"
   },
   "devDependencies": {
