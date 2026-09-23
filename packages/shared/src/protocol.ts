@@ -277,10 +277,20 @@ export interface ConversationSummary {
   compactedMessages: number;
 }
 
+export interface ConversationHistoryPage {
+  hasMore: boolean;
+  nextCursor?: string;
+  archivedTurns: number;
+  missingMessages: number;
+  unavailable?: boolean;
+  displayTruncated?: boolean;
+}
+
 export interface ConversationDetail extends ConversationSummary {
   messages: ChatMessage[];
   summary?: string;
   usage: ChatUsage;
+  history?: ConversationHistoryPage;
 }
 
 export interface ConversationCreateInput {
@@ -392,6 +402,7 @@ export interface ChatRunState {
   activity?: ChatRunActivity[];
   partialText?: string;
   partialTextTruncated?: boolean;
+  agents?: import('./coordination.js').CoordinationAgent[];
 }
 
 export type ChatRunPhase = 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';

@@ -862,7 +862,7 @@ export class AgentServer {
     // second half from leaving a partially-applied cross-PC sync.
     this.conversations.validateSnapshot(snapshot.conversations);
     this.config.validateRoutingPresets(snapshot.routingPresets);
-    const previousConversations = this.conversations.exportSnapshot();
+    const previousConversations = this.conversations.exportSnapshot(true);
     const previousPresets = this.config.exportUserRoutingPresets();
     try {
       const routingPresets = this.config.mergeRoutingPresets(snapshot.routingPresets);
@@ -2328,7 +2328,11 @@ export class AgentServer {
       return created;
     });
     h.set('conversations.get', (params) => {
-      const item = this.conversations.get(str(p(params).id));
+      const body = p(params);
+      const item = this.conversations.get(str(body.id), {
+        before: typeof body.before === 'string' ? body.before : undefined,
+        limit: typeof body.limit === 'number' ? body.limit : undefined,
+      });
       if (!item) throw new Error('conversation not found');
       return item;
     });
@@ -2526,6 +2530,7 @@ export class AgentServer {
               : undefined,
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
             onTool: (info) => { progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress(); },
+            onAgentUpdate: agent => { progress.agent(agent); publishProgress(); },
             onStatus: (status) => {
               const active = this.activeRuns.get(conversationId);
               if (active) active.status = status;
@@ -2563,7 +2568,7 @@ export class AgentServer {
         session.signal()?.throwIfAborted();
         chargedUsage ??= result.usage;
         session.turns = result.turns;
-        const updated = this.conversations.appendResult(conversationId, result.turns, result.usage);
+        const updated = this.conversations.appendResult(conversationId, result.turns, result.usage, { operationId: progress.runId });
         usagePersisted = true;
         const providerConfig = result.route ? this.config.providers.find((provider) => provider.id === result.route?.providerId) : undefined;
         const estimatedCost = ((result.usage.promptTokens * (providerConfig?.inputCostPerMillion ?? 0)) + (result.usage.completionTokens * (providerConfig?.outputCostPerMillion ?? 0))) / 1_000_000;
@@ -2577,6 +2582,7 @@ export class AgentServer {
           reasoningTokens: result.usage.reasoningTokens,
           toolCalls: result.turns.reduce((sum, turn) => sum + (turn.toolCalls?.length ?? 0), 0), latencyMs: Date.now() - runStartedAt,
           estimatedCost, ok: true,
+          agents: progress.snapshot().agents,
         });
         this.bus.emit('conversations.changed', this.conversations.list());
         progress.transition('completed'); publishProgress();
@@ -2608,6 +2614,7 @@ export class AgentServer {
           cacheWritePromptTokens: chargedUsage?.cacheWritePromptTokens,
           reasoningTokens: chargedUsage?.reasoningTokens,
           toolCalls: 0, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
+          agents: progress.snapshot().agents,
           ok: false, error: message.slice(0, 500),
         });
         progress.transition(session.signal()?.aborted ? 'cancelled' : 'failed'); publishProgress();

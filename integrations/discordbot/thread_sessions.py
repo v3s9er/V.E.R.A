@@ -497,16 +497,31 @@ class ThreadManager:
             try:
                 thread = await self.bridge.client.fetch_channel(int(thread_id))
             except discord.NotFound:
-                await self.bridge.request(target, 'thread.forget')
-                await interaction.followup.send('Discord에서 이미 삭제된 스레드를 목록에서 정리했습니다. PC 대화 기록은 남아 있습니다.', ephemeral=True)
+                # A failed lookup is not consent to erase the ticket-to-history
+                # mapping. Keep it recoverable even if the Discord thread is gone.
+                await interaction.followup.send('Discord에서 티켓을 찾지 못했습니다. 기존 대화 연결과 PC 기록은 보존했습니다. 관리자에게 티켓 접근 상태를 확인해 주세요.', ephemeral=True)
                 return
             if not isinstance(thread, discord.Thread) or str(thread.parent_id) != s['parentId']:
                 raise PermissionError('등록된 스레드와 일치하지 않습니다.')
             target.channel = thread
-            await thread.edit(archived=False, locked=False)
-            await self.bridge.request(target, 'thread.reopen')
-            await self.send_controls(thread, '대화를 다시 열었습니다. 아래에서 모델·권한을 선택하거나 작업을 입력하세요.')
-            await interaction.followup.send(thread.jump_url, ephemeral=True)
+            changed = s['archived'] or thread.archived or thread.locked
+            if changed:
+                # Check host admission BEFORE changing Discord. Opening a live
+                # ticket, including a busy one, is navigation, not a mutation.
+                await self.bridge.request(target, 'thread.get', requireIdle=True)
+                if thread.archived or thread.locked:
+                    await thread.edit(archived=False, locked=False)
+                await self.bridge.request(target, 'thread.reopen')
+            # Leaving a private thread removes membership, but must not detach
+            # its saved conversation. Restore only the already-authorized owner.
+            try:
+                await thread.fetch_member(interaction.user.id)
+            except discord.NotFound:
+                await thread.add_user(interaction.user)
+            # Persistent controls already work across archive/restart. Do not
+            # append another public panel whenever the owner visits their ticket.
+            prefix = '보관을 해제했습니다. 기존 대화를 이어가세요.\n' if changed else ''
+            await interaction.followup.send(prefix + thread.jump_url, ephemeral=True)
 
     async def change(self, interaction, action):
         await interaction.response.defer(ephemeral=True)

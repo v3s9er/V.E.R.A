@@ -140,6 +140,10 @@ export interface NativeToolResult {
 }
 export interface NativeHostTools {
   tools: NeutralTool[];
+  /** Host-owned per-tool gate. Legacy desktop capabilities default to full only. */
+  authorize?(name: string, mode: NativeAgentRequest['permissionMode']): boolean;
+  /** Host-owned deadlines; never set by model arguments. */
+  timeoutMs?(name: string): number;
   execute(name: string, input: unknown, signal: AbortSignal): Promise<NativeToolResult>;
   dispose(): void;
 }

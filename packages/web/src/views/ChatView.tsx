@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { resolveProjectWorkspace } from '@mr-robot/shared';
@@ -184,6 +184,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [voiceAck, setVoiceAck] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(160);
+  const [historyPage, setHistoryPage] = useState<{ id: string; info: ConversationDetail['history'] } | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const historyLoad = useRef<object | null>(null);
+  const historyAnchor = useRef<{ conversationId: string; messageId?: string; top: number; scrollTop: number; height: number } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const composerBar = useRef<HTMLDivElement>(null);
   const conversationMenuRef = useRef<HTMLDivElement>(null);
@@ -372,6 +377,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
     const request = ++loadRequest.current;
+    historyLoad.current = null;
+    historyAnchor.current = null;
+    setLoadingHistory(false);
+    setHistoryError('');
     const [detail, runs] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
       client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
@@ -399,6 +408,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setComposerError(''); setNavigationOpen(false);
     const restored = fromDetail(detail);
     setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: `${selectedRun.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${selectedRun.partialText ?? ''}`, tools: [], done: false }] : restored);
+    setHistoryPage({ id, info: detail.history });
     setRunProgress(controlledRun ?? {});
     setVisibleMessageLimit(160);
     setRoute(null);
@@ -582,6 +592,17 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       scroll.removeEventListener('keydown', interaction);
     };
   }, [selected?.id]);
+
+  useLayoutEffect(() => {
+    const anchor = historyAnchor.current;
+    const scroll = scroller.current;
+    if (!anchor || !scroll) return;
+    historyAnchor.current = null;
+    if (anchor.conversationId !== selectedId.current) return;
+    const message = anchor.messageId ? scroll.querySelector<HTMLElement>(`[data-message-id="${anchor.messageId}"]`) : null;
+    if (message) scroll.scrollTop += message.getBoundingClientRect().top - anchor.top;
+    else scroll.scrollTop = anchor.scrollTop + scroll.scrollHeight - anchor.height;
+  }, [messages, visibleMessageLimit]);
 
   useEffect(() => {
     if (!messages.length || !stickToBottomRef.current || !scroller.current) return;
@@ -929,6 +950,45 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
+  const currentHistory = historyPage?.id === selected?.id ? historyPage?.info : selected?.history;
+  const rememberHistoryAnchor = (): void => {
+    const scroll = scroller.current;
+    if (!scroll || !selectedId.current) return;
+    const top = scroll.getBoundingClientRect().top;
+    const row = [...scroll.querySelectorAll<HTMLElement>('[data-message-id]')].find(item => item.getBoundingClientRect().bottom > top);
+    historyAnchor.current = { conversationId: selectedId.current, messageId: row?.dataset.messageId, top: row?.getBoundingClientRect().top ?? top, scrollTop: scroll.scrollTop, height: scroll.scrollHeight };
+    stickToBottomRef.current = false;
+  };
+  const loadPreviousMessages = async (): Promise<void> => {
+    if (historyLoad.current) return;
+    if (hiddenMessageCount > 0) {
+      rememberHistoryAnchor();
+      setVisibleMessageLimit(count => count + 160);
+      return;
+    }
+    const id = selectedId.current;
+    const before = currentHistory?.nextCursor;
+    if (!id || !currentHistory?.hasMore || !before) return;
+    const request = {};
+    const generation = loadRequest.current;
+    historyLoad.current = request;
+    setLoadingHistory(true);
+    setHistoryError('');
+    try {
+      const page = await client.call('conversations.get', { id, before, limit: 160 }) as ConversationDetail;
+      if (!mountedRef.current || historyLoad.current !== request || loadRequest.current !== generation || selectedId.current !== id) return;
+      if (page.id !== id || (page.history?.hasMore && page.history.nextCursor === before)) throw new Error('이전 기록의 위치를 확인할 수 없습니다. 대화를 다시 열어주세요.');
+      const older = fromDetail(page);
+      rememberHistoryAnchor();
+      setMessages(items => [...older, ...items]);
+      setVisibleMessageLimit(count => count + older.length);
+      setHistoryPage({ id, info: page.history });
+    } catch (error) {
+      if (mountedRef.current && historyLoad.current === request && loadRequest.current === generation && selectedId.current === id) setHistoryError(error instanceof Error ? error.message : '이전 메시지를 불러오지 못했습니다.');
+    } finally {
+      if (historyLoad.current === request) { historyLoad.current = null; if (mountedRef.current) setLoadingHistory(false); }
+    }
+  };
 
   return (
     <div className={`conversation-layout ${navigationOpen ? 'navigation-open' : ''}`}>
@@ -1008,8 +1068,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
         <div className="chat-scroll" ref={scroller}>
           {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
-          {hiddenMessageCount > 0 && <button type="button" className="chat-history-more" onClick={() => setVisibleMessageLimit((count) => count + 160)}>이전 메시지 {Math.min(160, hiddenMessageCount)}개 더 보기</button>}
-          {visibleMessages.map((m) => <div key={m.id} className={`msg-row ${m.role}`}>
+          {(hiddenMessageCount > 0 || currentHistory?.hasMore) && <button type="button" className="chat-history-more" disabled={loadingHistory} onClick={() => void loadPreviousMessages()}>{loadingHistory ? '이전 메시지 불러오는 중…' : hiddenMessageCount > 0 ? `이전 메시지 ${Math.min(160, hiddenMessageCount)}개 더 보기` : '이전 메시지 불러오기'}</button>}
+          {historyError && <p className="chat-history-notice" role="status">{historyError}</p>}
+          {currentHistory?.displayTruncated && <p className="chat-history-notice">매우 긴 메시지는 화면에서 일부만 표시합니다. 보관된 원문은 유지됩니다.</p>}
+          {currentHistory?.unavailable ? <p className="chat-history-notice">이전 대화 보관 파일을 읽을 수 없어 현재 남아 있는 메시지를 표시합니다.</p> : (currentHistory?.missingMessages ?? 0) > 0 && <p className="chat-history-notice">과거에 원문이 저장되지 않은 메시지 {currentHistory!.missingMessages.toLocaleString()}개는 표시할 수 없습니다.</p>}
+          {visibleMessages.map((m) => <div key={m.id} data-message-id={m.id} className={`msg-row ${m.role}`}>
             <div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div>
             <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
               <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{status || '요청을 분석하고 있습니다'}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
@@ -1021,7 +1084,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} startedAt={runProgress.startedAt} busy={busy} fallback={status || route?.model} />}
+          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} agents={runProgress.agents} startedAt={runProgress.startedAt} busy={busy} fallback={status || route?.model} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}

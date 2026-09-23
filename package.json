@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.4.29",
+  "version": "0.5.0",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -44,7 +44,8 @@
     "test:agent-runtime": "tsx --test packages/agent/test/agent-runtime.test.ts packages/agent/test/projects.test.ts",
     "test:runtime-ui": "node packages/web/test/runtime-ui.mjs",
     "test:session-events": "tsx packages/agent/test/cli-session-events.test.ts",
-    "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts"
+    "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts",
+    "test:coordination": "node --import tsx --test packages/agent/test/subagents.test.ts packages/agent/test/coordination-loop.test.ts packages/agent/test/mcp-efficiency.test.ts packages/agent/test/context-packing.test.ts packages/agent/test/conversation-transcripts.test.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

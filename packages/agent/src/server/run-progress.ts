@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ChatRunActivity, ChatRunPhase, ChatRunState } from '@mr-robot/shared';
+import type { ChatRunActivity, ChatRunPhase, ChatRunState, CoordinationAgent } from '@mr-robot/shared';
 
 const TERMINAL = new Set<ChatRunPhase>(['completed', 'failed', 'cancelled']);
 /** Run-local, bounded, host-owned state. No raw tool inputs or hidden reasoning.
@@ -13,6 +13,7 @@ export class RunProgress {
   private partialText = '';
   private partialTextTruncated = false;
   private serial = 0;
+  private agents = new Map<string, CoordinationAgent>();
   constructor(private now = Date.now) { this.startedAt = this.updatedAt = now(); }
   transition(phase: ChatRunPhase) {
     if (TERMINAL.has(this.phase) || (this.phase === 'cancelling' && !TERMINAL.has(phase))) return;
@@ -43,8 +44,20 @@ export class RunProgress {
       if (item) { item.state = info.status; item.finishedAt = this.now(); }
     }
   }
-  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'partialText' | 'partialTextTruncated'> {
+  agent(snapshot: CoordinationAgent): void {
+    if (TERMINAL.has(this.phase) || (!this.agents.has(snapshot.agentId) && this.agents.size >= 6)) return;
+    // Explicit projection: results, assignments and tool inputs never reach
+    // progress even if a caller passes an internal worker snapshot.
+    this.agents.set(snapshot.agentId, {
+      agentId: snapshot.agentId, label: snapshot.label.slice(0, 80), model: snapshot.model,
+      providerId: snapshot.providerId, state: snapshot.state, sequence: snapshot.sequence,
+      turns: snapshot.turns, status: snapshot.status.slice(0, 200), usage: { ...snapshot.usage },
+    });
+    this.updatedAt = this.now();
+  }
+  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'partialText' | 'partialTextTruncated' | 'agents'> {
     return { runId: this.runId, phase: this.phase, updatedAt: this.updatedAt,
-      activity: this.activity.map(item => ({ ...item })), partialText: this.partialText, partialTextTruncated: this.partialTextTruncated };
+      activity: this.activity.map(item => ({ ...item })), partialText: this.partialText, partialTextTruncated: this.partialTextTruncated,
+      agents: [...this.agents.values()].map(agent => ({ ...agent, usage: { ...agent.usage } })) };
   }
 }

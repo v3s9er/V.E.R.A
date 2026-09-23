@@ -26,7 +26,16 @@ try {
   const controllers = Array.from({ length: 4 }, () => new AbortController());
   const busyWorkers = controllers.map((c, i) => call({ ...base, promptCacheKey: `busy-${i}`, signal: c.signal, turns: [{ role: 'user', content: 'WAIT_FOREVER' }] }));
   const drained = Promise.allSettled(busyWorkers);
-  await assert.rejects(call({ ...base, promptCacheKey: 'fifth' }), /모두 사용 중/);
+  let fifthFinished = false;
+  const fifth = call({ ...base, promptCacheKey: 'fifth', signal: AbortSignal.timeout(10_000) }).then(result => { fifthFinished = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(fifthFinished, false, 'saturated text pool queues without starting another process');
+  const queuedAbort = new AbortController();
+  const cancelledWait = call({ ...base, promptCacheKey: 'sixth', signal: queuedAbort.signal });
+  queuedAbort.abort();
+  await assert.rejects(cancelledWait, /중지/);
+  controllers[0].abort();
+  assert.equal((await fifth).text, 'turn 1', 'queued text call starts after one real worker settles');
   for (const c of controllers) c.abort();
   assert.ok((await drained).every(r => r.status === 'rejected'));
   assert.equal((await call({ ...base, promptCacheKey: 'after-cancel' })).text, 'turn 1', 'cancellation releases bounded worker slots');

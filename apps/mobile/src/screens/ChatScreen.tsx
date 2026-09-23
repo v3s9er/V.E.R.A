@@ -99,6 +99,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<UiMsg[]>([]);
+  const [historyPage, setHistoryPage] = useState<{ id: string; info: ConversationDetail['history'] } | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const historyLoad = useRef<object | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
   const [refreshingModels, setRefreshingModels] = useState(false);
@@ -295,6 +299,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const loadConversation = useCallback(async (id: string): Promise<void> => {
     if (configurationSaveInFlightRef.current) return;
     const generation = ++loadGeneration.current;
+    historyLoad.current = null;
+    setLoadingHistory(false);
+    setHistoryError('');
     activeId.current = id;
     setReasoningSaveFailed(false);
     setConfigurationSaveFailed(false);
@@ -314,6 +321,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setRuns((current) => ({ ...current, ...Object.fromEntries(runList.map((run) => [run.conversationId, run])) }));
     if (pendingConfirm) setConfirm(pendingConfirm);
     setConversation(detail);
+    setHistoryPage({ id, info: detail.history });
     setActivity([]); setShowActivity(false);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
     const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
@@ -493,15 +501,18 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         flushDelta();
         if (d.conversation) {
           setConversation(d.conversation);
-          const restored = d.conversation.messages.filter((message) => message.role === 'user' || message.role === 'assistant').map((message) => ({ id: nextId(), role: message.role as 'user' | 'assistant', content: message.content, tools: [], done: true }));
-          setMessages(restored.length ? restored : [{ id: nextId(), role: 'assistant', content: d.text || '', tools: [], done: true }]);
-        } else {
-          setMessages((items) => {
+        }
+        // Keep earlier pages and stable row identities when the completed run
+        // supplies only the latest transcript page.
+        setMessages((items) => {
+          if (!items.length && d.conversation) {
+            const restored = d.conversation.messages.filter(message => message.role === 'user' || message.role === 'assistant').map(message => ({ id: nextId(), role: message.role as 'user' | 'assistant', content: message.content, tools: [], done: true }));
+            if (restored.length) return restored;
+          }
             const last = items[items.length - 1];
             if (!last || last.role !== 'assistant' || last.done) return [...items, { id: nextId(), role: 'assistant', content: d.text || '', tools: [], done: true }];
             return [...items.slice(0, -1), { ...last, content: d.text || last.content || '', done: true }];
-          });
-        }
+        });
         void refreshConversations();
         scrollIfFollowing();
       }),
@@ -875,6 +886,31 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
+  const currentHistory = historyPage?.id === conversation?.id ? historyPage?.info : conversation?.history;
+  const loadPreviousMessages = async (): Promise<void> => {
+    const id = conversationRef.current?.id;
+    const before = currentHistory?.nextCursor;
+    if (!id || activeId.current !== id || !currentHistory?.hasMore || !before || historyLoad.current) return;
+    const request = {};
+    const generation = loadGeneration.current;
+    historyLoad.current = request;
+    setLoadingHistory(true);
+    setHistoryError('');
+    try {
+      const page = await client.call('conversations.get', { id, before, limit: 160 }) as ConversationDetail;
+      if (!mountedRef.current || historyLoad.current !== request || loadGeneration.current !== generation || activeId.current !== id) return;
+      if (page.id !== id || (page.history?.hasMore && page.history.nextCursor === before)) throw new Error('이전 기록의 위치를 확인할 수 없습니다. 대화를 다시 열어주세요.');
+      const older = page.messages.filter(message => message.role === 'user' || message.role === 'assistant').map(message => ({ id: nextId(), role: message.role as 'user' | 'assistant', content: message.content, tools: [], done: true }));
+      stickToBottom.current = false;
+      setMessages(items => [...older, ...items]);
+      setHistoryPage({ id, info: page.history });
+    } catch (error) {
+      if (mountedRef.current && historyLoad.current === request && loadGeneration.current === generation && activeId.current === id) setHistoryError(error instanceof Error ? error.message : '이전 메시지를 불러오지 못했습니다.');
+    } finally {
+      if (historyLoad.current === request) { historyLoad.current = null; if (mountedRef.current) setLoadingHistory(false); }
+    }
+  };
+
   const singleModelChoices = (includeAutomatic: boolean) => (
     <>
       {includeAutomatic && <TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel()}>
@@ -948,6 +984,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         initialNumToRender={18}
         maxToRenderPerBatch={12}
         windowSize={9}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
@@ -957,6 +994,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         scrollEventThrottle={80}
         onLayout={() => { if (stickToBottom.current) requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: false })); }}
         onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToOffset({ offset: 0, animated: false }); }}
+        ListFooterComponent={(currentHistory?.hasMore || currentHistory?.unavailable || currentHistory?.missingMessages || currentHistory?.displayTruncated || historyError) ? <View style={{ alignItems: 'center', gap: 8, paddingVertical: 12 }}>
+          {currentHistory?.hasMore && <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: loadingHistory, busy: loadingHistory }} disabled={loadingHistory} onPress={() => void loadPreviousMessages()} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}><Text style={{ color: colors.accent2 }}>{loadingHistory ? '이전 메시지 불러오는 중…' : '이전 메시지 불러오기'}</Text></TouchableOpacity>}
+          {historyError ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>{historyError}</Text> : null}
+          {currentHistory?.displayTruncated ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>매우 긴 메시지는 일부만 표시하며 보관된 원문은 유지됩니다.</Text> : null}
+          {currentHistory?.unavailable ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>이전 대화 보관 파일을 읽을 수 없어 현재 남아 있는 메시지를 표시합니다.</Text> : (currentHistory?.missingMessages ?? 0) > 0 ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>과거에 원문이 저장되지 않은 메시지 {currentHistory!.missingMessages.toLocaleString()}개는 표시할 수 없습니다.</Text> : null}
+        </View> : null}
         ListEmptyComponent={(
           <View style={styles.empty}>
             {initialLoading ? <ActivityIndicator color={colors.accent2} accessibilityLabel="대화 불러오는 중" /> : <Text style={styles.emptyIcon}>✦</Text>}
@@ -990,7 +1033,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {(busy || activity.length > 0 || activeRun?.phase) ? <View>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : ['failed', 'cancelled'].includes(activeRun?.phase ?? '') ? '!' : '✓'}</Text><Text numberOfLines={1} style={styles.runStatusText}>{activeRun?.phase === 'approval' ? '승인이 필요해요' : activeRun?.phase === 'cancelling' ? '안전하게 중지하는 중…' : activeRun?.phase === 'completed' ? '작업 완료' : activeRun?.phase === 'failed' ? '작업 오류 확인' : activeRun?.phase === 'cancelled' ? '작업 중지됨' : activity.at(-1) || activeRun?.status || '요청 준비 중'}{activeRun?.steeringQueued ? ` · 추가 지시 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
-        {showActivity && !shortKeyboardViewport && <ScrollView style={{ maxHeight: 140, paddingHorizontal: 18 }} nestedScrollEnabled>{activeRun?.activity?.length ? activeRun.activity.map(entry => <Text key={entry.id} style={{ color: entry.state === 'error' ? colors.err : colors.dim, paddingVertical: 5 }}>{entry.state === 'done' ? '✓' : entry.state === 'error' ? '!' : '·'} {entry.label}</Text>) : activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}</ScrollView>}
+        {showActivity && !shortKeyboardViewport && <ScrollView style={{ maxHeight: 180, paddingHorizontal: 18 }} nestedScrollEnabled>
+          {activeRun?.agents?.map(agent => <View key={agent.agentId} style={{ paddingVertical: 7, gap: 3 }}>
+            <Text style={{ color: agent.state === 'failed' ? colors.err : colors.text }}>{agent.label} · {{ queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지' }[agent.state]}</Text>
+            <Text style={{ color: colors.dim, fontSize: 11 }}>{agent.model || '모델 확인 중'}</Text>
+            <Text style={{ color: colors.faint, fontSize: 10 }}>{agent.usage.promptTokens + agent.usage.completionTokens > 0 ? `입력 ${agent.usage.promptTokens.toLocaleString()} · 출력 ${agent.usage.completionTokens.toLocaleString()} 토큰` : '토큰 사용량 미보고'}</Text>
+          </View>)}
+          {activeRun?.activity?.length ? activeRun.activity.map(entry => <Text key={entry.id} style={{ color: entry.state === 'error' ? colors.err : colors.dim, paddingVertical: 5 }}>{entry.state === 'done' ? '✓' : entry.state === 'error' ? '!' : '·'} {entry.label}</Text>) : activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}
+        </ScrollView>}
       </View> : null}
       <View
         ref={composerRef}

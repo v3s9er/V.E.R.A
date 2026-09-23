@@ -22,6 +22,8 @@ export interface RoutingTrace {
   estimatedCost: number;
   ok: boolean;
   error?: string;
+  /** Per-worker counters are already included in aggregate usage above. */
+  agents?: import('@mr-robot/shared').CoordinationAgent[];
 }
 
 export class TelemetryStore {

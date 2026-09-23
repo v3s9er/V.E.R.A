@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { CliSessionEvents } from './cli-session-events.js';
+import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { CODEX_BROKER_CONFIG, codexThreadConfig, codexTextArgs, isolatedPrompt, ISOLATED_OUTPUT_SCHEMA, parseIsolatedReply } from './cli-isolated.js';
 import { normalizeProviderUsageReport, type BrokerAgentRequest, type ChatRequest, type ProviderResult, type Turn } from './provider.js';
@@ -16,6 +17,8 @@ const isBroker = (req: Request): req is BrokerAgentRequest => 'executeTool' in r
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fingerprints = (turns: Turn[]) => turns.map(t => hash(t));
 const pool = new Map<string, TextWorker>();
+const textScheduler = new NativeRunScheduler(4, 32);
+let textEpoch = 0;
 
 /** Only a verified prefix in the same conversation/provider/policy can resume.
  * Store hashes, not a second copy of attachment/history text. No cross-user cache.
@@ -217,9 +220,14 @@ export class TextWorker {
 
 export async function pooledCodexText(options: Options): Promise<ProviderResult> {
   options.req.signal?.throwIfAborted();
+  const epoch = textEpoch;
   const key = options.req.promptCacheKey ? hash([options.req.promptCacheKey, options.providerId, options.model, options.command, options.prefixArgs, options.req.system, options.req.tools, isBroker(options.req)]) : undefined;
-  while (true) {
+  const release = await textScheduler.acquire(key ?? randomUUID(), options.req.signal,
+    position => options.req.onEvent?.({ type: 'status', text: `구독 모델 실행 대기 · ${position}번째` }));
+  try { while (true) {
+    if (epoch !== textEpoch) throw new Error('구독 모델 실행이 종료되었습니다.');
     await waitForCliRetirements(options.env, options.req.signal);
+    if (epoch !== textEpoch) throw new Error('구독 모델 실행이 종료되었습니다.');
     options.req.signal?.throwIfAborted();
     let worker = key ? pool.get(key) : undefined;
     if (worker?.busy) throw new Error('같은 대화의 구독 작업이 이미 실행 중입니다.');
@@ -235,7 +243,7 @@ export async function pooledCodexText(options: Options): Promise<ProviderResult>
     }
     try { return await worker.run(options.req); }
     finally { if (!key) worker.close(); }
-  }
+  } } finally { release(); }
 }
 
-export function closeTextWorkers() { for (const worker of [...pool.values()]) worker.close(); }
+export function closeTextWorkers() { textEpoch++; textScheduler.cancelPending(); for (const worker of [...pool.values()]) worker.close(); }

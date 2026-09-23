@@ -35,6 +35,8 @@ interface OrcaStatus {
 }
 interface VoiceConfig { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number }
 interface RemoteHandoffInfo { pin: string; expiresAt: number }
+interface McpServerSummary { id: string; name: string; enabled: boolean; env: string[] }
+interface McpPresetPreview { id: string; name: string; command: string; args: string[]; cwd?: string; env: Record<string, string>; enabled: boolean }
 interface RemotePairingInfo { remoteHandoff?: RemoteHandoffInfo }
 interface RemotePairingQr {
   pin: string;
@@ -84,6 +86,12 @@ export function PluginsView() {
   const [mcpId, setMcpId] = useState('');
   const [mcpCommand, setMcpCommand] = useState('');
   const [mcpArgs, setMcpArgs] = useState('');
+  const [mcpPreset, setMcpPreset] = useState<'manual' | 'context7' | 'serena'>('manual');
+  const [mcpEntryPath, setMcpEntryPath] = useState('');
+  const [mcpProjectPath, setMcpProjectPath] = useState('');
+  const [mcpEnable, setMcpEnable] = useState(false);
+  const [mcpNotice, setMcpNotice] = useState('');
+  const [mcpServers, setMcpServers] = useState<McpServerSummary[] | null>(null);
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfig | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [workbenchId, setWorkbenchId] = useState<string | null>(null);
@@ -355,9 +363,32 @@ export function PluginsView() {
   };
 
   const addMcp = async (): Promise<void> => {
-    if (!mcpId.trim() || !mcpCommand.trim()) return;
-    await pluginCall('mcp-host', 'mcp.servers.add', { id: mcpId.trim(), name: mcpId.trim(), command: mcpCommand.trim(), args: mcpArgs.trim() ? mcpArgs.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((value) => value.replace(/^"|"$/g, '')) ?? [] : [] });
-    setMcpId(''); setMcpCommand(''); setMcpArgs('');
+    if (!canManage || busy || !mcpId.trim() || (mcpPreset === 'manual' ? !mcpCommand.trim() : !mcpEntryPath.trim() || (mcpPreset === 'serena' && !mcpProjectPath.trim()))) return;
+    setBusy(true); setError(''); setMcpNotice('');
+    try {
+      const existing = await client.call('plugins.call', { name: 'mcp.servers.list', params: {} }) as McpServerSummary[];
+      // This form has no secret editor. Do not replace an authenticated entry
+      // with an empty environment when a preset is registered again.
+      if (existing.some(server => server.id === mcpId.trim().toLowerCase() && server.env.length > 0)) throw new Error('이 ID에는 보호된 환경 변수 설정이 있습니다. 기존 설정을 보존하도록 다른 서버 ID를 사용하세요.');
+      const config = mcpPreset === 'manual'
+        ? { command: mcpCommand.trim(), args: mcpArgs.trim() ? mcpArgs.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(value => value.replace(/^"|"$/g, '')) ?? [] : [] }
+        : await client.call('plugins.call', { name: 'mcp.presets.preview', params: { preset: mcpPreset, executablePath: mcpEntryPath.trim(), ...(mcpPreset === 'serena' ? { projectRoot: mcpProjectPath.trim() } : {}) } }) as McpPresetPreview;
+      const saved = await client.call('plugins.call', { name: 'mcp.servers.add', params: { ...config, id: mcpId.trim(), name: mcpId.trim(), enabled: mcpEnable } }) as McpServerSummary;
+      if (!mountedRef.current) return;
+      setMcpServers([...existing.filter(server => server.id !== saved.id), saved]);
+      setMcpNotice(`${saved.name} 저장됨 · ${saved.enabled ? '활성화됨. 도구를 탐색하거나 호출할 때 시작합니다.' : '비활성 상태입니다. 사용하려면 아래 활성화를 선택하고 다시 저장하세요.'}`);
+    } catch (err) { if (mountedRef.current) setError(err instanceof Error ? err.message : String(err)); }
+    finally { if (mountedRef.current) setBusy(false); }
+  };
+
+  const listMcp = async (): Promise<void> => {
+    if (!canManage || busy) return;
+    setBusy(true); setError(''); setExpanded('mcp-host');
+    try {
+      const servers = await client.call('plugins.call', { name: 'mcp.servers.list', params: {} }) as McpServerSummary[];
+      if (mountedRef.current) setMcpServers(servers);
+    } catch (err) { if (mountedRef.current) setError(err instanceof Error ? err.message : String(err)); }
+    finally { if (mountedRef.current) setBusy(false); }
   };
 
   const saveOrca = async (): Promise<void> => {
@@ -940,7 +971,7 @@ export function PluginsView() {
                   : p.builtin ? p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>) : null}
                 {p.id === 'tailscale-connect' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'tailscale.peers')}>기기 목록</Button>}
                 {p.id === 'docker-sandbox' && <Button onClick={() => void pluginCall(p.id, 'docker.ctf.image.ensure')} disabled={busy}>CTF 이미지 준비</Button>}
-                {p.id === 'mcp-host' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'mcp.servers.list')}>연결 목록</Button>}
+                {p.id === 'mcp-host' && <Button variant="ghost" onClick={() => void listMcp()} disabled={busy}>연결 목록</Button>}
               </>}
               {!p.builtin && <Button variant="danger" onClick={() => void unload(p.id)}>
                 제거
@@ -958,7 +989,23 @@ export function PluginsView() {
             {p.capabilities.length > 0 && <div className="plugin-capabilities">{p.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
             {p.permissions.length > 0 && <p className="panel-hint">권한: {p.permissions.join(' · ')}</p>}
             {p.dependencies.length > 0 && <p className="panel-hint">의존성: {p.dependencies.map((dependency) => `${dependency.name}${dependency.required ? ' (필수)' : ''}`).join(' · ')}</p>}
-            {p.id === 'mcp-host' && <div className="provider-add"><h4>MCP stdio 서버 연결</h4><div className="form-grid"><label className="field"><span>서버 ID</span><Input value={mcpId} onChange={(event) => setMcpId(event.target.value)} placeholder="filesystem" /></label><label className="field"><span>실행 명령</span><Input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} placeholder="npx" /></label><label className="field"><span>인자</span><Input value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem C:\작업" /></label></div><Button onClick={() => void addMcp()} disabled={busy || !mcpId.trim() || !mcpCommand.trim()}>권한 검토 후 연결</Button><p className="panel-hint">MCP 도구 설명은 신뢰되지 않은 입력으로 취급되며 실제 호출은 현재 PC 권한 단계와 승인 절차를 통과합니다.</p></div>}
+            {p.id === 'mcp-host' && <div className="provider-add">
+              <h4>MCP stdio 서버 연결</h4>
+              <div className="form-grid">
+                <label className="field"><span>설정 방식</span><Select value={mcpPreset} disabled={busy} onChange={event => { const preset = event.target.value as typeof mcpPreset; setMcpPreset(preset); setMcpId(preset === 'manual' ? '' : preset); setMcpEnable(false); setMcpNotice(''); }}><option value="manual">직접 입력</option><option value="context7">Context7 · 라이브러리 문서</option><option value="serena">Serena · 코드 심볼</option></Select></label>
+                <label className="field"><span>서버 ID</span><Input value={mcpId} disabled={busy} onChange={event => setMcpId(event.target.value)} placeholder={mcpPreset === 'serena' ? 'serena-my-project' : 'my-server'} /></label>
+                {mcpPreset === 'manual' ? <>
+                  <label className="field"><span>실행 명령</span><Input value={mcpCommand} disabled={busy} onChange={event => setMcpCommand(event.target.value)} placeholder="node" /></label>
+                  <label className="field"><span>인자</span><Input value={mcpArgs} disabled={busy} onChange={event => setMcpArgs(event.target.value)} placeholder={'"C:\\MCP\\server.js"'} /></label>
+                </> : <label className="field"><span>{mcpPreset === 'context7' ? '설치된 Context7 진입 파일' : '설치된 Serena 실행 파일'}</span><Input value={mcpEntryPath} disabled={busy} onChange={event => setMcpEntryPath(event.target.value)} placeholder={mcpPreset === 'context7' ? 'C:\\MCP\\context7\\dist\\index.js' : 'C:\\MCP\\serena.exe'} /></label>}
+                {mcpPreset === 'serena' && <label className="field"><span>프로젝트 절대 경로</span><Input value={mcpProjectPath} disabled={busy} onChange={event => setMcpProjectPath(event.target.value)} placeholder="C:\\Projects\\my-project" /></label>}
+              </div>
+              {mcpPreset !== 'manual' && <p className="panel-hint">{mcpPreset === 'context7' ? '설치된 Node.js로 실행합니다. 패키징된 앱에서는 PC의 PATH에서 node를 찾습니다. API 키는 이 화면에 입력하지 마세요.' : '선택한 프로젝트로 시작하고 대시보드는 자동으로 열지 않습니다. 프로젝트마다 서버 ID를 구분하세요.'} 서버 프로그램은 자동 설치하지 않습니다.</p>}
+              <div className="type-row"><label><input type="checkbox" checked={mcpEnable} disabled={busy} onChange={event => setMcpEnable(event.target.checked)} /> 경로와 권한을 검토했으며 이 서버를 활성화합니다</label><Button onClick={() => void addMcp()} disabled={busy || !mcpId.trim() || (mcpPreset === 'manual' ? !mcpCommand.trim() : !mcpEntryPath.trim() || (mcpPreset === 'serena' && !mcpProjectPath.trim()))}>{busy ? '저장 중…' : mcpEnable ? '설정 저장 및 활성화' : '비활성으로 저장'}</Button></div>
+              {mcpNotice && <p className="panel-hint" role="status">{mcpNotice}</p>}
+              {mcpServers !== null && <div className="stack" aria-label="저장된 MCP 서버">{mcpServers.length ? mcpServers.map(server => <div key={server.id} className="provider-top"><b>{server.name}</b><span>{server.id}</span><Badge tone={server.enabled ? 'ok' : 'warn'}>{server.enabled ? '활성 · 호출 시 시작' : '저장됨 · 비활성'}</Badge>{server.env.length > 0 && <span className="panel-hint">보호된 환경 변수 {server.env.length}개</span>}</div>) : <p className="panel-hint">저장된 서버가 없습니다.</p>}</div>}
+              <p className="panel-hint">MCP 도구 설명은 신뢰되지 않은 입력으로 취급되며 실제 호출은 현재 PC 권한 단계와 승인 절차를 통과합니다.</p>
+            </div>}
             {p.id === 'voice-wake' && voiceConfig && <div className="provider-add"><h4>PC 음성 호출</h4><div className="form-grid"><label className="field"><span>호출 키워드 직접 설정</span><Input value={voiceConfig.wakePhrase} onChange={(event) => setVoiceConfig({ ...voiceConfig, wakePhrase: event.target.value })} placeholder="로봇" /></label><label className="field"><span>언어</span><Input value={voiceConfig.language} onChange={(event) => setVoiceConfig({ ...voiceConfig, language: event.target.value })} /></label></div><div className="type-row"><label><input type="checkbox" checked={voiceConfig.enabled} onChange={(event) => setVoiceConfig({ ...voiceConfig, enabled: event.target.checked })} /> “{voiceConfig.wakePhrase || '로봇'}” 상시 대기</label><label><input type="checkbox" checked={voiceConfig.audibleReply !== false} onChange={(event) => setVoiceConfig({ ...voiceConfig, audibleReply: event.target.checked })} /> 음성으로 응답</label><Button onClick={() => void pluginCall(p.id, 'voice.config.set', voiceConfig)}>저장</Button></div><p className="panel-hint">오프라인 호출 감지는 AI 토큰을 사용하지 않습니다. 음성 호출은 PC에서만 동작하고 모바일은 텍스트 명령과 파일 제어에 집중합니다.</p></div>}
             {p.id === 'remote-link' && <div className="provider-add">
               <div className="provider-top">

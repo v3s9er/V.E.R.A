@@ -12,7 +12,15 @@
 .run-panel-heading small { font-size: 11px; color: #9da8bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-panel-chevron { color: #9da8bd; transition: transform .15s; }
 .run-panel[open] .run-panel-chevron { transform: rotate(180deg); }
-.run-panel ol { list-style: none; margin: 0; padding: 4px 14px; max-height: min(180px, 24dvh); overflow: auto; border-top: 1px solid #ffffff0a; }
+.run-panel-content { max-height: min(240px, 30dvh); overflow: auto; border-top: 1px solid #ffffff0a; }
+.run-panel ol { list-style: none; margin: 0; padding: 4px 14px; }
+.run-agent-list { border-bottom: 1px solid #ffffff0a; }
+.run-agent-detail { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.run-panel .run-agent-detail small { font-size: 10px; overflow-wrap: anywhere; }
+.run-agent.completed > span:first-child { color: #6fd6af; }
+.run-agent.failed > span:first-child { color: #ff9b9b; }
+.chat-history-notice { text-align: center; color: #9da8bd; font-size: 12px; line-height: 1.6; margin: 8px 16px 16px; }
+.chat-history-more:disabled { cursor: wait; opacity: .65; }
 .run-panel li { display: flex; gap: 9px; align-items: baseline; padding: 7px 0; font-size: 12px; overflow-wrap: anywhere; }
 .run-panel li > span:nth-child(2) { flex: 1; min-width: 0; }
 .run-panel li small { color: #9da8bd; flex-shrink: 0; }
@@ -65,7 +73,7 @@
   .run-panel summary { padding: 6px 9px; }
   .run-panel-heading small { display:none; }
   .run-panel p { display:none; }
-  .run-panel[open] ol { position:absolute; bottom:100%; left:0; right:0; max-height:95px; background:#1b202e; border:1px solid #ffffff20; border-radius:10px; z-index:20; }
+  .run-panel[open] .run-panel-content { position:absolute; bottom:100%; left:0; right:0; max-height:95px; background:#1b202e; border:1px solid #ffffff20; border-radius:10px; z-index:20; }
   .conversation-layout .chat-inputbar.composer-minimal { margin-bottom: 6px; }
 }
 /* A real navigation drawer leaves the conversation viewport to the messages.

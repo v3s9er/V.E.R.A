@@ -182,6 +182,12 @@ export interface ChatRunState {
   activity?: Array<{ id: string; label: string; state: 'running' | 'done' | 'error'; startedAt: number; finishedAt?: number }>;
   partialText?: string;
   partialTextTruncated?: boolean;
+  agents?: Array<{
+    agentId: string; label: string; providerId: string; model: string;
+    state: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    sequence: number; turns: number; status: string;
+    usage: { promptTokens: number; completionTokens: number };
+  }>;
 }
 
 export interface ConversationSummary {
@@ -233,4 +239,5 @@ export interface ConversationDetail extends ConversationSummary {
   messages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }>;
   summary?: string;
   usage: { promptTokens: number; completionTokens: number };
+  history?: { hasMore: boolean; nextCursor?: string; archivedTurns: number; missingMessages: number; unavailable?: boolean; displayTruncated?: boolean };
 }

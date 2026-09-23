@@ -14,6 +14,7 @@ import type {
   ReasoningEffort,
 } from '@mr-robot/shared';
 import type { Turn } from './ai/provider.js';
+import { displayTranscriptWindow, normalizeTranscriptReference, TranscriptStore, transcriptPageLimit, type TranscriptPageOptions, type TranscriptReference } from './transcript-store.js';
 
 interface StoredConversation {
   id: string;
@@ -37,10 +38,12 @@ interface StoredConversation {
   /** Content revision and bounded ancestry used to distinguish descendants from concurrent edits. */
   syncRevision?: string;
   syncAncestors?: string[];
+  /** Destination-local durable originals; omitted from device-sync payloads. */
+  transcript?: TranscriptReference;
 }
 
 export interface ConversationRecoveryDiagnostic {
-  code: 'conversations-corrupt-quarantined' | 'conversations-backup-recovered' | 'conversations-fresh-recovery' | 'conversations-persistence-blocked';
+  code: 'conversations-corrupt-quarantined' | 'conversations-backup-recovered' | 'conversations-fresh-recovery' | 'conversations-persistence-blocked' | 'conversation-transcript-unavailable';
   message: string;
   at: number;
   path?: string;
@@ -196,7 +199,7 @@ function normalizeLocalTurns(turns: Turn[], enforceTotalBudget = true): Turn[] {
   return normalized;
 }
 
-function normalizeStoredConversation(raw: unknown, index: number): StoredConversation {
+function normalizeStoredConversation(raw: unknown, index: number, local = false): StoredConversation {
   if (!raw || typeof raw !== 'object') throw new Error(`대화 ${index + 1} 데이터가 올바르지 않습니다.`);
   const source = raw as Partial<StoredConversation>;
   const id = boundedString(source.id, '대화 ID', 160) as string;
@@ -244,6 +247,7 @@ function normalizeStoredConversation(raw: unknown, index: number): StoredConvers
     compactedMessages: Math.floor(safeNumber(source.compactedMessages ?? 0, '압축 메시지 수', 0, 10_000_000)),
     turns,
     usage,
+    ...(local ? { transcript: normalizeTranscriptReference(source.transcript) } : {}),
   };
   const suppliedRevision = source.syncRevision === undefined ? undefined : boundedString(source.syncRevision, '대화 동기화 revision', 64);
   if (suppliedRevision !== undefined && !SYNC_REVISION.test(suppliedRevision)) throw new Error('대화 동기화 revision 형식이 올바르지 않습니다.');
@@ -265,7 +269,7 @@ function normalizeStoredConversation(raw: unknown, index: number): StoredConvers
 function normalizeConversationSnapshot(value: unknown): StoredConversation[] {
   if (!Array.isArray(value)) throw new Error('대화 동기화 데이터가 올바르지 않습니다.');
   assertConversationSnapshotBudget(value);
-  const normalized = value.map(normalizeStoredConversation);
+  const normalized = value.map((item, index) => normalizeStoredConversation(item, index));
   if (new Set(normalized.map((item) => item.id)).size !== normalized.length) throw new Error('중복된 대화 ID가 있습니다.');
   return normalized;
 }
@@ -291,7 +295,7 @@ function publicMessages(turns: Turn[], origin?: 'discord'): ChatMessage[] {
   return turns.map((turn) => ({
     role: turn.role,
     content: turn.role === 'tool'
-      ? (turn.toolResults ?? []).map((r) => `${r.name}: ${r.content}`).join('\n')
+      ? turn.toolResults?.length ? turn.toolResults.map((r) => `${r.name}: ${r.content}`).join('\n') : turn.content
       : origin === 'discord' && turn.role === 'user' ? discordDisplayText(turn.content) : turn.content,
     toolCalls: turn.toolCalls?.map((call) => ({ id: call.id, name: call.name, input: call.args })),
   }));
@@ -344,7 +348,7 @@ function atomicWriteConversationUtf8(file: string, value: string): void {
 function decodeConversationFile(raw: string): StoredConversation[] {
   const parsed = JSON.parse(raw) as unknown;
   if (!Array.isArray(parsed)) throw new Error('conversation store root must be an array');
-  const normalized = parsed.map(normalizeStoredConversation);
+  const normalized = parsed.map((item, index) => normalizeStoredConversation(item, index, true));
   if (new Set(normalized.map((item) => item.id)).size !== normalized.length) throw new Error('conversation store contains duplicate ids');
   return normalized;
 }
@@ -356,11 +360,15 @@ export class ConversationStore {
   private items: StoredConversation[] = [];
   private recoveryDiagnostics: ConversationRecoveryDiagnostic[] = [];
   private writesBlocked = false;
+  private readonly transcripts: TranscriptStore;
 
   constructor(home: string) {
     this.file = join(home, 'conversations.json');
     this.backupFile = `${this.file}.bak`;
+    this.transcripts = new TranscriptStore(home, value => normalizeTurn(value, 0, 0));
     this.load();
+    // A durable deletion wins over a stale snapshot or backup after a crash.
+    this.items = this.items.filter(item => !this.transcripts.isDeleted(item.id));
   }
 
   private load(): void {
@@ -504,9 +512,13 @@ export class ConversationStore {
       .map(summarize);
   }
 
-  exportSnapshot(): unknown[] {
+  exportSnapshot(includeLocalState = false): unknown[] {
     for (const item of this.items) ensureSyncMetadata(item);
-    return structuredClone(this.items);
+    return this.items.map(item => {
+      const copy = structuredClone(item);
+      if (!includeLocalState) delete copy.transcript;
+      return copy;
+    });
   }
 
   validateSnapshot(value: unknown): void {
@@ -519,12 +531,13 @@ export class ConversationStore {
     // process. Do not apply remote-import ceilings here: a pre-existing local
     // store may legitimately exceed them and still has to be recoverable.
     const previous = this.items;
-    this.items = structuredClone(value as StoredConversation[]);
-    for (const item of this.items) {
-      item.tokenPolicy = tokenPolicies.has(item.tokenPolicy as ConversationTokenPolicy) ? item.tokenPolicy : 'adaptive';
-      ensureSyncMetadata(item);
-    }
+    this.items = structuredClone(value as StoredConversation[]).filter(item => !this.transcripts.isDeleted(item.id));
     try {
+      for (const item of this.items) {
+        item.transcript = normalizeTranscriptReference(item.transcript);
+        item.tokenPolicy = tokenPolicies.has(item.tokenPolicy as ConversationTokenPolicy) ? item.tokenPolicy : 'adaptive';
+        ensureSyncMetadata(item);
+      }
       this.save();
     } catch (error) {
       this.items = previous;
@@ -539,10 +552,12 @@ export class ConversationStore {
     let added = 0; let updated = 0; let unchanged = 0; let conflicts = 0;
     const conflictIds: string[] = [];
     for (const candidate of candidates) {
+      if (this.transcripts.isDeleted(candidate.id)) { unchanged++; continue; }
       const existingIndex = next.findIndex((item) => item.id === candidate.id);
       if (existingIndex < 0) {
         next.push({
           ...structuredClone(candidate),
+          transcript: this.importTranscript(candidate),
           permissionMode: narrowPermission(candidate.permissionMode ?? 'ask', permissionCeiling),
           tokenPolicy: 'adaptive',
           workspaceId: undefined,
@@ -564,6 +579,7 @@ export class ConversationStore {
       if (candidateDescendsFromExisting) {
         next[existingIndex] = {
           ...structuredClone(candidate),
+          transcript: this.importTranscript(candidate, existing),
           // Destination-local access decisions are never overwritten by sync.
           permissionMode: existing.permissionMode ?? 'ask',
           tokenPolicy: existing.tokenPolicy ?? 'adaptive',
@@ -590,6 +606,7 @@ export class ConversationStore {
         const title = `${loser.title} (동기화 충돌 복사본)`.slice(0, 120);
         const conflictCopy: StoredConversation = {
           ...structuredClone(loser),
+          transcript: importedLoser ? this.importTranscript(loser) : this.ensureTranscript(loser),
           id: conflictId,
           title,
           pinned: false,
@@ -606,6 +623,7 @@ export class ConversationStore {
       if (candidateWins) {
         next[existingIndex] = {
           ...structuredClone(candidate),
+          transcript: this.importTranscript(candidate),
           permissionMode: existing.permissionMode ?? 'ask',
           tokenPolicy: existing.tokenPolicy ?? 'adaptive',
           workspaceId: existing.workspaceId,
@@ -654,13 +672,14 @@ export class ConversationStore {
     };
     ensureSyncMetadata(item);
     this.items.push(item);
-    this.save();
+    try { this.save(); }
+    catch (error) { this.items = this.items.filter(existing => existing !== item); throw error; }
     return this.detail(item);
   }
 
-  get(id: string): ConversationDetail | undefined {
+  get(id: string, options: TranscriptPageOptions = {}): ConversationDetail | undefined {
     const item = this.items.find((c) => c.id === id);
-    return item ? this.detail(item) : undefined;
+    return item ? this.detail(item, options) : undefined;
   }
 
   turns(id: string): Turn[] {
@@ -712,7 +731,7 @@ export class ConversationStore {
     return this.detail(item);
   }
 
-  appendResult(id: string, turns: Turn[], usage: ChatUsage): ConversationDetail {
+  appendResult(id: string, turns: Turn[], usage: ChatUsage, options: { operationId?: string; newTurns?: Turn[] } = {}): ConversationDetail {
     // Build and compact a detached candidate first. This preserves the live
     // conversation when validation or the atomic disk write fails, while also
     // allowing a long but valid history to compact below the reload budget.
@@ -724,6 +743,17 @@ export class ConversationStore {
     const previousAncestors = [...(previous.syncAncestors ?? [])];
     const candidate = structuredClone(previous);
     candidate.turns = normalizeLocalTurns(turns, false);
+    const archivalTurns = options.newTurns === undefined
+      ? this.newTranscriptTurns(previous.turns, candidate.turns)
+      : normalizeLocalTurns(options.newTurns, false);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ turns: candidate.turns, usage, newTurns: options.newTurns })).digest('hex');
+    const operationId = options.operationId ?? fingerprint;
+    if (typeof operationId !== 'string' || operationId.length > 256 || !operationId.length) throw new Error('대화 저장 작업 ID가 올바르지 않습니다.');
+    const receipt = previous.transcript && this.transcripts.findReceipt(id, operationId, previous.transcript);
+    if (receipt) {
+      if (receipt.fingerprint !== fingerprint) throw new Error('같은 대화 저장 작업 ID에 다른 결과가 전달되었습니다.');
+      return this.detail(previous);
+    }
     candidate.usage.promptTokens = addRecordedTokens(candidate.usage.promptTokens, usage.promptTokens);
     candidate.usage.completionTokens = addRecordedTokens(candidate.usage.completionTokens, usage.completionTokens);
     candidate.usage.accountedTokens = addRecordedTokens(candidate.usage.accountedTokens, usage.accountedTokens);
@@ -736,6 +766,10 @@ export class ConversationStore {
     if (candidate.title === '새 대화' && firstUser) candidate.title = firstUser.replace(/\s+/g, ' ').slice(0, 48);
     this.compact(candidate);
     candidate.turns = normalizeLocalTurns(candidate.turns);
+    // Archive the unshortened originals before committing the bounded prompt.
+    // On failure, neither the live conversation nor its committed pointer moves.
+    candidate.transcript = this.transcripts.append(this.ensureTranscript(previous), archivalTurns, { conversationId: id, id: operationId, fingerprint });
+    candidate.transcript.recentAppends = [...(candidate.transcript.recentAppends ?? []), { id: operationId, fingerprint }].slice(-64);
     advanceSyncRevision(candidate, previousRevision, previousAncestors);
     this.items[index] = candidate;
     try {
@@ -775,11 +809,47 @@ export class ConversationStore {
   }
 
   delete(id: string): boolean {
-    const before = this.items.length;
-    this.items = this.items.filter((c) => c.id !== id);
-    if (this.items.length === before) return false;
-    this.save();
+    const previous = this.items;
+    if (!previous.some(item => item.id === id)) return false;
+    // The tombstone is the durable deletion intent. Even a crash before save()
+    // finishes cannot make a backup expose this conversation again.
+    this.transcripts.markDeleted(id);
+    this.items = previous.filter(c => c.id !== id);
+    try { this.save(); }
+    catch (error) {
+      try { this.transcripts.undoDelete(id); this.items = previous; }
+      catch { this.writesBlocked = true; }
+      throw error;
+    }
     return true;
+  }
+
+  private newTranscriptTurns(previous: Turn[], incoming: Turn[]): Turn[] {
+    // Providers can retain only a suffix of the prompt. Match that suffix
+    // without ever replacing previously archived originals with shortened text.
+    const prior = previous.map(turn => JSON.stringify(turn));
+    const next = incoming.map(turn => JSON.stringify(turn));
+    for (let overlap = Math.min(prior.length, next.length); overlap > 0; overlap--) {
+      if (next.slice(0, overlap).every((turn, index) => turn === prior[prior.length - overlap + index])) return incoming.slice(overlap);
+    }
+    return incoming;
+  }
+
+  private ensureTranscript(item: StoredConversation): TranscriptReference {
+    if (item.transcript) { this.transcripts.assertHead(item.transcript); return structuredClone(item.transcript); }
+    // Legacy compaction is lossy. Preserve available originals and report the
+    // missing messages instead of treating summary excerpts as recovered text.
+    return this.transcripts.append(this.transcripts.empty(item.id, item.compactedMessages), item.turns);
+  }
+
+  private importTranscript(item: StoredConversation, previous?: StoredConversation): TranscriptReference {
+    if (!previous) return this.transcripts.append(this.transcripts.empty(item.id, item.compactedMessages), item.turns);
+    const ref = this.ensureTranscript(previous);
+    const next = this.transcripts.append(ref, this.newTranscriptTurns(previous.turns, item.turns));
+    // Device sync contains bounded prompts only, so newly missing remote history
+    // cannot be presented as a complete locally archived transcript.
+    next.missingMessages = Math.max(next.missingMessages, item.compactedMessages - previous.compactedMessages);
+    return next;
   }
 
   private compact(item: StoredConversation): void {
@@ -817,7 +887,35 @@ export class ConversationStore {
     return item;
   }
 
-  private detail(item: StoredConversation): ConversationDetail {
-    return { ...summarize(item), messages: publicMessages(item.turns, displayOrigin(item)), summary: item.summary, usage: { ...item.usage } };
+  private detail(item: StoredConversation, options: TranscriptPageOptions = {}): ConversationDetail {
+    const limit = transcriptPageLimit(options);
+    if (item.transcript) {
+      try {
+        const { turns, ...history } = this.transcripts.page(item.transcript, options);
+        return { ...summarize(item), messages: publicMessages(turns, displayOrigin(item)), history, summary: item.summary, usage: { ...item.usage } };
+      } catch (error) {
+        // Invalid/stale cursors must not silently return a different page.
+        if (options.before) throw error;
+        if (!this.recoveryDiagnostics.some(diagnostic => diagnostic.code === 'conversation-transcript-unavailable' && diagnostic.path === item.id)) {
+          this.recordDiagnostic({ code: 'conversation-transcript-unavailable', message: '대화 원문 보관 파일을 읽을 수 없습니다. 원본은 보존했고 현재 문맥만 표시합니다.', path: item.id });
+        }
+        const window = displayTranscriptWindow(item.turns, item.turns.length, limit);
+        return {
+          ...summarize(item), messages: publicMessages(window.turns, displayOrigin(item)), summary: item.summary, usage: { ...item.usage },
+          history: { hasMore: false, archivedTurns: item.transcript.turnCount, missingMessages: item.transcript.missingMessages, unavailable: true, ...(window.displayTruncated ? { displayTruncated: true } : {}) },
+        };
+      }
+    }
+    let end = item.turns.length;
+    if (options.before !== undefined) {
+      const match = /^legacy:(\d+)$/.exec(options.before);
+      if (!match || Number(match[1]) >= item.turns.length) throw new Error('대화 기록 커서가 올바르지 않습니다.');
+      end = Number(match[1]);
+    }
+    const { turns, start, displayTruncated } = displayTranscriptWindow(item.turns, end, limit);
+    return {
+      ...summarize(item), messages: publicMessages(turns, displayOrigin(item)), summary: item.summary, usage: { ...item.usage },
+      history: { hasMore: start > 0, nextCursor: start > 0 ? `legacy:${start}` : undefined, archivedTurns: item.turns.length, missingMessages: item.compactedMessages, ...(displayTruncated ? { displayTruncated: true } : {}) },
+    };
   }
 }

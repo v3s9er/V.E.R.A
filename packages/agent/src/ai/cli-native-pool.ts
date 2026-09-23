@@ -323,7 +323,7 @@ class NativeWorker {
           if (item.text.length > streamed.length) a.req.onText?.(item.text.slice(streamed.length));
         }
       } else if (m.method === 'item/started') {
-        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', mcpToolCall: '연결 도구 실행 중', dynamicToolCall: 'PC 화면 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
+        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', mcpToolCall: '연결 도구 실행 중', dynamicToolCall: '연결 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
         if (labels[item?.type]) this.status(labels[item.type]);
       }
     } else if (m.method === 'turn/completed') {
@@ -334,18 +334,19 @@ class NativeWorker {
   }
   private hostTool(m: any) {
     const a = this.active, p = m.params;
-    if (!a?.req.hostTools || a.req.permissionMode !== 'full' || !a.turn || a.turnCompleted
+    if (!a?.req.hostTools || !(a.req.hostTools.authorize?.(p?.tool, a.req.permissionMode) ?? a.req.permissionMode === 'full') || !a.turn || a.turnCompleted
       || p?.threadId !== this.thread || p?.turnId !== a.turn || p.namespace != null
       || typeof p.callId !== 'string' || p.callId.length > 200 || !p.callId
       || !a.req.hostTools.tools.some(tool => tool.name === p.tool)
       || a.pendingTool || a.toolCalls.has(p.callId) || a.toolCalls.size >= 512
       || Buffer.byteLength(JSON.stringify(p.arguments ?? {})) > 32_768) {
-      this.send({ id: m.id, error: { code: -32602, message: 'Host desktop capability correlation failed.' } });
-      this.close(new Error('PC 화면 도구의 대화·권한·중복 요청 검증에 실패했습니다.')); return;
+      this.send({ id: m.id, error: { code: -32602, message: 'Host capability correlation failed.' } });
+      this.close(new Error('연결 도구의 대화·권한·중복 요청 검증에 실패했습니다.')); return;
     }
     a.toolCalls.add(p.callId); a.pendingTool = p.callId;
-    this.status(p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
-    const timer = setTimeout(() => this.close(new Error('PC 화면 도구가 응답하지 않아 중단했습니다.')), 25_000);
+    this.status(p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
+    const timeoutMs = a.req.hostTools.timeoutMs?.(p.tool) ?? 25_000;
+    const timer = setTimeout(() => this.close(new Error('연결 도구가 응답하지 않아 중단했습니다.')), Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(90_000, timeoutMs)) : 25_000);
     a.toolTimer = timer;
     void Promise.resolve().then(() => a.req.hostTools!.execute(p.tool, p.arguments, a.toolAbort.signal)).then(result => {
       if (this.active === a && !a.cancelling && !this.closed) this.send({ id: m.id, result });
@@ -380,7 +381,7 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   const epoch = runtimeEpoch;
   const s = options.req.session;
   if (!s || options.req.permissionMode === 'ask') throw new Error('검증된 네이티브 세션과 실행 승인이 필요합니다.');
-  if (options.req.hostTools && options.req.permissionMode !== 'full') throw new Error('PC 화면 도구는 전체 접근 권한에서만 사용할 수 있습니다.');
+  if (options.req.hostTools?.tools.some(t => !(options.req.hostTools!.authorize?.(t.name, options.req.permissionMode) ?? options.req.permissionMode === 'full'))) throw new Error('현재 권한에서 허용되지 않은 연결 도구입니다.');
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
     options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null]);

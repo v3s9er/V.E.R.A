@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import discord
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -28,6 +28,86 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_persistent_controls(self):
         self.assertTrue(Panel(self.manager).is_persistent())
         self.assertTrue(Controls(self.manager).is_persistent())
+
+    def reopen_fixture(self, archived=False, locked=False):
+        thread = Mock(spec=discord.Thread)
+        thread.id, thread.parent_id = 4, 2
+        thread.archived, thread.locked = archived, locked
+        thread.jump_url = 'https://discord.com/channels/1/4'
+        thread.edit, thread.send = AsyncMock(), AsyncMock()
+        thread.fetch_member, thread.add_user = AsyncMock(), AsyncMock()
+        self.bridge.client.fetch_channel = AsyncMock(return_value=thread)
+        context = NS(guild=NS(id=1), guild_id=1, user=NS(id=3),
+                     response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+        return context, thread
+
+    async def test_open_live_ticket_is_navigation_even_when_busy(self):
+        context, thread = self.reopen_fixture()
+        self.bridge.request.side_effect = RuntimeError('실행 중')
+        for _ in range(3):
+            await self.manager.reopen(context, '4')
+        self.bridge.request.assert_not_awaited()
+        thread.edit.assert_not_awaited()
+        thread.send.assert_not_awaited()
+        thread.add_user.assert_not_awaited()
+        context.followup.send.assert_awaited_with(thread.jump_url, ephemeral=True)
+
+    async def test_reopen_restores_only_registered_owner_membership(self):
+        context, thread = self.reopen_fixture()
+        thread.fetch_member.side_effect = discord.NotFound(NS(status=404, reason='Not Found'), 'Unknown Member')
+        await self.manager.reopen(context, '4')
+        thread.add_user.assert_awaited_once_with(context.user)
+        self.bridge.request.assert_not_awaited()
+        thread.send.assert_not_awaited()
+
+    async def test_membership_permission_error_is_not_treated_as_absence(self):
+        context, thread = self.reopen_fixture()
+        thread.fetch_member.side_effect = discord.Forbidden(NS(status=403, reason='Forbidden'), 'Missing Access')
+        with self.assertRaises(discord.Forbidden):
+            await self.manager.reopen(context, '4')
+        thread.add_user.assert_not_awaited()
+
+    async def test_reopen_archived_or_locked_ticket_without_public_notice(self):
+        for archived, locked in [(True, False), (False, True)]:
+            context, thread = self.reopen_fixture(archived, locked)
+            self.bridge.request.reset_mock()
+            await self.manager.reopen(context, '4')
+            self.assertEqual([c.args[1] for c in self.bridge.request.await_args_list], ['thread.get', 'thread.reopen'])
+            self.assertTrue(self.bridge.request.await_args_list[0].kwargs['requireIdle'])
+            thread.edit.assert_awaited_once_with(archived=False, locked=False)
+            thread.send.assert_not_awaited()
+            self.assertIn('기존 대화', context.followup.send.call_args.args[0])
+
+    async def test_host_archive_is_reconciled_without_editing_live_thread(self):
+        context, thread = self.reopen_fixture()
+        self.manager.state['sessions']['4']['archived'] = True
+        await self.manager.reopen(context, '4')
+        self.assertEqual(self.bridge.request.call_args.args[1], 'thread.reopen')
+        thread.edit.assert_not_awaited()
+        thread.send.assert_not_awaited()
+
+    async def test_reopen_denied_before_discord_mutation(self):
+        context, thread = self.reopen_fixture(archived=True)
+        self.bridge.request.side_effect = RuntimeError('실행 중')
+        with self.assertRaisesRegex(RuntimeError, '실행 중'):
+            await self.manager.reopen(context, '4')
+        thread.edit.assert_not_awaited()
+        thread.send.assert_not_awaited()
+
+    async def test_missing_ticket_preserves_conversation_mapping(self):
+        context, _ = self.reopen_fixture()
+        self.bridge.client.fetch_channel.side_effect = discord.NotFound(NS(status=404, reason='Not Found'), 'Unknown Channel')
+        await self.manager.reopen(context, '4')
+        self.bridge.request.assert_not_awaited()
+        self.assertIn('4', self.manager.state['sessions'])
+        self.assertIn('보존', context.followup.send.call_args.args[0])
+
+    async def test_reopen_other_owner_does_not_touch_ticket(self):
+        context, _ = self.reopen_fixture()
+        context.user.id = 9
+        with self.assertRaises(PermissionError):
+            await self.manager.reopen(context, '4')
+        self.bridge.client.fetch_channel.assert_not_awaited()
 
     async def test_other_admin_bot_webhook_and_unknown_channel_ignored(self):
         for field, value in [('author', NS(id=9, bot=False)), ('author', NS(id=3, bot=True)), ('webhook_id', 55), ('channel', NS(id=9))]:
