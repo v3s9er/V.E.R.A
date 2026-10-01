@@ -104,7 +104,9 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
   async function command(message: any): Promise<unknown> {
     const guilds = ctx.storage.get<string[]>('allowedGuildIds') ?? [];
     if (!ready) throw new Error('Discord 재연결 중입니다. 연결 복구 후 다시 요청하세요. 관리자 권한 문제는 아닙니다.');
-    if (!guilds.includes(String(message.guildId))) throw new Error('등록된 Discord 서버에서만 사용할 수 있습니다. DM은 지원하지 않습니다.');
+    if (message.guildId == null || message.guildId === '') throw new Error('DM에서는 사용할 수 없습니다. Discord 서버의 티켓 채널에서 실행하세요.');
+    if (!/^\d{15,22}$/.test(String(message.guildId))) throw new Error('Discord 서버 정보가 올바르지 않습니다.');
+    if (!guilds.includes(String(message.guildId))) throw new Error('이 서버가 Mr.Robot의 허용 서버 목록에 없습니다. PC 소유자가 서버를 등록한 뒤 다시 실행하세요.');
     if (message.guildAdmin !== true && message.allowAi !== true) throw new Error('allow_ai 역할 또는 서버 관리자 권한이 필요합니다.');
     if (![message.userId, message.channelId].every(id => /^\d{15,22}$/.test(String(id)))) throw new Error('Discord 사용자·티켓 정보가 올바르지 않습니다.');
     const channel = `${message.guildId}:${message.channelId}:${message.userId}`;

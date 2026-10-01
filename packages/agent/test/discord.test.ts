@@ -94,10 +94,18 @@ try {
   assert.equal(JSON.stringify(replies).includes('fixture-token'), false, 'credentials never enter Python pipe');
   emit({ event: 'ready', owner: '123456789012345678', guilds: ['222222222222222222'] });
   emit({ id: 'denied', userId: '999999999999999999', channelId: '111111111111111111', action: 'ask', text: 'No' });
-  await waitFor(() => replies.some(r => r.id === 'denied')); assert.ok(replies.find(r => r.id === 'denied').error);
+  await waitFor(() => replies.some(r => r.id === 'denied')); assert.match(replies.find(r => r.id === 'denied').error, /DM에서는/);
   const identity = { userId: '333333333333333333', channelId: '111111111111111111', guildId: '222222222222222222', guildAdmin: true };
   emit({ ...identity, id: 'foreign', guildId: '444444444444444444', action: 'status' });
-  await waitFor(() => replies.some(r => r.id === 'foreign')); assert.ok(replies.find(r => r.id === 'foreign').error);
+  await waitFor(() => replies.some(r => r.id === 'foreign')); assert.match(replies.find(r => r.id === 'foreign').error, /허용 서버 목록/);
+  assert.doesNotMatch(replies.find(r => r.id === 'foreign').error, /DM/);
+  emit({ ...identity, id: 'invalid-guild', guildId: 'malformed', action: 'status' });
+  await waitFor(() => replies.some(r => r.id === 'invalid-guild')); assert.match(replies.find(r => r.id === 'invalid-guild').error, /서버 정보/);
+  // A PC-side allowlist update is read by an already running plugin, without restart.
+  storage.set('allowedGuildIds', [identity.guildId, '444444444444444444']);
+  emit({ ...identity, id: 'newly-allowed', guildId: '444444444444444444', action: 'status' });
+  await waitFor(() => replies.some(r => r.id === 'newly-allowed')); assert.ok(replies.find(r => r.id === 'newly-allowed').result);
+  storage.set('allowedGuildIds', [identity.guildId]);
   emit({ ...identity, id: 'unconfirmed', action: 'access', mode: 'full' });
   await waitFor(() => replies.some(r => r.id === 'unconfirmed')); assert.ok(replies.find(r => r.id === 'unconfirmed').error);
   emit({ ...identity, id: 'full', action: 'access', mode: 'full', confirmFull: true });
