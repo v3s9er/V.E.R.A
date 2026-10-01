@@ -40,6 +40,9 @@ check('Cloudflare Access credentials stay in safeStorage and are injected only f
   && main.includes('pc.accessOrigin !== origin') && main.includes('CF-Access-Client-Secret') && main.includes('hasAccessCredentials')
   && !rpc.includes('CF-Access-Client-Secret'));
 check('redirected renderer requests are stripped before exact-origin credentials can be re-injected', main.includes("'cf-access-client-secret'") && main.includes('sensitiveHeaders.has(key.toLowerCase())') && main.indexOf('sensitiveHeaders.has(key.toLowerCase())') < main.indexOf('resolveDesktopCredential(reference, parsed.origin)'));
+check('late network callbacks identify the renderer without dereferencing a destroyed window', main.includes('details.webContentsId === desktopRendererId')
+  && main.includes('!currentWindow.isDestroyed() && !currentWindow.webContents.isDestroyed()')
+  && !main.includes('details.webContentsId === win.webContents.id'));
 check('Electron pairing response is retained as a short-lived main-process reference', main.includes('pendingPcCredentials.set') && main.includes('DESKTOP_PENDING_AUTH_PREFIX') && preload.includes('pairRemotePc'));
 check('pending enrollment discards renderer-expanded origins and fixes both credential scopes', main.includes('origins: [pending.origin]')
   && main.includes('credentialOrigin: pending.origin') && main.includes('accessOrigin: pending.accessOrigin'));

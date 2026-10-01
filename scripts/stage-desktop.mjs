@@ -43,6 +43,7 @@ execFileSync(process.execPath, [
 ], { stdio: 'inherit' });
 
 copyFileSync(join(desktop, 'main.mjs'), join(stage, 'main.mjs'));
+copyFileSync(join(desktop, 'window-recovery.mjs'), join(stage, 'window-recovery.mjs'));
 copyFileSync(join(desktop, 'nmap-route.mjs'), join(stage, 'nmap-route.mjs'));
 copyFileSync(join(desktop, 'remote-pair-security.mjs'), join(stage, 'remote-pair-security.mjs'));
 copyFileSync(join(desktop, 'preload.cjs'), join(stage, 'preload.cjs'));

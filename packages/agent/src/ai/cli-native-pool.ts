@@ -6,6 +6,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { daybreakProgram } from '@mr-robot/shared';
 import { classifyCliFailure } from './cli-failure.js';
 import { CliSessionEvents } from './cli-session-events.js';
+import { NativeToolEvents } from './native-tool-events.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { normalizeProviderUsageReport, type NativeAgentRequest, type ProviderResult, type Turn } from './provider.js';
@@ -83,6 +84,7 @@ class NativeWorker {
     steering?: { id: number; inputs: string[]; timer: NodeJS.Timeout };
     steeringDisabled?: boolean; turnCompleted?: boolean; cancelling?: boolean; interruptTimer?: NodeJS.Timeout;
     toolAbort: AbortController; toolCalls: Set<string>; pendingTool?: string; toolTimer?: NodeJS.Timeout;
+    toolEvents: NativeToolEvents;
   };
   closed = false;
   lastUsed = Date.now();
@@ -152,7 +154,7 @@ class NativeWorker {
       this.active = { req, resolve, reject, abort, timer, heartbeat, startedAt, status: '', text: '', turn: '',
         baseline: this.checkpoint?.usage ?? emptyUsage(), total: this.checkpoint?.usage ?? emptyUsage(),
         usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Set(), streamed: new Map(), applied: [],
-        toolAbort: new AbortController(), toolCalls: new Set() };
+        toolAbort: new AbortController(), toolCalls: new Set(), toolEvents: new NativeToolEvents(req.onTool) };
       this.active.unsubscribe = req.steering?.subscribe(() => this.steer());
       req.signal?.addEventListener('abort', abort, { once: true });
       this.status(this.checkpoint ? '기존 대화 세션 연결 중' : '새 대화 세션 연결 중');
@@ -315,6 +317,7 @@ class NativeWorker {
       }
     } else if (m.method === 'item/started' || m.method === 'item/completed') {
       const item = m.params?.item;
+      a.toolEvents.accept(m.method, item);
       if (item?.type === 'agentMessage' && m.method === 'item/started' && typeof item.id === 'string') {
         if (a.phases.size > 128) return this.close(new Error('네이티브 메시지 개수 초과'));
         a.phases.set(item.id, item.phase ?? 'unknown');
@@ -329,7 +332,7 @@ class NativeWorker {
           if (item.text.length > streamed.length) a.req.onText?.(item.text.slice(streamed.length));
         }
       } else if (m.method === 'item/started') {
-        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', mcpToolCall: '연결 도구 실행 중', dynamicToolCall: '연결 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
+        const labels: Record<string, string> = { reasoning: '모델이 요청을 검토하고 있습니다', commandExecution: '명령 실행 중', fileChange: '파일 수정 중', webSearch: '웹 검색 중', imageView: '원본 이미지 확인 중', mcpToolCall: '연결 도구 실행 중', dynamicToolCall: '연결 도구 실행 중', contextCompaction: '대화 문맥 정리 중' };
         if (labels[item?.type]) this.status(labels[item.type]);
       }
     } else if (m.method === 'turn/completed') {
@@ -350,7 +353,7 @@ class NativeWorker {
       this.close(new Error('연결 도구의 대화·권한·중복 요청 검증에 실패했습니다.')); return;
     }
     a.toolCalls.add(p.callId); a.pendingTool = p.callId;
-    this.status(p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
+    this.status(p.tool === 'evidence_image' ? '원본 이미지 확인 중' : p.tool === 'evidence_text' ? '원본 문서 확인 중' : p.tool === 'evidence_python_syntax' ? '코드 문법 검사 중' : p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
     const timeoutMs = a.req.hostTools.timeoutMs?.(p.tool) ?? 25_000;
     const timer = setTimeout(() => this.close(new Error('연결 도구가 응답하지 않아 중단했습니다.')), Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(90_000, timeoutMs)) : 25_000);
     a.toolTimer = timer;
@@ -366,6 +369,7 @@ class NativeWorker {
     });
   }
   private release() { const a = this.active; if (a) {
+    a.toolEvents.finish();
     clearTimeout(a.timer); clearInterval(a.heartbeat); clearTimeout(a.interruptTimer); clearTimeout(a.steering?.timer);
     a.unsubscribe?.(); a.req.signal?.removeEventListener('abort', a.abort);
     clearTimeout(a.toolTimer); a.toolAbort.abort(); a.req.hostTools?.dispose();

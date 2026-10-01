@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket as NativeWebSocket } from 'ws';
 import { openTrustedNmapRouteWithHttpsFallback } from './nmap-route.mjs';
 import { normalizeRemotePairOrigin, postPinnedRemotePairJson } from './remote-pair-security.mjs';
+import { installWindowRecovery } from './window-recovery.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bundledAgent = resolve(here, 'agent.mjs');
@@ -36,6 +37,7 @@ const runtimeIconPath = existsSync(resolve(here, 'icon.png'))
 let server = null;
 let agentPort = 0;
 let win = null;
+let windowRecovery = null;
 let tray = null;
 let quitting = false;
 let stopped = false;
@@ -109,6 +111,7 @@ function showMainWindow() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+  windowRecovery?.ensureVisible();
 }
 
 function rebuildTrayMenu() {
@@ -710,9 +713,11 @@ function createWindow(url) {
   // enter Chromium's network boundary. JavaScript never receives the global
   // secret, while the exact embedded loopback API remains fully functional.
   const localOrigin = new URL(url).origin;
+  const currentWindow = win;
+  const desktopRendererId = currentWindow.webContents.id;
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['<all_urls>'] }, (details, callback) => {
     const headers = { ...details.requestHeaders };
-    if (server && win && details.webContentsId === win.webContents.id) {
+    if (details.webContentsId === desktopRendererId) {
       const parsed = new URL(details.url);
       const tokenHeader = Object.keys(headers).find((key) => key.toLowerCase() === 'x-mr-robot-token');
       const reference = tokenHeader ? headers[tokenHeader] : '';
@@ -729,7 +734,8 @@ function createWindow(url) {
       for (const key of Object.keys(headers)) {
         if (sensitiveHeaders.has(key.toLowerCase())) delete headers[key];
       }
-      if (parsed.pathname.startsWith('/api/') && (reference === DESKTOP_LOCAL_AUTH_TOKEN || desktopRemotePcId(reference))) {
+      if (server && !currentWindow.isDestroyed() && !currentWindow.webContents.isDestroyed()
+          && parsed.pathname.startsWith('/api/') && (reference === DESKTOP_LOCAL_AUTH_TOKEN || desktopRemotePcId(reference))) {
         try {
           const credential = resolveDesktopCredential(reference, parsed.origin);
           if (credential) headers['x-mr-robot-token'] = credential;
@@ -782,7 +788,22 @@ function createWindow(url) {
   });
   win.webContents.on('destroyed', () => closeLocalRpc(false, '렌더러가 종료되었습니다.'));
 
-  void win.loadURL(url);
+  windowRecovery = installWindowRecovery(currentWindow, {
+    url,
+    log: appendStartupLog,
+    isQuitting: () => quitting,
+    onUnavailable: async () => {
+      const { response } = await dialog.showMessageBox(currentWindow, {
+        type: 'error',
+        title: 'Mr.Robot 화면을 불러오지 못했습니다',
+        message: '화면 연결을 복구하지 못했습니다.',
+        detail: '화면만 다시 불러옵니다. 저장된 대화와 설정은 지우지 않으며, 백그라운드 에이전트 작업은 유지됩니다.',
+        buttons: ['다시 불러오기', '나중에'], defaultId: 0, cancelId: 1,
+      });
+      return response === 0;
+    },
+  });
+  windowRecovery.start();
 }
 
 ipcMain.handle('mr-robot:choose-directory', async (event) => {
@@ -925,6 +946,7 @@ ipcMain.on('mr-robot:local-rpc.close', (event) => {
 
 async function quit() {
   quitting = true;
+  windowRecovery?.dispose();
   closeLocalRpc(false, 'Mr.Robot을 종료합니다.');
   for (const controller of activeDownloads.values()) controller.abort();
   activeDownloads.clear();

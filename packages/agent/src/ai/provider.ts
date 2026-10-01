@@ -98,6 +98,8 @@ export type ProviderEvent =
   | { type: 'tool'; call: ProviderToolCall };
 
 export interface ChatRequest {
+  /** Host-validated visual evidence for isolated Codex workers, never URLs from model input. */
+  evidenceImages?: Array<{ label: string; dataUrl: string }>;
   daybreakEnabled?: boolean;
   system?: string;
   turns: Turn[];
@@ -132,8 +134,18 @@ export interface NativeAgentRequest {
   signal?: AbortSignal;
   onStatus?: (status: string) => void;
   onText?: (text: string) => void;
+  onTool?: (event: NativeToolEvent) => void;
   steering?: NativeSteeringControl;
   onSteeringApplied?: (inputs: readonly string[]) => void;
+}
+
+/** Public lifecycle metadata only: no command arguments, outputs, or reasoning. */
+export interface NativeToolEvent {
+  name: string;
+  callId: string;
+  input: Record<string, never>;
+  status: 'start' | 'done' | 'error';
+  elapsedMs?: number;
 }
 
 export interface NativeToolResult {

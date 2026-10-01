@@ -46,6 +46,12 @@ export class CliSessionEvents {
     return true;
   }
   private enqueue(m: any) {
+    // User-message lifecycle payloads can echo large host-provided images.
+    // Keep identity for correlation, not a second copy of private input bytes.
+    if (m.params?.item?.type === 'userMessage') m = { ...m, params: {
+      threadId: m.params.threadId, turnId: m.params.turnId,
+      item: { type: 'userMessage', id: m.params.item.id },
+    } };
     this.pendingBytes += Buffer.byteLength(JSON.stringify(m));
     if (this.pending.length >= 128 || this.pendingBytes > 512 * 1024) throw new Error('구독 초기 응답 대기 한도를 초과했습니다.');
     this.pending.push(m);

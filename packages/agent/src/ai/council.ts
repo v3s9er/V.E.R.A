@@ -1,4 +1,20 @@
 import type { RoutingMode } from '@mr-robot/shared';
+import { CliFailure } from './cli-failure.js';
+
+/** Fixed codes only: never expose a provider message, path, prompt or output. */
+export function councilFailureCode(error: unknown): string {
+  if (error instanceof CliFailure) return error.code;
+  const message = error instanceof Error ? error.message : '';
+  if (/작업 응답 형식|구독 응답 형식|응답 크기/.test(message)) return 'response_format';
+  if (/도구 요청|도구 입력|네이티브 도구|네이티브 실행/.test(message)) return 'tool_protocol';
+  if (/식별자|초기화 순서/.test(message)) return 'session_identity';
+  if (/출력 한도|초기 응답 대기 한도/.test(message)) return 'transport_limit';
+  if (/Council evidence incomplete/.test(message)) return 'evidence_round_limit';
+  if (/Council proposal incomplete/.test(message)) return 'empty_proposal';
+  if (/Council evidence context limit/.test(message)) return 'evidence_context_limit';
+  if (/Council evidence batch too large/.test(message)) return 'tool_batch_limit';
+  return 'worker_failed';
+}
 
 export interface CouncilLimits {
   /** Total deliberation budget; final verification gets its own turn afterwards. */
@@ -19,6 +35,7 @@ export interface CouncilEvent {
   id: string;
   state: CouncilState;
   elapsedMs: number;
+  failureCode?: string;
 }
 export interface CouncilOutcome<T> extends CouncilEvent {
   value?: T;
@@ -59,7 +76,7 @@ export class Council {
     this.deadline = performance.now() + options.limits.deliberationMs;
   }
 
-  async collect<T>(jobs: Array<{ id: string; run(signal: AbortSignal): Promise<T> }>): Promise<CouncilOutcome<T>[]> {
+  async collect<T>(jobs: Array<{ id: string; run(signal: AbortSignal): Promise<T> }>, requiredResults?: number): Promise<CouncilOutcome<T>[]> {
     const { signal: parent, limits } = this.options;
     parent.throwIfAborted();
     const remaining = this.deadline - performance.now();
@@ -69,13 +86,14 @@ export class Council {
       return event;
     });
     if (!jobs.length) return [];
+    const threshold = requiredResults ?? Math.ceil(jobs.length / 2);
+    if (!Number.isInteger(threshold) || threshold < 1 || threshold > jobs.length) throw new Error('Invalid council completion threshold');
     const batch = new AbortController();
     const batchSignal = AbortSignal.any([parent, batch.signal]);
     const budgetTimer = setTimeout(() => batch.abort(new CouncilStop('timed_out')), Math.ceil(remaining));
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     let completed = 0;
     // This is an evidence threshold, NOT a correctness/consensus vote.
-    const threshold = Math.ceil(jobs.length / 2);
     let fatal: unknown;
     try {
       const outcomes = await Promise.all(jobs.map(async job => {
@@ -102,7 +120,7 @@ export class Council {
           if (this.options.isFatal(error)) { fatal ??= error; batch.abort(error); }
           const state: CouncilState = parent.aborted || fatal ? 'cancelled'
             : signal.aborted && signal.reason instanceof CouncilStop ? signal.reason.state : 'failed';
-          const outcome = event(state);
+          const outcome = { ...event(state), ...(state === 'failed' ? { failureCode: councilFailureCode(error) } : {}) };
           // No provider errors, prompts, model output or credentials in telemetry.
           this.emit(outcome);
           return outcome;

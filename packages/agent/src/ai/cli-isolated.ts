@@ -7,17 +7,32 @@ import { normalizeProviderUsageReport, type ChatRequest, type ProviderResult } f
 
 export const ISOLATED_OUTPUT_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['text', 'toolCalls'],
-  properties: { text: { type: 'string' }, toolCalls: { type: 'array', items: {
+  properties: { text: { type: 'string' }, toolCalls: { type: 'array', maxItems: 4, items: {
     type: 'object', additionalProperties: false, required: ['name', 'arguments'],
     properties: { name: { type: 'string' }, arguments: { type: 'string', description: 'JSON object encoded as a string' } },
   } } },
 };
+export function isolatedOutputSchema(req: ChatRequest) {
+  return { ...ISOLATED_OUTPUT_SCHEMA, properties: { ...ISOLATED_OUTPUT_SCHEMA.properties,
+    toolCalls: { ...ISOLATED_OUTPUT_SCHEMA.properties.toolCalls, maxItems: req.tools?.length ? 4 : 0 },
+  } };
+}
 
 /** These are data requests to our broker, never native CLI function calls. */
 export function isolatedPrompt(req: ChatRequest): string {
-  return [req.system, 'You are a text-only worker using the existing subscription. Native tools and computer environment are disabled. Return ONLY JSON with {"text":"user-facing answer", "toolCalls":[{"name":"allowed tool", "arguments":"JSON object string"}]}. To request work, choose only the broker tools below; Mr.Robot validates and executes them outside this worker. Use an empty toolCalls array when finished. Do not print this JSON protocol to the user.',
+  return [req.system, 'You are an isolated worker using the existing subscription. Host-supplied images, when present, are evidence data you can inspect. Native tools and computer environment are disabled. Return ONLY JSON with {"text":"user-facing answer", "toolCalls":[{"name":"allowed tool", "arguments":"JSON object string"}]}. To request work, choose only the broker tools below; Mr.Robot validates and executes them outside this worker. Use an empty toolCalls array when finished. Do not print this JSON protocol to the user.',
+    'Request at most four independent broker calls per response. Prefer one concise proposal after reading the decisive evidence; do not reconstruct irrelevant details.',
     `Broker tools: ${JSON.stringify(req.tools ?? [])}`,
     `Conversation: ${JSON.stringify(req.turns)}`].join('\n\n');
+}
+
+export function evidenceImageInputs(req: ChatRequest): Array<{ type: 'text'; text: string; text_elements: [] } | { type: 'image'; url: string }> {
+  const images = req.evidenceImages ?? [];
+  if (images.length > 4 || images.reduce((n, i) => n + i.dataUrl.length, 0) > 16 * 1024 * 1024) throw new Error('Visual evidence transport limit exceeded');
+  return images.flatMap(image => {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(image.dataUrl) || image.label.length > 1000) throw new Error('Invalid host image evidence');
+    return [{ type: 'text' as const, text: `Evidence image identity (data): ${image.label}`, text_elements: [] as [] }, { type: 'image' as const, url: image.dataUrl }];
+  });
 }
 export function parseIsolatedReply(text: string, req: ChatRequest, usage: ProviderResult['usage']): ProviderResult {
   if (text.length > 384 * 1024) throw new Error('구독 모델의 응답 크기가 너무 큽니다.');

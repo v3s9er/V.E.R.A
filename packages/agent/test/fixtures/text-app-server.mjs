@@ -13,6 +13,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method !== 'turn/start') return;
   if (m.params.environments.length || m.params.threadId !== threadId) throw Error('turn boundary failed');
   const prompt = m.params.input[0].text;
+  if (prompt.includes('EXPECT_IMAGE') && !m.params.input.some(i => i.type === 'image' && i.url === 'data:image/png;base64,YWJj')) throw Error('missing evidence image');
+  if (prompt.includes('EXPECT_NO_IMAGE_DUPLICATE') && m.params.input.some(i => i.type === 'image')) throw Error('duplicate evidence image');
   const expectedProgram = [...prompt.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
   if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');
   if (count && prompt.includes('FIRST_PRIVATE_TEXT')) throw Error('history retransmitted');

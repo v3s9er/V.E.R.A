@@ -19,6 +19,8 @@ export interface RoutingTrace {
   cacheWritePromptTokens?: number;
   reasoningTokens?: number;
   toolCalls: number;
+  /** Sum of observed tool durations, not wall time (tools may overlap). */
+  toolElapsedMs?: number;
   latencyMs: number;
   /** First visible answer delta. Undefined means unobserved, never zero. */
   firstTextMs?: number;
@@ -28,6 +30,8 @@ export interface RoutingTrace {
   error?: string;
   /** Per-worker counters are already included in aggregate usage above. */
   agents?: import('@mr-robot/shared').CoordinationAgent[];
+  /** Counts only; never persist private fact/provenance bodies in traces. */
+  knowledge?: import('@mr-robot/shared').KnowledgeMetrics;
 }
 
 export class TelemetryStore {
@@ -134,8 +138,13 @@ function normalizeTrace(input: unknown): RoutingTrace | undefined {
   for (const key of ['at', 'promptTokens', 'completionTokens', 'toolCalls', 'latencyMs', 'estimatedCost']) if (!validNumber(row[key])) return undefined;
   const trace: RoutingTrace = { id: row.id.slice(0, 128), at: Number(row.at), promptTokens: Number(row.promptTokens), completionTokens: Number(row.completionTokens), toolCalls: Number(row.toolCalls), latencyMs: Number(row.latencyMs), estimatedCost: Number(row.estimatedCost), ok: row.ok };
   for (const key of ['conversationId', 'providerId', 'providerLabel', 'model', 'role', 'effort', 'error'] as const) if (typeof row[key] === 'string') trace[key] = row[key].slice(0, key === 'error' ? 500 : 256);
-  for (const key of ['accountedTokens', 'cachedPromptTokens', 'cacheWritePromptTokens', 'reasoningTokens', 'firstTextMs'] as const) if (validNumber(row[key])) trace[key] = row[key];
+  for (const key of ['accountedTokens', 'cachedPromptTokens', 'cacheWritePromptTokens', 'reasoningTokens', 'firstTextMs', 'toolElapsedMs'] as const) if (validNumber(row[key])) trace[key] = row[key];
   if (row.cancelled === true) trace.cancelled = true;
+  if (row.knowledge && typeof row.knowledge === 'object') {
+    const k = row.knowledge as Record<string, unknown>;
+    if (['asserted','inferred','conflicts','contextBytes','retrievalMs'].every(key => validNumber(k[key])) && typeof k.truncated === 'boolean')
+      trace.knowledge = { asserted: Number(k.asserted), inferred: Number(k.inferred), conflicts: Number(k.conflicts), contextBytes: Number(k.contextBytes), retrievalMs: Number(k.retrievalMs), truncated: k.truncated };
+  }
   if (Array.isArray(row.agents)) trace.agents = row.agents.slice(0, 6).flatMap(agent => {
     if (!agent || typeof agent !== 'object' || !['queued', 'running', 'completed', 'failed', 'cancelled'].includes(agent.state)
       || !validNumber(agent.usage?.promptTokens) || !validNumber(agent.usage?.completionTokens)) return [];

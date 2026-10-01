@@ -71,7 +71,7 @@ test('tool metrics reset per request, count start events only and ignore older t
     if (turn === 1) {
       assert.equal(history.reduce((sum, item) => sum + (item.toolCalls?.length ?? 0), 0), 3);
       callbacks.onTool({ name: 'list_files', input: {}, status: 'start' });
-      callbacks.onTool({ name: 'list_files', input: {}, status: 'done' });
+      callbacks.onTool({ name: 'list_files', input: {}, status: 'done', elapsedMs: 12 });
       callbacks.onTool({ name: 'read_file', input: {}, status: 'start' });
       callbacks.onTool({ name: 'read_file', input: {}, status: 'error' });
       callbacks.onText('New result');
@@ -85,6 +85,7 @@ test('tool metrics reset per request, count start events only and ignore older t
   const second = await handlers.get('chat.start')({ text: 'Second request', conversationId: conversation.id }, client);
   assert.equal(first.ok, true); assert.equal(second.ok, true);
   assert.equal(traces[0].toolCalls, 2, 'Not five from previous transcript plus this request, nor four start/end notifications.');
+  assert.equal(traces[0].toolElapsedMs, 12);
   assert.equal(traces[1].toolCalls, 0, 'Counter is request-local.');
   assert.equal(typeof traces[0].firstTextMs, 'number');
   assert.equal(traces[1].firstTextMs, undefined, 'Absent observation must not fabricate zero latency.');
@@ -167,4 +168,31 @@ test('a Discord-denied model is never recorded as an executed model', () => with
   assert.equal(traces[0].providerLabel, undefined);
   assert.equal(traces[0].model, undefined);
   assert.equal(traces[0].promptTokens, 0);
+}));
+
+test('real chat handler injects rule evidence and counts it without changing permissions', () => withServer(async (server, handlers, client) => {
+  server.config.settings.safety.mode = 'full';
+  const traces: RoutingTrace[] = [];
+  server.telemetry.record = (trace: RoutingTrace) => traces.push(trace);
+  for (const [subject,predicate,object] of [['Probe','is_a','Sensor'],['Sensor','subclass_of','Device']])
+    server.memory.add(`${subject} ${predicate} ${object}`,[],{relationMode:'fact',relation:{subject,predicate,object}});
+  server.loop.run = async (_history: Turn[], _text: string, _callbacks: any, _tools: any, options: any) => {
+    assert.match(options.context,/type_inheritance/); assert.match(options.context,/Probe/);
+    assert.equal(options.permissionMode,'workspace');
+    return { text:'Verified fixture', turns:[{role:'assistant',content:'Verified fixture'}],usage,route };
+  };
+  const result = await handlers.get('chat.start')({text:'Probe 유형',permissionMode:'workspace'},client);
+  assert.equal(result.ok,true,result.error);assert.equal(traces[0].knowledge?.inferred,1);
+}));
+
+test('isolated Discord run receives neither personal ontology nor knowledge counters', () => withServer(async (server, handlers, client) => {
+  client.state.auth.trustedDiscord=true;
+  server.memory.retainedContext=()=>{throw new Error('Private knowledge must never be queried for isolated Discord');};
+  const traces: RoutingTrace[]=[];server.telemetry.record=(trace: RoutingTrace)=>traces.push(trace);
+  server.loop.run=async (_h: Turn[],_t: string,_c: any,_tools: any,options: any)=>{
+    assert.ok(options.isolation);assert.doesNotMatch(options.context,/Scoped knowledge/);
+    return {text:'Isolated fixture',turns:[{role:'assistant',content:'Isolated fixture'}],usage,route};
+  };
+  const result=await handlers.get('chat.start')({text:'Probe 유형',discordIsolation:'isolated'},client);
+  assert.equal(result.ok,true);assert.equal(traces[0].knowledge,undefined);
 }));

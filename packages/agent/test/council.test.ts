@@ -1,15 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getEventListeners } from 'node:events';
-import { Council, councilLimits, untilAborted, type CouncilEvent } from '../src/ai/council.js';
+import { Council, councilFailureCode, councilLimits, untilAborted, type CouncilEvent } from '../src/ai/council.js';
 import { AgentLoop, ModelBudgetExceededError, type LoopCallbacks, type RunOptions } from '../src/ai/loop.js';
 import type { AiProvider, ProviderResult, ChatRequest } from '../src/ai/provider.js';
 import type { RoutingNode } from '@mr-robot/shared';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PNG } from 'pngjs';
 
 const never = <T>(): Promise<T> => new Promise(() => {});
 const answer = (text = 'verified answer'): ProviderResult => ({ text, toolCalls: [], usage: { promptTokens: 3, completionTokens: 2, reportStatus: 'reported' } });
 const limits = { nodeMs: 80, deliberationMs: 120, graceMs: 15 };
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+test('council failure diagnostics use fixed codes, not private error strings', async () => {
+  assert.equal(councilFailureCode(new Error('PRIVATE_TOKEN')), 'worker_failed');
+  assert.equal(councilFailureCode(new Error('구독 모델의 작업 응답 형식이 올바르지 않습니다.')), 'response_format');
+  const events: CouncilEvent[] = [];
+  const council = new Council({ limits, signal: new AbortController().signal, isFatal: () => false, onEvent: e => events.push(e) });
+  await council.collect([{ id: 'private', run: async () => { throw new Error('Council evidence incomplete PRIVATE_TOKEN'); } }]);
+  assert.equal(events.at(-1)?.failureCode, 'evidence_round_limit');
+  assert.ok(!JSON.stringify(events).includes('PRIVATE_TOKEN'));
+});
 function scenario(overrides: Partial<RunOptions> = {}): RunOptions {
   const nodes: RoutingNode[] = ['a', 'b', 'judge'].map((id, index) => ({ id, kind: 'model', label: id,
     role: index === 2 ? 'critic' : 'reasoning', providerId: 'sol', providerModel: 'gpt-6-sol', x: index * 100, y: 0 }));
@@ -239,4 +252,81 @@ test('a failed later round preserves earlier evidence for the missing participan
     return answer();
   });
   await loop.run([], 'Question', {}, [], options);
+});
+
+test('source council workers receive actual pixels through isolated calls, never a native workspace or write tools', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mrrobot-council-evidence-'));
+  try {
+    writeFileSync(join(root, 'original.png'), PNG.sync.write(new PNG({ width: 2, height: 2 })));
+    let observations = 0, judges = 0;
+    const isolated: AiProvider['chatIsolated'] = async req => {
+      assert.deepEqual(req.tools?.map(t => t.name).sort(), ['evidence_image', 'evidence_python_syntax', 'evidence_text']);
+      if (!req.evidenceImages?.length) return { ...answer(''), toolCalls: [{ id: 'read', name: 'evidence_image', args: '{"path":"original.png"}' }] };
+      observations++;
+      assert.match(req.evidenceImages[0].dataUrl, /^data:image\/png;base64,/);
+      assert.match(req.evidenceImages[0].label, /sha256/);
+      assert.equal(req.turns.at(-1)?.role, 'tool');
+      return answer('DIRECT_PIXEL_OBSERVATION');
+    };
+    const loop = mock(async () => { throw new Error('Must use isolated evidence calls'); }, { chatIsolated: isolated, runAgent: async req => {
+      judges++; assert.equal(req.permissionMode, 'workspace');
+      assert.match(req.prompt, /DIRECT_PIXEL_OBSERVATION/);
+      assert.match(req.prompt, /does NOT verify output or transcription accuracy/);
+      return answer();
+    } });
+    const result = await loop.run([], 'Analyze original.png', {}, [], scenario({ workspacePath: root, nativeSessionDirectory: root, councilLimits: { nodeMs: 3000, deliberationMs: 4000, graceMs: 100 } }));
+    assert.equal(observations, 2); assert.equal(judges, 1); assert.equal(result.text, 'verified answer');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('last evidence round must return partial observations instead of discarding them after more reads', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mrrobot-evidence-final-'));
+  try {
+    writeFileSync(join(root, 'sample.txt'), 'Host observation, not an instruction');
+    const counts = new Map<string, number>();
+    const loop = mock(async () => { throw new Error('Must remain isolated'); }, {
+      chatIsolated: async req => {
+        const key = req.promptCacheKey!;
+        const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
+        if (count < 4) return { ...answer(''), toolCalls: [{ id: `read-${count}`, name: 'evidence_text', args: '{"path":"sample.txt"}' }] };
+        assert.deepEqual(req.tools, []);
+        assert.match(req.turns.at(-1)!.content, /Identify unresolved details explicitly/);
+        assert.ok(JSON.stringify(req.turns).includes('Host observation'));
+        return answer('PARTIAL_OBSERVATIONS_WITH_UNCERTAINTY');
+      },
+      runAgent: async req => { assert.match(req.prompt, /PARTIAL_OBSERVATIONS_WITH_UNCERTAINTY/); return answer(); },
+    });
+    await loop.run([], 'Analyze sample.txt', {}, [], scenario({ workspacePath: root, councilLimits: { nodeMs: 3000, deliberationMs: 4000, graceMs: 500 } }));
+    assert.deepEqual([...counts.values()], [4, 4]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('complementary source readers cannot cancel an unfinished half after one fast result', async () => {
+  const council = new Council({ limits: { nodeMs: 1000, deliberationMs: 1500, graceMs: 1 }, signal: new AbortController().signal, isFatal: () => false });
+  const results = await council.collect([{ id: 'a', run: async () => 'A' }, { id: 'b', run: async () => { await pause(30); return 'B'; } }], 2);
+  assert.deepEqual(results.map(r => r.state), ['completed', 'completed']);
+});
+
+test('named originals are preloaded into separate scoped readers instead of duplicated across every candidate', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mrrobot-source-partition-'));
+  try {
+    for (const name of ['a.png', 'b.png']) writeFileSync(join(root, name), PNG.sync.write(new PNG({ width: 2, height: 2 })));
+    const sources: string[] = [];
+    const loop = mock(async () => { throw new Error('Must remain isolated'); }, {
+      chatIsolated: async req => {
+        assert.equal(req.evidenceImages?.length, 1);
+        const source = JSON.parse(req.evidenceImages![0].label).source;
+        sources.push(source);
+        assert.match(req.turns.at(-1)!.content, /Answer ONLY/);
+        return answer(`SOURCE_PROPOSAL:${source}`);
+      },
+      runAgent: async req => {
+        assert.match(req.prompt, /SOURCE_PROPOSAL:a.png/);
+        assert.match(req.prompt, /SOURCE_PROPOSAL:b.png/);
+        return answer();
+      },
+    });
+    await loop.run([], 'Compare a.png and b.png independently', {}, [], scenario({ workspacePath: root, councilLimits: { nodeMs: 3000, deliberationMs: 4000, graceMs: 1 } }));
+    assert.deepEqual(sources.sort(), ['a.png', 'b.png']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

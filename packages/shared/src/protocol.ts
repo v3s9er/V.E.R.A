@@ -321,6 +321,8 @@ export interface MemoryItem {
   source?: string;
   /** Explicit user-maintained subject/predicate/object fact, not inferred authority. */
   relation?: { subject: string; predicate: string; object: string };
+  /** New assertions coexist; legacy relation updates retain replacement semantics. */
+  relationMode?: 'fact';
   supersededBy?: string;
 }
 

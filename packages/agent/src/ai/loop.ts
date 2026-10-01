@@ -2,6 +2,7 @@ import { COMPUTER_TOOLS } from '@mr-robot/shared';
 import { AdaptiveExecution } from './adaptive-execution.js';
 import { Council, councilLimits, untilAborted, type CouncilLimits, type CouncilOutcome } from './council.js';
 import { projectGuidance } from './project-guidance.js';
+import { createEvidenceTools, EVIDENCE_GUIDANCE, namedPngSources, needsSourceEvidence } from './evidence.js';
 import type {
   ChatUsage,
   CoordinationAgent,
@@ -121,7 +122,7 @@ export interface LoopCallbacks {
   /** Trusted host policy, checked before every actual provider invocation. */
   beforeModelCall?(source: { providerId: string; model: string }): void;
   onText?(delta: string): void;
-  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }): void;
+  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string; elapsedMs?: number }): void;
   /** Ask the human to approve a destructive tool call (safety mode: confirm). */
   confirm?: ConfirmFn;
   onStatus?(status: string): void;
@@ -228,7 +229,9 @@ function providerCallMaximumTokens(request: ChatRequest): number {
     turns: request.turns,
     tools: request.tools ?? [],
   });
-  const inputUpperBound = Buffer.byteLength(serialized, 'utf8');
+  // Image tokens are not base64 text tokens. Reserve a conservative allowance
+  // per bounded image; actual provider usage is still settled and enforced.
+  const inputUpperBound = Buffer.byteLength(serialized, 'utf8') + (request.evidenceImages?.length ?? 0) * 32768;
   const outputUpperBound = Math.max(1, Math.min(
     MAX_PROVIDER_OUTPUT_TOKENS,
     Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
@@ -656,7 +659,7 @@ export class AgentLoop {
       return this.registry.resolve(role, node.providerId, node.providerModel, scenario?.roles[role]);
     };
     const stageCall = async (node: RoutingNode, system: string, content: string, status?: string, stageSignal = runSignal, strict = false,
-      observation?: { provider(actual: AiProvider): void; usage(value: ProviderUsage): void }) => {
+      observation?: { provider(actual: AiProvider): void; usage(value: ProviderUsage): void }, assignedSources?: string[]) => {
       stageSignal.throwIfAborted();
       const stageProvider = providerForCall(providerForNode(node), node.role ?? 'general');
       if (!stageProvider && strict) throw new Error('Council model unavailable');
@@ -664,6 +667,70 @@ export class AgentLoop {
       observation?.provider(stageProvider);
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
       try {
+        // Only host-brokered read-only evidence; no native environment, shell,
+        // writes, plugins, or coordinator capabilities are lent to candidates.
+        if (strict && !options.isolation && options.workspacePath && stageProvider.type === 'codex-cli'
+          && stageProvider.chatIsolated && needsSourceEvidence(userMessage)) {
+          const evidence = createEvidenceTools(options.workspacePath, assignedSources);
+          const localTurns: Turn[] = [{ role: 'user', content }];
+          let images: NonNullable<ChatRequest['evidenceImages']> = [];
+          try {
+            if (assignedSources?.length) {
+              for (const [index, path] of assignedSources.entries()) {
+                const callId = `council:${node.id}:preload:${index}`;
+                cb.onTool?.({ name: 'evidence_image', input: {}, callId, status: 'start' });
+                try {
+                  const result = await evidence.execute('evidence_image', { path }, stageSignal);
+                  const label = result.contentItems.filter(i => i.type === 'inputText').map(i => i.text).join('\n');
+                  for (const item of result.contentItems) if (item.type === 'inputImage') images.push({ label: label.slice(0, 1000), dataUrl: item.imageUrl });
+                  cb.onTool?.({ name: 'evidence_image', input: {}, callId, status: 'done' });
+                } catch (error) { cb.onTool?.({ name: 'evidence_image', input: {}, callId, status: 'error' }); throw error; }
+              }
+              localTurns.push({ role: 'user', content: `Source assignment: ${JSON.stringify(assignedSources)}. The original pixels and identities are already attached. Answer ONLY the questions concerning these sources. Do not infer or report findings for other originals; another reader handles them. Return source-specific decisive observations, a concise proposal and any uncertain characters. Do not repeat a whole-image read of an unchanged source.` });
+            }
+            for (let step = 0; step < 4; step++) {
+              stageSignal.throwIfAborted();
+              const finalObservation = step === 3;
+              if (finalObservation) localTurns.push({ role: 'user', content: 'The evidence collection phase is complete. Return a concise proposal now using only observations already obtained. Identify unresolved details explicitly; do not guess. No more tool requests. The judge can investigate remaining uncertainties.' });
+              const response = await budgetedChat(stageProvider, {
+                system: identifiedSystem(`${system.replaceAll('Do not claim tools were executed.', 'Never claim tool calls you did not actually perform.')}\n${EVIDENCE_GUIDANCE}\nYou may inspect supplied originals using the read-only evidence tools. Report source-specific observations and uncertainties, not guesses. The final judge alone performs writes/execution.`, stageProvider),
+                turns: localTurns, tools: finalObservation ? [] : evidence.tools, evidenceImages: images,
+                reasoningEffort: effortFor(stageProvider), signal: stageSignal,
+                promptCacheKey: options.cacheKey ? `${options.cacheKey}:stage:${node.id}` : undefined,
+              }, true, observation?.usage, true);
+              if (!response.toolCalls.length) {
+                if (!response.text.trim()) throw new Error('Council proposal incomplete');
+                return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: response.text };
+              }
+              if (response.toolCalls.length > 4) throw new Error('Council evidence batch too large');
+              localTurns.push({ role: 'assistant', content: response.text, toolCalls: response.toolCalls });
+              const results: NonNullable<Turn['toolResults']> = [];
+              for (const call of response.toolCalls) {
+                stageSignal.throwIfAborted();
+                if (!evidence.tools.some(t => t.name === call.name)) throw new Error('Council evidence capability denied');
+                const callId = `council:${node.id}:${call.id}`;
+                cb.onTool?.({ name: call.name, input: {}, callId, status: 'start' });
+                try {
+                  const result = await evidence.execute(call.name, parseToolArgs(call.args), stageSignal);
+                  stageSignal.throwIfAborted();
+                  const text = result.contentItems.filter(i => i.type === 'inputText').map(i => i.text).join('\n');
+                  for (const item of result.contentItems) if (item.type === 'inputImage') images.push({ label: text.slice(0, 1000), dataUrl: item.imageUrl });
+                  images = images.slice(-4);
+                  while (images.reduce((n, i) => n + i.dataUrl.length, 0) > 16 * 1024 * 1024) images.shift();
+                  results.push({ id: call.id, name: call.name, content: text });
+                  cb.onTool?.({ name: call.name, input: {}, callId, status: 'done' }); cb.noteModelProgress?.('tool');
+                } catch (error) {
+                  cb.onTool?.({ name: call.name, input: {}, callId, status: 'error' });
+                  stageSignal.throwIfAborted();
+                  results.push({ id: call.id, name: call.name, content: JSON.stringify({ error: error instanceof Error ? error.message : 'Evidence unavailable' }) });
+                }
+              }
+              localTurns.push({ role: 'tool', content: '', toolResults: results });
+              if (Buffer.byteLength(JSON.stringify(localTurns)) > 128 * 1024) throw new Error('Council evidence context limit');
+            }
+            throw new Error('Council evidence incomplete');
+          } finally { evidence.dispose(); }
+        }
         const response = await budgetedChat(stageProvider, {
           system: identifiedSystem(system, stageProvider),
           turns: [{ role: 'user', content }],
@@ -805,33 +872,23 @@ export class AgentLoop {
           cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
           this.executor.assertDesktopAuthority(nativePermission, options.trustedPermissionOverride);
         }) : undefined;
-        if (desktopTools) {
-          const execute = desktopTools.execute;
-          desktopTools.execute = async (name, input, signal) => {
-            // Do not expose entered text or screenshot data in progress logs.
-            const summary = { action: name === 'desktop_act' ? String((input as any)?.action ?? '') : name === 'desktop_open_browser' ? 'open_browser' : 'observe' };
-            cb.onTool?.({ name, input: summary, status: 'start' });
-            try {
-              const result = await execute(name, input, signal);
-              cb.onTool?.({ name, input: summary, status: 'done' }); cb.noteModelProgress?.('tool');
-              return result;
-            } catch (error) { cb.onTool?.({ name, input: summary, status: 'error' }); throw error; }
-          };
-        }
+        const evidence = actualProvider.type === 'codex-cli' && options.cacheKey && options.nativeSessionDirectory && needsSourceEvidence(userMessage)
+          ? createEvidenceTools(options.workspacePath!) : undefined;
         const helpersEnabled = canCoordinate(actualProvider, true);
         const helperTools = helpersEnabled ? COORDINATION_TOOLS : [];
         // Only already-enabled host MCP commands enter the native bridge. MCP
         // remains full-access-only here; helpers never inherit this capability.
         const mcpTools = nativePermission === 'full' && actualProvider.type === 'codex-cli'
           ? extraTools.filter(t => t.name === 'mcp.discover' || t.name === 'mcp.call' || t.name === 'mcp.result').map(t => ({ ...t, name: t.name.replace('.', '_') })) : [];
-        const availableHostTools = [...desktopTools?.tools ?? [], ...helperTools, ...mcpTools];
+        const availableHostTools = [...desktopTools?.tools ?? [], ...helperTools, ...mcpTools, ...evidence?.tools ?? []];
         const hostTools: NativeHostTools | undefined = availableHostTools.length ? {
           tools: availableHostTools,
-          authorize: (name, mode) => helpersEnabled && isCoordinationTool(name) ? mode !== 'ask' : mode === 'full',
+          authorize: (name, mode) => evidence?.tools.some(t => t.name === name) || helpersEnabled && isCoordinationTool(name) ? mode !== 'ask' : mode === 'full',
           timeoutMs: name => name.startsWith('mcp_') ? 75000 : 25000,
           execute: async (name, input, signal) => {
             runSignal.throwIfAborted(); signal.throwIfAborted();
             cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
+            if (evidence?.tools.some(t => t.name === name)) return evidence.execute(name, input, signal);
             if (helpersEnabled && isCoordinationTool(name)) return { success: true, contentItems: [{ type: 'inputText', text: await executeCoordination(coordinatorFor(actualProvider), name, input, signal) }] };
             if (mcpTools.some(t => t.name === name)) {
               this.executor.assertDesktopAuthority(nativePermission, options.trustedPermissionOverride);
@@ -847,17 +904,18 @@ export class AgentLoop {
         } : undefined;
         let result: ProviderResult;
         try { result = await budgetedNativeAgent(actualProvider, {
-          prompt: identifiedSystem(prompt + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
+          prompt: identifiedSystem(prompt + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
           ...(options.cacheKey && options.nativeSessionDirectory ? { session: {
             key: options.cacheKey, directory: options.nativeSessionDirectory,
             history: sessionHistory, input, context: retainedContext,
-            instructions: identifiedSystem(NATIVE_AGENT_PROMPT + (desktopEnabled ? DESKTOP_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
+            instructions: identifiedSystem(NATIVE_AGENT_PROMPT + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (desktopEnabled ? DESKTOP_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
           } } : {}),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
           reasoningEffort: actualEffort,
           signal: runSignal,
           onStatus: cb.onStatus,
+          onTool: event => { cb.onTool?.(event); if (event.status === 'done') cb.noteModelProgress?.('tool'); },
           onText: text => { streamed += text; cb.onText?.(text); },
           steering: cb.nativeSteering,
           onSteeringApplied: inputs => { appliedSteering.push(...inputs.map(content => ({ role: 'user' as const, content }))); },
@@ -1018,7 +1076,7 @@ export class AgentLoop {
       const candidates = nodes.filter((node) => node.id !== finalNode.id && !agendaNodes.some((agenda) => agenda.id === node.id));
       const meetingRounds = Math.max(1, Math.min(3, scenario?.meetingRounds ?? 2));
       type Proposal = { label: string; model: string; text: string };
-      type Assignment = { node: RoutingNode; system: string; content: string; status: string };
+      type Assignment = { node: RoutingNode; system: string; content: string; status: string; sources?: string[] };
       const assignments = new Map<string, Assignment>();
       const workerProgress = new Map<string, CoordinationAgent>();
       let stageSequence = 0;
@@ -1038,7 +1096,7 @@ export class AgentLoop {
             turns: (previous?.turns ?? 0) + (event.state === 'running' ? 1 : 0),
             state: event.state === 'running' || event.state === 'completed' ? event.state
               : event.state === 'failed' || event.state === 'timed_out' ? 'failed' : 'cancelled',
-            status: `${assignment.status} · ${states[event.state]} · ${event.elapsedMs}ms`,
+            status: `${assignment.status} · ${states[event.state]}${event.failureCode ? ` (${event.failureCode})` : ''} · ${event.elapsedMs}ms`,
             usage: previous?.usage ?? { promptTokens: 0, completionTokens: 0 },
           };
           workerProgress.set(key, snapshot);
@@ -1057,8 +1115,8 @@ export class AgentLoop {
               promptTokens: addRecordedTokens(item.usage.promptTokens, value.promptTokens),
               completionTokens: addRecordedTokens(item.usage.completionTokens, value.completionTokens),
             }; },
-          }) };
-        }));
+          }, assignment.sources) };
+        }), batch.some(a => a.sources?.length) ? batch.length : undefined);
         incomplete += outcomes.filter(outcome => outcome.state !== 'completed').length;
         return outcomes.filter((outcome): outcome is CouncilOutcome<Proposal> & { value: Proposal } => outcome.state === 'completed' && !!outcome.value)
           .map(outcome => ({ ...outcome.value, nodeId: assignments.get(outcome.id)!.node.id }));
@@ -1085,6 +1143,11 @@ export class AgentLoop {
         const definition = groupDefinitions.get(groupId);
         const group = definition?.name ?? groupId;
         const discussionMode = definition?.discussionMode ?? 'collaborative';
+        const originals = !options.isolation && options.workspacePath && members.length > 1
+          && members.every(node => providerForNode(node)?.type === 'codex-cli') ? namedPngSources(options.workspacePath, userMessage) : [];
+        // Complementary readers cover different originals. Unlike redundant
+        // proposals, a fast half cannot supersede unread assigned sources.
+        const partitionSources = originals.length >= members.length && originals.length <= 4;
         let previousRound: Array<Proposal & { nodeId: string }> = [];
         for (let round = 1; round <= meetingRounds; round++) {
           const firstRound = round === 1;
@@ -1092,7 +1155,8 @@ export class AgentLoop {
           // same-family bias. Group members run concurrently; only the final
           // compact handoff is sent to the judge.
           const sharedOpinions = previousRound.map((item, index) => `[Candidate ${index + 1}]\n${item.text}`).join('\n\n');
-          const currentRound = await collect(members.map(node => ({
+          const currentRound = await collect(members.map((node, index) => ({
+              ...(partitionSources ? { sources: originals.filter((_, source) => source % members.length === index) } : {}),
               node, system: firstRound
                 ? `You are an independent member of AI decision group "${group}" named "${node.label}" with role ${node.role ?? 'general'}. The configured meeting style is "${discussionMode}". Other members may use different roles or models. Analyze independently, propose the best answer or execution plan, identify one major risk, and finish with a confidence score from 0 to 100. Do not claim tools were executed.`
                 : `You are member "${node.label}" in round ${round} of AI decision group "${group}" using the "${discussionMode}" meeting style. Read every group member's previous-round opinion. ${discussionMode === 'competitive' ? 'Compete on verifiable evidence and explicitly eliminate failed approaches.' : discussionMode === 'review' ? 'Actively search for errors, unsupported assumptions and missing validation.' : 'Combine complementary strengths while challenging weak assumptions.'} Revise your proposal, then cast one ballot. Finish with exactly "VOTE: <member label>" on its own line. You may vote for yourself only with a concrete reason. Do not claim tools were executed.`,
@@ -1134,7 +1198,7 @@ export class AgentLoop {
         `You are the final validation judge. The above contains only the latest available proposals, not proven facts. ${incomplete} stages failed, timed out, or were skipped. Never infer consensus from absent members. Independently check the reasoning and use permitted tools when helpful; do not blindly follow majority votes. If no valid proposal is available, solve the original request yourself and do not claim peer verification. Complete the original user request; disclose any important unverified limitation.`,
       ].filter(Boolean).join('\n\n').slice(-50_000);
       cb.onStatus?.(`최종 검증 시작${incomplete ? ' · 일부 노드 미완료' : ''} · ${finalNode.label}`);
-      // The main judge owns all side effects. Council workers remain tool-less;
+      // The main judge owns all side effects. Candidates get scoped read-only evidence;
       // the judge can use the same native sandbox/calculation tools as single mode.
       if (canRunNative(provider)) return await runNativeMain(provider);
     }

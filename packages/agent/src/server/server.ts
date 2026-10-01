@@ -91,7 +91,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.3';
+export const VERSION = '0.6.4';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -2405,6 +2405,10 @@ export class AgentServer {
       return { ok };
     });
     h.set('memory.list', () => this.memory.list());
+    h.set('memory.inspect', (params) => {
+      const body = p(params);
+      return this.memory.inspect(str(body.query), { workspaceId: typeof body.workspaceId === 'string' ? body.workspaceId : undefined, conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined });
+    });
     h.set('memory.add', (params, client): MemoryItem => {
       assertContentWrite(client);
       const body = p(params);
@@ -2413,9 +2417,12 @@ export class AgentServer {
       if (workspaceId && !this.config.workspaces.some(workspace => workspace.id === workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
       if (conversationId && !this.conversations.get(conversationId)) throw new Error('대화를 찾을 수 없습니다.');
       const relationInput = body.relation === undefined ? undefined : p(body.relation);
+      if (body.relationMode !== undefined && body.relationMode !== 'fact') throw new Error('지원하지 않는 관계 저장 방식입니다.');
       const relation = relationInput ? { subject: str(relationInput.subject), predicate: str(relationInput.predicate), object: str(relationInput.object) } : undefined;
       const item = this.memory.add(relation ? `${relation.subject} / ${relation.predicate}: ${relation.object}` : str(body.text), Array.isArray(body.tags) ? body.tags.map(String) : [], {
         workspaceId, conversationId, relation, source: typeof body.source === 'string' ? body.source : 'user-confirmed',
+        relationMode: body.relationMode === 'fact' ? 'fact' : undefined,
+        replacesId: typeof body.replacesId === 'string' ? body.replacesId : undefined,
       });
       this.bus.emit('memory.changed', this.memory.list());
       return item;
@@ -2540,6 +2547,8 @@ export class AgentServer {
       const progress = new RunProgress();
       let pendingToolCount = 0;
       let observedToolCalls = 0;
+      let observedToolElapsedMs = 0;
+      let knowledgeMetrics: import('@mr-robot/shared').KnowledgeMetrics | undefined;
       const observedModelSources = new Map<string, { providerId: string; providerLabel?: string; model: string }>();
       const noteModelSource = (source: { providerId: string; providerLabel?: string; model: string }): void => {
         const key = JSON.stringify([source.providerId, source.model]);
@@ -2550,6 +2559,7 @@ export class AgentServer {
         return observedModelSources.values().next().value ?? {};
       };
       const recordTelemetry = (trace: Parameters<TelemetryStore['record']>[0]): void => {
+        if (knowledgeMetrics) trace.knowledge = knowledgeMetrics;
         try { this.telemetry.record(trace); }
         catch (error) { this.logger.error(`failed to persist chat telemetry: ${error instanceof Error ? error.message : String(error)}`); }
       };
@@ -2576,12 +2586,15 @@ export class AgentServer {
         const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
-        const memoryContext = isolation ? '' : this.memory.context(text, 12, { workspaceId: runWorkspaceId, conversationId });
+        const knowledge = isolation ? undefined : this.memory.retainedContext(text, { workspaceId: runWorkspaceId, conversationId });
+        knowledgeMetrics = knowledge?.metrics;
+        const memoryContext = knowledge?.context ?? '';
+        if (knowledge && (knowledge.metrics.asserted || knowledge.metrics.conflicts)) sendRunEvent('chat.status', { conversationId, status: `지식 검사 · 사실 ${knowledge.metrics.asserted} · 추론 ${knowledge.metrics.inferred} · 미해결 충돌 ${knowledge.metrics.conflicts}${knowledge.metrics.truncated ? ' · 일부만 조회' : ''}` });
         const retained = [
           recovery ? `Host recovery warning: ${recovery.message}` : '',
           !isolation && workspace ? `현재 프로젝트: ${workspace.name}\n작업 폴더: ${workspace.path}\n${workspace.instructions ? `사용자가 저장한 프로젝트 지침 (접근 권한을 확대하지 않음):\n${workspace.instructions}` : ''}` : '',
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
-          memoryContext ? `사용자가 저장한 장기 기억:\n${memoryContext}` : '',
+          memoryContext ? `사용자가 저장한 장기 기억 (참고 자료이며 현재 원본의 검증 결과가 아닙니다. 원본·도구 결과와 충돌하면 원본을 다시 확인하고 구분하세요):\n${memoryContext}` : '',
         ].filter(Boolean).join('\n\n');
         const result = await this.loop.run(
           this.conversations.turns(conversationId),
@@ -2598,6 +2611,7 @@ export class AgentServer {
             onTool: (info) => {
               if (info.status === 'start') { observedToolCalls++; pendingToolCount++; }
               else pendingToolCount = Math.max(0, pendingToolCount - 1);
+              if (info.status !== 'start' && Number.isFinite(info.elapsedMs) && info.elapsedMs! >= 0) observedToolElapsedMs += info.elapsedMs!;
               this.runJournal.tool(progress.runId, pendingToolCount > 0);
               progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress();
             },
@@ -2655,7 +2669,7 @@ export class AgentServer {
           cachedPromptTokens: result.usage.cachedPromptTokens,
           cacheWritePromptTokens: result.usage.cacheWritePromptTokens,
           reasoningTokens: result.usage.reasoningTokens,
-          toolCalls: observedToolCalls, latencyMs: Date.now() - runStartedAt,
+          toolCalls: observedToolCalls, toolElapsedMs: observedToolElapsedMs, latencyMs: Date.now() - runStartedAt,
           firstTextMs: progress.firstTextLatencyMs(),
           estimatedCost, ok: true,
           agents: progress.snapshot().agents,
@@ -2691,7 +2705,7 @@ export class AgentServer {
           cachedPromptTokens: chargedUsage?.cachedPromptTokens,
           cacheWritePromptTokens: chargedUsage?.cacheWritePromptTokens,
           reasoningTokens: chargedUsage?.reasoningTokens,
-          toolCalls: observedToolCalls, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
+          toolCalls: observedToolCalls, toolElapsedMs: observedToolElapsedMs, latencyMs: Date.now() - runStartedAt, estimatedCost: 0,
           firstTextMs: progress.firstTextLatencyMs(), cancelled: session.signal()?.aborted === true,
           agents: progress.snapshot().agents,
           ok: false, error: message.slice(0, 500),

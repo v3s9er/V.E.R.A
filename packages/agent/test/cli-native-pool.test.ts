@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pooledNativeCodex, closeNativeWorkers } from '../src/ai/cli-native-pool.js';
+import { waitForCliRetirements } from '../src/ai/cli-process-retirement.js';
 import type { NativeAgentRequest } from '../src/ai/provider.js';
 const dir = mkdtempSync(join(tmpdir(), 'mrrobot-native-test-'));
 const base: NativeAgentRequest = { prompt: 'fallback', cwd: dir, permissionMode: 'read-only', reasoningEffort: 'high',
@@ -23,6 +24,10 @@ try {
   assert.equal(c.usage.promptTokens, 100, 'old token totals not charged again after resume');
   assert.ok(!readFileSync(join(dir, 'native-sessions.json'), 'utf8').includes('FIRST_PRIVATE_INPUT'));
   assert.equal((await call({ ...base, session: { ...base.session!, key: 'other-user' } })).text, 'answer 1');
+  const tools: unknown[] = [];
+  await call({ ...base, onTool: e => tools.push(e), session: { ...base.session!, key: 'metrics', input: 'EXPECT_TOOL_METRICS' } });
+  assert.equal(tools.length, 2);
+  assert.ok(!JSON.stringify(tools).includes('PRIVATE_COMMAND'));
   assert.equal((await call({ ...second, permissionMode: 'full' })).text, 'answer 1', 'authority change cannot reuse read-only session');
   assert.equal((await call({ ...base, session: { ...base.session!, history: [], input: 'rewritten' } })).text, 'answer 1');
   await assert.rejects(call({ ...base, session: { ...base.session!, key: 'deny', input: 'UNEXPECTED_APPROVAL' } }), /권한/);
@@ -32,5 +37,6 @@ try {
   console.log('Native sessions: warm reuse, restart/resume, delta input, usage deltas, authority/user/history isolation, cancellation and approval rejection passed.');
 } finally {
   closeNativeWorkers();
+  await waitForCliRetirements(process.env);
   for (let i = 0; i < 30; i++) { try { rmSync(dir, { recursive: true, force: true }); break; } catch (e) { if (i === 29) throw e; await new Promise(r => setTimeout(r, 100)); } }
 }

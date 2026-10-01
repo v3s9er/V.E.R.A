@@ -24,6 +24,9 @@ createInterface({ input: process.stdin }).on('line', line => {
   count++;
   const turn = `turn-${count}`, id = `item-${count}`;
   send({ id: m.id, result: { turn: { id: turn } } });
+  if (text.includes('EXPECT_TOOL_METRICS')) {
+    for (const method of ['item/started', 'item/started', 'item/completed', 'item/completed']) send({ method, params: { threadId: thread, turnId: turn, item: { id: 'native-tool', type: 'commandExecution', status: 'completed', exitCode: 0, command: 'PRIVATE_COMMAND' } } });
+  }
   send({ method: 'item/started', params: { threadId: thread, turnId: turn, item: { id: 'reason', type: 'reasoning' } } });
   send({ method: 'item/started', params: { threadId: thread, turnId: turn, item: { id, type: 'agentMessage', phase: 'final_answer' } } });
   send({ method: 'item/agentMessage/delta', params: { threadId: thread, turnId: turn, itemId: id, delta: `answer ${count}` } });

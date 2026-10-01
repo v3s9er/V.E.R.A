@@ -17,6 +17,10 @@ try {
   assert.equal((await call({ ...next, system: 'changed permissions' })).text, 'turn 1', 'changed instructions rebuild thread');
   assert.equal((await call({ ...base, turns: [{ role: 'user', content: 'rewritten history' }] })).text, 'turn 1', 'history edits invalidate session');
   assert.equal((await call(base, 'other-model')).text, 'turn 1');
+  assert.equal((await call({ ...base, promptCacheKey: 'visual-test', turns: [{ role: 'user', content: 'EXPECT_IMAGE' }], evidenceImages: [{ label: 'source hash', dataUrl: 'data:image/png;base64,YWJj' }] })).text, 'turn 1');
+  const imageTurn: ChatRequest = { ...base, promptCacheKey: 'visual-reuse', turns: [{ role: 'user', content: 'EXPECT_IMAGE' }], evidenceImages: [{ label: 'source hash', dataUrl: 'data:image/png;base64,YWJj' }] };
+  const imageFirst = await call(imageTurn);
+  assert.equal((await call({ ...imageTurn, turns: [...imageTurn.turns, { role: 'assistant', content: imageFirst.text }, { role: 'user', content: 'EXPECT_NO_IMAGE_DUPLICATE' }] })).text, 'turn 2');
   await assert.rejects(call({ ...base, promptCacheKey: 'attack', turns: [{ role: 'user', content: 'NATIVE_ATTACK' }] }), /네이티브/);
   const abort = new AbortController();
   const pending = call({ ...base, promptCacheKey: 'cancel', signal: abort.signal, turns: [{ role: 'user', content: 'WAIT_FOREVER' }] });
