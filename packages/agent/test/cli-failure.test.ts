@@ -7,6 +7,7 @@ test('provider failures identify actionable causes without revealing provider te
     ['You have hit your usage limit', 'usage_limit'], ['Rate limit reached', 'usage_limit'],
     ['Authentication required', 'authentication'], ['Not logged in', 'authentication'],
     ['Maximum context length exceeded', 'context_limit'],
+    ['turn/start.cyberAccessProgram requires experimentalApi capability', 'protocol_capability'],
   ]) {
     const error = classifyCliFailure({ message: `${message} private-value-do-not-echo` });
     assert.ok(error instanceof CliFailure); assert.equal(error.code, code);

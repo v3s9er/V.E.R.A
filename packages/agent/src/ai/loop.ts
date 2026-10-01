@@ -287,12 +287,14 @@ function orderedNodes(routing: RoutingPresetSettings): RoutingNode[] {
   return result.length === nodes.length ? result : nodes.sort(byPosition);
 }
 
-function toolsFor(text: string): typeof COMPUTER_TOOLS {
+export function toolsFor(text: string): typeof COMPUTER_TOOLS {
   const names = new Set<string>();
-  if (/파일|폴더|경로|문서|프로젝트|코드|file|folder|path|document|project|code/i.test(text)) ['list_files', 'read_file', 'write_file', 'delete_file', 'move_file'].forEach((name) => names.add(name));
-  if (/실행|명령|터미널|파워셸|설치|빌드|테스트|command|shell|terminal|install|build|test/i.test(text)) names.add('shell_exec');
-  if (/앱|프로그램|열어|브라우저|url|launch|open|app|program/i.test(text)) names.add('launch_app');
-  if (/화면|스크린|마우스|클릭|입력|키보드|screen|mouse|click|type|keyboard/i.test(text)) ['get_screen_size', 'screenshot', 'mouse_move', 'mouse_click', 'mouse_scroll', 'type_text', 'key_press'].forEach((name) => names.add(name));
+  // English intent words must not match inside unrelated words such as
+  // greatest (test), profile (file), happy (app), or archetype (type).
+  if (/파일|폴더|경로|문서|프로젝트|코드|\b(?:files?|folders?|paths?|documents?|projects?|code|coding)\b/i.test(text)) ['list_files', 'read_file', 'write_file', 'delete_file', 'move_file'].forEach((name) => names.add(name));
+  if (/실행|명령|터미널|파워셸|설치|빌드|테스트|\b(?:commands?|shell|terminal|install(?:ing|ation)?|build(?:ing)?|tests?|testing)\b/i.test(text)) names.add('shell_exec');
+  if (/앱|프로그램|열어|브라우저|\b(?:urls?|launch(?:ing)?|open(?:ing)?|apps?|programs?)\b/i.test(text)) names.add('launch_app');
+  if (/화면|스크린|마우스|클릭|입력|키보드|\b(?:screens?|screenshots?|mouse|click(?:ing)?|type|typing|keyboards?)\b/i.test(text)) ['get_screen_size', 'screenshot', 'mouse_move', 'mouse_click', 'mouse_scroll', 'type_text', 'key_press'].forEach((name) => names.add(name));
   return names.size ? COMPUTER_TOOLS.filter((tool) => names.has(tool.name)) : [];
 }
 

@@ -114,6 +114,18 @@ function harness(connect: NonNullable<McpPluginRuntime['connect']>) {
   };
 }
 
+test('paging is offered with MCP discovery, never for unrelated mathematics', async () => {
+  const h = harness(async () => { throw new Error('must not connect'); });
+  await h.plugin.activate!(h.ctx);
+  for (const name of ['mcp.discover', 'mcp.call', 'mcp.result']) {
+    const when = h.commands.get(name)!.options.toolWhen!;
+    assert.equal(when('Solve this mathematics problem: x + 2 = 4'), false);
+    assert.equal(when('MCP 결과 다음 페이지 읽어줘'), true);
+    assert.equal(when('context7 documentation'), true);
+  }
+  await h.plugin.deactivate!();
+});
+
 test('plugin discovers lazily, forwards cancellation, preserves secret storage and bounds call output', async () => {
   let connections = 0;
   let closed = 0;

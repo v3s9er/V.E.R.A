@@ -23,7 +23,7 @@ if (reorder) {
   child.stdin.on('error', () => {});
   createInterface({ input: child.stdout }).on('line', line => {
     const m = JSON.parse(line);
-    trace({ method: m.method, id: m.id, hasThreadId: Boolean(m.params?.threadId ?? m.params?.thread?.id), threadReply: Boolean(m.result?.thread), turnReply: Boolean(m.result?.turn), rpcError: Boolean(m.error) });
+    trace({ method: m.method, id: m.id, hasThreadId: Boolean(m.params?.threadId ?? m.params?.thread?.id), threadReply: Boolean(m.result?.thread), turnReply: Boolean(m.result?.turn), rpcError: Boolean(m.error), experimentalCapabilityRequired: /requires experimentalApi capability/.test(String(m.error?.message ?? '')) });
     // Force lifecycle events before RPC acknowledgements, using IDs returned by
     // the real installed CLI. No account/model traffic: provider stays localhost.
     if (m.id !== undefined && m.result?.thread?.id) process.stdout.write(JSON.stringify({ method: 'thread/status/changed', params: { threadId: m.result.thread.id, status: { type: 'idle' } } }) + '\n');

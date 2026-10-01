@@ -1,9 +1,12 @@
 import { createInterface } from 'node:readline';
 const send = m => process.stdout.write(JSON.stringify(m) + '\n');
-let thread = '', count = 0;
+let thread = '', count = 0, experimentalApi = false;
 createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
-  if (m.method === 'initialize') return send({ id: m.id, result: {} });
+  if (m.method === 'initialize') {
+    experimentalApi = m.params.capabilities?.experimentalApi === true;
+    return send({ id: m.id, result: {} });
+  }
   if (m.method === 'thread/start' || m.method === 'thread/resume') {
     if (m.params.approvalPolicy !== 'never') throw Error('approval boundary');
     thread = m.params.threadId ?? `fixture-${process.pid}-${Date.now()}`;
@@ -11,6 +14,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     return send({ id: m.id, result: { thread: { id: thread } } });
   }
   if (m.method !== 'turn/start') return;
+  if (m.params.cyberAccessProgram !== undefined && !experimentalApi) return send({ id: m.id, error: { code: -32600, message: 'turn/start.cyberAccessProgram requires experimentalApi capability' } });
   const text = m.params.input[0].text;
   const expectedProgram = [...text.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
   if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgentLoop, type LoopCallbacks } from '../src/ai/loop.js';
+import { AgentLoop, toolsFor, type LoopCallbacks } from '../src/ai/loop.js';
 import { ToolExecutor } from '../src/ai/executor.js';
 import { pooledNativeCodex, closeNativeWorkers } from '../src/ai/cli-native-pool.js';
 import { waitForCliRetirements } from '../src/ai/cli-process-retirement.js';
@@ -28,6 +28,27 @@ function registry(selected: AiProvider) {
   } } as any;
 }
 function lastTools(req: ChatRequest) { return req.turns.at(-1)?.toolResults ?? []; }
+test('English tool hints do not match substrings in ordinary questions', () => {
+  for (const text of ['Find the greatest possible value.', 'What is the latest result?', 'Describe a happy archetype.', 'Explain a profile in psychology.']) assert.deepEqual(toolsFor(text), []);
+  for (const text of ['Run tests', 'TEST the change', 'Run a shell command', '명령 실행해', '테스트해줘']) assert.ok(toolsFor(text).some(t=>t.name==='shell_exec'));
+  assert.ok(toolsFor('Read files in this project').some(t=>t.name==='read_file'));
+  assert.ok(toolsFor('Open the app').some(t=>t.name==='launch_app'));
+  assert.ok(toolsFor('Type with the keyboard').some(t=>t.name==='type_text'));
+});
+
+test('mathematics vote stays on the selected text model without an accidental tool executor', async () => {
+  let calls=0;
+  const selected=provider({type:'codex-cli',model:'gpt-6-sol',supportsTools:false,chat:async req=>{
+    calls++; assert.equal(req.tools?.length??0,0); return result('Answer: 1');
+  }});
+  const reg={default:()=>selected,resolve:()=>selected,costTier:()=>0,
+    toolCapable:()=>{ throw new Error('must not switch models for greatest'); }} as any;
+  const nodes=['a','b','judge'].map((id,i)=>({id,kind:'model' as const,label:id,role:i===2?'critic' as const:'reasoning' as const,providerId:selected.id,providerModel:selected.model,x:i*100,y:0}));
+  const answer=await new AgentLoop(reg,{} as any).run([],'Find the greatest possible value.',{},[],{
+    reasoningEffort:'high',permissionMode:'workspace',routing:{mode:'quality',executionMode:'vote',meetingRounds:1,crossGroupRounds:0,maxPremiumCalls:12,escalationEnabled:false,roles:{},graph:{nodes,edges:[]}},
+  });
+  assert.equal(calls,3); assert.equal(answer.route?.model,selected.model);
+});
 function instrument() {
   let admitted = 0, settled = 0, live = 0;
   const deltas: ProviderUsage[] = [];

@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from '
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { daybreakProgram } from '@mr-robot/shared';
+import { classifyCliFailure } from './cli-failure.js';
 import { CliSessionEvents } from './cli-session-events.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
@@ -158,7 +159,10 @@ class NativeWorker {
       try {
         if (this.ready) this.openThread();
         else this.send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'mrrobot_native', version: '1.0.0' },
-          ...(req.hostTools ? { capabilities: { experimentalApi: true } } : {}),
+          // turn/start always sends cyberAccessProgram (including "standard").
+          // That field needs protocol opt-in even without dynamic host tools;
+          // this does not change sandbox or tool authorization.
+          capabilities: { experimentalApi: true },
         } });
       } catch { this.close(new Error('네이티브 세션 저장소를 사용할 수 없습니다.')); }
     });
@@ -262,7 +266,7 @@ class NativeWorker {
         if (this.active) { this.active.baseline = emptyUsage(); this.active.total = emptyUsage(); }
         this.status('저장 세션을 복원할 수 없어 대화 기록으로 복구 중'); this.openThread(); return;
       }
-      return this.close(new Error('네이티브 요청이 거부되었습니다. CLI 로그인·모델·권한을 확인하세요.'));
+      return this.close(classifyCliFailure(m.error, 'request_rejected'));
     }
     if (m.id === 1 && !m.method) { this.ready = true; this.send({ method: 'initialized', params: {} }); this.openThread(); return; }
     if (m.id === 2 && !m.method) {
