@@ -1,4 +1,5 @@
 import type { ProviderType, ReasoningEffort } from '@mr-robot/shared';
+import { daybreakProgram, supportsDaybreak } from '@mr-robot/shared';
 import {
   normalizeProviderUsageReport,
   type AiProvider,
@@ -287,6 +288,7 @@ export class OpenAICompatibleProvider implements AiProvider {
     const body: Record<string, unknown> = {
       model: this.model,
       input: toResponsesInput(req.turns),
+      ...(supportsDaybreak(this) ? { access_programs: { cyber: daybreakProgram(this.model, req.daybreakEnabled === true).replace('daybreakBlue', 'daybreak_blue').replace('daybreakRed', 'daybreak_red') } } : {}),
       stream: true,
       store: false,
       parallel_tool_calls: true,

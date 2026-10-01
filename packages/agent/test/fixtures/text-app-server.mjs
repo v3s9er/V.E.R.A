@@ -13,6 +13,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method !== 'turn/start') return;
   if (m.params.environments.length || m.params.threadId !== threadId) throw Error('turn boundary failed');
   const prompt = m.params.input[0].text;
+  const expectedProgram = [...prompt.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
+  if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');
   if (count && prompt.includes('FIRST_PRIVATE_TEXT')) throw Error('history retransmitted');
   send({ id: m.id, result: { turn: { id: `turn-${count + 1}` } } });
   if (prompt.includes('WAIT_FOREVER')) return;

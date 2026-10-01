@@ -1,4 +1,6 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
+import { AdaptiveExecution } from './adaptive-execution.js';
+import { projectGuidance } from './project-guidance.js';
 import type {
   ChatUsage,
   CoordinationAgent,
@@ -159,6 +161,7 @@ export interface LoopResult {
 }
 
 export interface RunOptions {
+  daybreakEnabled?: boolean;
   /** Server-only capability broker. Never deserialize from ordinary RPC input. */
   isolation?: { tools: NeutralTool[]; execute(name: string, input: unknown, signal?: AbortSignal): Promise<string> };
   providerId?: string;
@@ -334,6 +337,7 @@ export class AgentLoop {
       return settled.map((item) => (item as PromiseFulfilledResult<T>).value);
     };
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
+    const adaptive = new AdaptiveExecution(userMessage);
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
@@ -350,7 +354,13 @@ export class AgentLoop {
       // Scenario-specific routing retains its existing independent settings.
       if (options.routing) return {};
       const key = JSON.stringify([actual.id, actual.model]);
-      if (!tuningSnapshot.has(key)) tuningSnapshot.set(key, resolveModelTuning(this.registry.tuningProfile?.(actual.id), actual, options.reasoningEffort));
+      if (!tuningSnapshot.has(key)) {
+        const tuning = resolveModelTuning(this.registry.tuningProfile?.(actual.id), actual, options.reasoningEffort);
+        // "auto" delegates to this run's adaptive decision, not a second
+        // provider-default override after effortFor has chosen a concrete level.
+        if (tuning.reasoningEffort === 'auto') delete tuning.reasoningEffort;
+        tuningSnapshot.set(key, tuning);
+      }
       return tuningSnapshot.get(key)!;
     };
     try {
@@ -359,6 +369,7 @@ export class AgentLoop {
       cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
       const boundedRequest: ChatRequest = applyModelTuning({
         ...request,
+        daybreakEnabled: options.daybreakEnabled === true,
         maxTokens: Math.max(1, Math.min(
           MAX_PROVIDER_OUTPUT_TOKENS,
           Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
@@ -447,6 +458,7 @@ export class AgentLoop {
         const preference = tuningInstructions(tuning);
         const result = await actualProvider.runAgent({
           ...request,
+          daybreakEnabled: options.daybreakEnabled === true,
           ...(tuning.reasoningEffort ? { reasoningEffort: tuning.reasoningEffort } : {}),
           ...(preference ? {
             prompt: `${request.prompt}\n\n${preference}`,
@@ -499,7 +511,8 @@ export class AgentLoop {
       throw new Error('이 구독 공급자는 권한 분리 실행을 지원하지 않습니다. CLI를 업데이트하세요.');
     }
 
-    let retainedContext = options.context?.trim() ?? '';
+    let retainedContext = [options.context?.trim(), !options.isolation ? projectGuidance(options.workspacePath) : '',
+      !options.routing ? adaptive.guidance() : ''].filter(Boolean).join('\n\n');
     const secondaryLimit = tuningFor(provider).contextTokenLimit;
     if (secondaryLimit && Buffer.byteLength(retainedContext, 'utf8') > secondaryLimit) {
       // Conservative byte bound: never pretend four Korean characters = a token.
@@ -568,8 +581,13 @@ export class AgentLoop {
       cb.onStatus?.(`고비용 호출 상한 ${premiumLimit}회 도달 · 무료 모델 ${fallback.label}로 전환`);
       return fallback;
     };
-    const effortFor = (actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): ReasoningEffort =>
-      tuningFor(actualProvider).reasoningEffort ?? (actualProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto');
+    const effortFor = (actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): ReasoningEffort => {
+      if (!options.routing) {
+        const requested = options.reasoningEffort && options.reasoningEffort !== 'auto' ? options.reasoningEffort : tuningFor(actualProvider).reasoningEffort ?? 'auto';
+        return adaptive.effort(requested, actualProvider.supportedReasoning);
+      }
+      return tuningFor(actualProvider).reasoningEffort ?? (actualProvider.supportedReasoning.includes(routeEffort) ? routeEffort : 'auto');
+    };
     const identifiedSystem = (base: string, actualProvider: NonNullable<ReturnType<ProviderRegistry['default']>>): string =>
       `${base}\n\nYou are currently running through the provider "${actualProvider.label}" with model "${actualProvider.model}". When asked what model you are, answer with this exactly.`;
     // Native parents reserve their whole finite allowance. Do not lend that
@@ -693,6 +711,7 @@ export class AgentLoop {
             try {
               if (!allowedTools.some((tool) => tool.name === call.name)) toolContent = JSON.stringify({ error: `${call.name} is not available inside this solver sandbox` });
               else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, runSignal, {
+                scopeKey: options.cacheKey ? `${options.cacheKey}:agent:${node.id}` : undefined,
                 trustedPermissionOverride: options.trustedPermissionOverride,
                 workspaceRoot: options.workspacePath,
                 approvedPluginTools,
@@ -789,7 +808,7 @@ export class AgentLoop {
         // Only already-enabled host MCP commands enter the native bridge. MCP
         // remains full-access-only here; helpers never inherit this capability.
         const mcpTools = nativePermission === 'full' && actualProvider.type === 'codex-cli'
-          ? extraTools.filter(t => t.name === 'mcp.discover' || t.name === 'mcp.call').map(t => ({ ...t, name: t.name.replace('.', '_') })) : [];
+          ? extraTools.filter(t => t.name === 'mcp.discover' || t.name === 'mcp.call' || t.name === 'mcp.result').map(t => ({ ...t, name: t.name.replace('.', '_') })) : [];
         const availableHostTools = [...desktopTools?.tools ?? [], ...helperTools, ...mcpTools];
         const hostTools: NativeHostTools | undefined = availableHostTools.length ? {
           tools: availableHostTools,
@@ -801,7 +820,7 @@ export class AgentLoop {
             if (helpersEnabled && isCoordinationTool(name)) return { success: true, contentItems: [{ type: 'inputText', text: await executeCoordination(coordinatorFor(actualProvider), name, input, signal) }] };
             if (mcpTools.some(t => t.name === name)) {
               this.executor.assertDesktopAuthority(nativePermission, options.trustedPermissionOverride);
-              const text = await this.executor.execute(name.replace('_', '.'), input, cb.confirm, nativePermission, signal, { workspaceRoot: options.workspacePath, trustedPermissionOverride: options.trustedPermissionOverride });
+              const text = await this.executor.execute(name.replace('_', '.'), input, cb.confirm, nativePermission, signal, { workspaceRoot: options.workspacePath, scopeKey: options.cacheKey, trustedPermissionOverride: options.trustedPermissionOverride });
               return { success: toolResultSucceeded(text), contentItems: [{ type: 'inputText', text }] };
             }
             if (desktopTools?.tools.some(t => t.name === name)) return desktopTools.execute(name, input, signal);
@@ -1175,6 +1194,7 @@ export class AgentLoop {
             content = helpersEnabled && isCoordinationTool(call.name) ? await executeCoordination(coordinatorFor(actualProvider), call.name, input, runSignal) : options.isolation ? await options.isolation.execute(call.name, input, runSignal) : await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, runSignal, {
               trustedPermissionOverride: options.trustedPermissionOverride,
               workspaceRoot: options.workspacePath,
+              scopeKey: options.cacheKey,
             });
             madeToolProgress ||= isCoordinationTool(call.name)
               ? call.name === 'agent_wait' && JSON.parse(content).progress === true
@@ -1191,6 +1211,7 @@ export class AgentLoop {
           content = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
           cb.onTool?.({ name: call.name, input, status: 'error', detail: content, callId: call.id });
         }
+        if (!isCoordinationTool(call.name)) adaptive.observe(toolResultSucceeded(content), /권한|인증|permission|unauthorized|forbidden|\b(?:401|403)\b|network.*unavailable/i.test(content) ? 'environment' : 'task');
         return { id: call.id, name: call.name, content };
       }, runSignal);
       turns.push({ role: 'tool', content: '', toolResults });

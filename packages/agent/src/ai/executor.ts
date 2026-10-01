@@ -22,6 +22,7 @@ export interface ToolExecutionScope {
   trustedPermissionOverride?: boolean;
   /** Selected workspace resolved by the host, never by model-supplied params. */
   workspaceRoot?: string;
+  scopeKey?: string;
   /** Tool names covered by a host-side aggregate approval for this run only. */
   approvedPluginTools?: ReadonlySet<string>;
 }
@@ -86,6 +87,7 @@ export class ToolExecutor {
             signal,
             permissionMode: mode,
             workspaceRoot: scope?.workspaceRoot,
+            scopeKey: scope?.scopeKey ? JSON.stringify([scope.scopeKey, scope.workspaceRoot, mode]) : undefined,
             destructiveApproved,
             approvalSource,
           });

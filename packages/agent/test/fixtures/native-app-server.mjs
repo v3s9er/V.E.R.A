@@ -12,6 +12,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   }
   if (m.method !== 'turn/start') return;
   const text = m.params.input[0].text;
+  const expectedProgram = [...text.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
+  if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');
   if (count && text.includes('FIRST_PRIVATE_INPUT')) throw Error('history retransmitted');
   if (text.includes('WAIT_FOREVER')) return;
   if (text.includes('UNEXPECTED_APPROVAL')) return send({ id: 500, method: 'item/commandExecution/requestApproval', params: { threadId: thread } });

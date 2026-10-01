@@ -7,6 +7,7 @@ import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
 import { DependencySetup } from '../components/DependencySetup';
 import { ToolPortalSettings } from '../components/ToolPortalSettings';
 import { ModelTuningSettings } from '../components/ModelTuningSettings';
+import { KnowledgeEditor } from '../components/KnowledgeEditor';
 import { loadModelCatalog, modelCatalogSummary } from '../model-catalog';
 
 interface PairingInfo {
@@ -1182,7 +1183,8 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         <div className="panel-head"><div><h3>장기 기억</h3><p className="panel-hint">대화를 넘어 유지할 선호·환경·프로젝트 사실만 직접 저장합니다.</p></div></div>
         {!canWriteContent && <div className="access-inline"><b>읽기 전용 연결</b><span>저장된 기억은 볼 수 있지만 이 기기에서는 추가·삭제할 수 없습니다.</span></div>}
         <div className="type-row"><Input disabled={!canWriteContent} value={memoryText} onChange={(e) => setMemoryText(e.target.value)} placeholder="예: 기본 프로젝트 폴더는 C:\\Work 입니다" onKeyDown={(e) => { if (canWriteContent && e.key === 'Enter' && memoryText.trim()) void client.call('memory.add', { text: memoryText }).then(() => setMemoryText('')); }} /><Button disabled={!canWriteContent || !memoryText.trim()} onClick={() => void client.call('memory.add', { text: memoryText }).then(() => setMemoryText(''))}>기억 추가</Button></div>
-        <div className="memory-list">{memories.map((item) => <div className="memory-item" key={item.id}><span>{item.text}</span><Button variant="danger" disabled={!canWriteContent} onClick={() => void client.call('memory.remove', { id: item.id })}>삭제</Button></div>)}{memories.length === 0 && <p className="panel-hint">저장된 장기 기억이 없습니다.</p>}</div>
+        <KnowledgeEditor canWrite={canWriteContent} />
+        <div className="memory-list">{memories.map((item) => <div className="memory-item" key={item.id}><span style={{ opacity: item.supersededBy ? 0.5 : 1 }}>{item.supersededBy ? '[이전 값 · 검색 제외] ' : ''}{item.text}<small style={{ display: 'block' }}>{item.workspaceId ? '프로젝트 한정' : item.conversationId ? '대화 한정' : '개인 공통'} · {item.source || '사용자 저장'}</small></span><Button variant="danger" disabled={!canWriteContent} onClick={() => void client.call('memory.remove', { id: item.id })}>삭제</Button></div>)}{memories.length === 0 && <p className="panel-hint">저장된 장기 기억이 없습니다.</p>}</div>
       </Card></div>
 
       <div className={section === 'network' ? '' : 'settings-section-hidden'}>

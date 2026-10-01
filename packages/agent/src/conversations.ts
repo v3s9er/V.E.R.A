@@ -14,9 +14,11 @@ import type {
   ReasoningEffort,
 } from '@mr-robot/shared';
 import type { Turn } from './ai/provider.js';
+import { conversationCheckpoint } from './ai/conversation-checkpoint.js';
 import { displayTranscriptWindow, normalizeTranscriptReference, TranscriptStore, transcriptPageLimit, type TranscriptPageOptions, type TranscriptReference } from './transcript-store.js';
 
 interface StoredConversation {
+  daybreakEnabled?: boolean;
   id: string;
   origin?: 'discord';
   title: string;
@@ -91,6 +93,7 @@ function conversationRevision(item: StoredConversation): string {
     pinned: item.pinned === true,
     createdAt: item.createdAt,
     reasoningEffort: item.reasoningEffort,
+    daybreakEnabled: item.daybreakEnabled,
     providerId: item.providerId,
     providerModel: item.providerModel,
     routingPresetId: item.routingPresetId,
@@ -237,6 +240,7 @@ function normalizeStoredConversation(raw: unknown, index: number, local = false)
     createdAt,
     updatedAt,
     reasoningEffort: source.reasoningEffort as ReasoningEffort,
+    ...(typeof source.daybreakEnabled === 'boolean' ? { daybreakEnabled: source.daybreakEnabled } : {}),
     providerId: boundedString(source.providerId, '공급자 ID', 256, true),
     providerModel: boundedString(source.providerModel, '모델 ID', 512, true),
     routingPresetId: boundedString(source.routingPresetId, '프리셋 ID', 256, true),
@@ -312,6 +316,7 @@ function summarize(c: StoredConversation): ConversationSummary {
     updatedAt: c.updatedAt,
     messageCount: c.turns.filter((t) => t.role === 'user' || t.role === 'assistant').length + c.compactedMessages,
     reasoningEffort: c.reasoningEffort,
+    daybreakEnabled: c.daybreakEnabled,
     providerId: c.providerId,
     providerModel: c.providerModel,
     routingPresetId: c.routingPresetId,
@@ -660,6 +665,7 @@ export class ConversationStore {
       createdAt: now,
       updatedAt: now,
       reasoningEffort: input.reasoningEffort ?? 'auto',
+      ...(typeof input.daybreakEnabled === 'boolean' ? { daybreakEnabled: input.daybreakEnabled } : {}),
       providerId: input.providerId,
       providerModel: input.providerModel,
       routingPresetId: input.routingPresetId,
@@ -691,7 +697,7 @@ export class ConversationStore {
     return this.require(id).summary;
   }
 
-  update(id: string, patch: { origin?: 'discord' | null; title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
+  update(id: string, patch: { daybreakEnabled?: boolean; origin?: 'discord' | null; title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
     const item = this.require(id);
     if (patch.tokenPolicy !== undefined && !tokenPolicies.has(patch.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     // update() mutates the live object so existing server-side references keep
@@ -706,6 +712,10 @@ export class ConversationStore {
     if (patch.status) item.status = patch.status;
     if (patch.pinned !== undefined) item.pinned = patch.pinned;
     if (patch.reasoningEffort) item.reasoningEffort = patch.reasoningEffort;
+    if (patch.daybreakEnabled !== undefined) {
+      if (typeof patch.daybreakEnabled !== 'boolean') throw new Error('Daybreak 설정은 켜짐 또는 꺼짐이어야 합니다.');
+      item.daybreakEnabled = patch.daybreakEnabled;
+    }
     if (patch.providerId !== undefined) {
       item.providerId = patch.providerId || undefined;
       if (!item.providerId) item.providerModel = undefined;
@@ -872,10 +882,7 @@ export class ConversationStore {
       }
     }
     const old = item.turns.slice(0, cut);
-    const digest = old
-      .filter((t) => t.role !== 'tool')
-      .map((t) => `- ${t.role}: ${t.content.replace(/\s+/g, ' ').slice(0, 700)}`)
-      .join('\n');
+    const digest = conversationCheckpoint(old);
     item.summary = utf8Tail([item.summary, digest].filter(Boolean).join('\n'), MAX_SUMMARY_BYTES);
     item.compactedMessages += old.filter((t) => t.role === 'user' || t.role === 'assistant').length;
     item.turns = item.turns.slice(cut);

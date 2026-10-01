@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { daybreakProgram } from '@mr-robot/shared';
 import { CliSessionEvents } from './cli-session-events.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
@@ -228,6 +229,7 @@ class NativeWorker {
     this.events.beginTurn(++this.sequence);
     this.send({ id: this.sequence, method: 'turn/start', params: { threadId: this.thread,
       input: [{ type: 'text', text, text_elements: [] }],
+      cyberAccessProgram: daybreakProgram(this.model, a.req.daybreakEnabled === true),
       ...(a.req.reasoningEffort && a.req.reasoningEffort !== 'auto' ? { effort: a.req.reasoningEffort } : { effort: null }),
     } });
   }
@@ -384,7 +386,7 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   if (options.req.hostTools?.tools.some(t => !(options.req.hostTools!.authorize?.(t.name, options.req.permissionMode) ?? options.req.permissionMode === 'full'))) throw new Error('현재 권한에서 허용되지 않은 연결 도구입니다.');
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
-    options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null]);
+    options.env.CODEX_HOME ?? options.env.USERPROFILE ?? options.env.HOME, resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null, options.req.daybreakEnabled === true]);
   const release = await scheduler.acquire(key, options.req.signal, position => options.req.onStatus?.(`네이티브 실행 대기 · ${position}번째 · 앞선 작업 완료 시 자동 시작`));
   try { while (true) {
     await waitForCliRetirements(options.env, options.req.signal);

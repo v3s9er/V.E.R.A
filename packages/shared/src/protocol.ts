@@ -252,6 +252,8 @@ export type ConversationStatus = 'active' | 'archived';
 export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'quality' | 'audit-only';
 
 export interface ConversationSummary {
+  /** Explicit cyber access selection, independent of PC permissions. */
+  daybreakEnabled?: boolean;
   id: string;
   /** Presentation category only; never an authorization grant. */
   origin?: 'discord';
@@ -294,6 +296,7 @@ export interface ConversationDetail extends ConversationSummary {
 }
 
 export interface ConversationCreateInput {
+  daybreakEnabled?: boolean;
   origin?: 'discord';
   title?: string;
   reasoningEffort?: ReasoningEffort;
@@ -312,6 +315,13 @@ export interface MemoryItem {
   tags: string[];
   createdAt: number;
   updatedAt: number;
+  /** Host-selected project/conversation scope. Missing means explicit personal memory. */
+  workspaceId?: string;
+  conversationId?: string;
+  source?: string;
+  /** Explicit user-maintained subject/predicate/object fact, not inferred authority. */
+  relation?: { subject: string; predicate: string; object: string };
+  supersededBy?: string;
 }
 
 /** A destructive tool is paused and the user must approve it. */

@@ -33,8 +33,14 @@ export function resolveWorkspacePath(
   let cursor = root;
   for (const component of rel.split(/[\\/]+/).filter(Boolean)) {
     cursor = join(cursor, component);
-    if (!existsSync(cursor)) break;
-    const entry = lstatSync(cursor);
+    // existsSync follows links: a dangling link looks missing and used to skip
+    // validation for a new destination. lstat inspects the link itself.
+    let entry;
+    try { entry = lstatSync(cursor); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw error;
+    }
     if (entry.isSymbolicLink()) throw new Error('심볼릭 링크나 junction을 통한 경로는 사용할 수 없습니다.');
     if (!containedBy(rootReal, realpathSync(cursor))) {
       throw new Error('선택한 작업 폴더 밖의 경로는 사용할 수 없습니다.');

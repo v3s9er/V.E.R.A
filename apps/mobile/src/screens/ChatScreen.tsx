@@ -3,6 +3,7 @@ import { ChatFiles } from '../components/ChatFiles';
 import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
 import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
+import { supportsDaybreak, visibleModelChoices } from '../../../../packages/shared/src/daybreak';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -114,6 +115,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [runs, setRuns] = useState<Record<string, ChatRunState & { cancelling?: boolean }>>({});
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [showModels, setShowModels] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelProviderFilter, setModelProviderFilter] = useState('');
+  const [customModelExpanded, setCustomModelExpanded] = useState(false);
   const [customProviderId, setCustomProviderId] = useState('');
   const [customModel, setCustomModel] = useState('');
   const [showScenarios, setShowScenarios] = useState(false);
@@ -289,7 +293,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const applyConversationConfiguration = (id: string, patch: Partial<Pick<ConversationDetail,
-    'reasoningEffort' | 'providerId' | 'providerModel' | 'routingPresetId' | 'workspaceId' | 'permissionMode' | 'tokenPolicy'
+    'reasoningEffort' | 'providerId' | 'providerModel' | 'routingPresetId' | 'workspaceId' | 'permissionMode' | 'tokenPolicy' | 'daybreakEnabled'
   >>): void => {
     if (conversationRef.current?.id === id) conversationRef.current = { ...conversationRef.current, ...patch };
     setConversation((current) => current?.id === id ? { ...current, ...patch } : current);
@@ -308,9 +312,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     pendingDelta.current = '';
     if (deltaTimer.current) clearTimeout(deltaTimer.current);
     deltaTimer.current = null;
-    const [detail, runList] = await Promise.all([
+    const [detail, runList, recovery] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
       client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+      client.call('chat.recovery', { conversationId: id }, 5000).catch(() => null) as Promise<{ message: string } | null>,
     ]);
     if (generation !== loadGeneration.current) return;
     const active = runList.find((run) => run.conversationId === id);
@@ -321,6 +326,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setRuns((current) => ({ ...current, ...Object.fromEntries(runList.map((run) => [run.conversationId, run])) }));
     if (pendingConfirm) setConfirm(pendingConfirm);
     setConversation(detail);
+    setHistoryError(recovery?.message ?? '');
     setHistoryPage({ id, info: detail.history });
     setActivity([]); setShowActivity(false);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
@@ -656,6 +662,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       ?? providers[0];
     setCustomProviderId(selectedProvider?.id ?? '');
     setCustomModel(conversation?.providerModel ?? selectedProvider?.model ?? '');
+    setModelSearch('');
+    setModelProviderFilter('');
+    setCustomModelExpanded(false);
     setShowModels(true);
     void refreshProviders().catch(() => setModelRefreshStatus('PC 연결을 확인하세요. 기존 모델 목록은 유지됩니다.'));
   };
@@ -673,12 +682,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         providerModel: providerModel ?? null,
         routingPresetId: null,
         reasoningEffort,
+        daybreakEnabled: supportsDaybreak(provider, providerModel ?? provider?.model) && conversation.daybreakEnabled === true,
       }) as ConversationDetail;
       applyConversationConfiguration(conversationId, {
         providerId: updated.providerId,
         providerModel: updated.providerModel,
         routingPresetId: updated.routingPresetId,
         reasoningEffort: updated.reasoningEffort,
+        daybreakEnabled: updated.daybreakEnabled,
       });
       setReasoningSaveFailed(false);
       setCommandMode(providerId ? 'scenario' : 'pc');
@@ -786,6 +797,17 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     } finally {
       finishConfigurationSave();
     }
+  };
+
+  const toggleDaybreak = async (): Promise<void> => {
+    if (!conversation || configurationLocked || !beginConfigurationSave()) return;
+    const conversationId = conversation.id;
+    try {
+      const updated = await client.call('conversations.update', { id: conversationId, daybreakEnabled: !conversation.daybreakEnabled }) as ConversationDetail;
+      applyConversationConfiguration(conversationId, { daybreakEnabled: updated.daybreakEnabled });
+    } catch {
+      if (mountedRef.current) setConfigurationSaveFailed(true);
+    } finally { finishConfigurationSave(); }
   };
 
   const togglePin = async (target: ConversationSummary): Promise<void> => {
@@ -913,20 +935,28 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
   const singleModelChoices = (includeAutomatic: boolean) => (
     <>
-      {includeAutomatic && <TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel()}>
+      <TextInput accessibilityLabel="모델 검색" style={styles.customModelInput} value={modelSearch} onChangeText={setModelSearch} placeholder="모델 이름 검색" placeholderTextColor={colors.faint} autoCapitalize="none" autoCorrect={false} />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.customProviderList} keyboardShouldPersistTaps="handled">
+        {[{ id: '', label: '전체' }, ...providers].map(provider => <TouchableOpacity key={provider.id} accessibilityRole="button" accessibilityState={{ selected: modelProviderFilter === provider.id }} style={[styles.customProviderChip, modelProviderFilter === provider.id && styles.customProviderChipOn]} onPress={() => setModelProviderFilter(provider.id)}><Text style={styles.customProviderText}>{provider.label}</Text></TouchableOpacity>)}
+      </ScrollView>
+      {includeAutomatic && !modelSearch && !modelProviderFilter && <TouchableOpacity style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel()}>
         <Text style={styles.modelProvider}>{!conversation?.providerId ? '✓ ' : ''}자동 라우팅</Text>
         <Text style={styles.faintChoice}>PC의 기본 라우팅이 요청에 맞는 모델을 선택</Text>
       </TouchableOpacity>}
-      {providers.flatMap((provider) => (providerModels[provider.id] ?? [provider.model]).map((modelName) => {
-        const selected = conversation?.providerId === provider.id && conversation.providerModel === modelName && !conversation.routingPresetId;
+      {providers.filter(provider => !modelProviderFilter || modelProviderFilter === provider.id).map(provider => {
+        const choices = visibleModelChoices(providerModels[provider.id] ?? [provider.model], conversation?.providerId === provider.id ? conversation.providerModel : undefined).filter(model => `${provider.label} ${model}`.toLowerCase().includes(modelSearch.trim().toLowerCase()));
+        if (!choices.length) return null;
+        return <View key={provider.id}><Text style={styles.modelSectionTitle}>{provider.label}</Text>{choices.map((modelName) => {
+        const selected = (conversation?.providerId ?? defaultProvider?.id) === provider.id && (conversation?.providerModel ?? provider.model) === modelName && !conversation?.routingPresetId;
         return <TouchableOpacity key={`${provider.id}:${modelName}`} style={[styles.modelChoice, selected && styles.modelChoiceOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel(provider.id, modelName)}>
-          <Text style={styles.modelProvider}>{selected ? '✓ ' : ''}{provider.label}</Text>
-          <Text style={styles.modelName}>{modelName}</Text>
+          <Text style={styles.modelName}>{selected ? '✓ ' : ''}{modelName}</Text>
         </TouchableOpacity>;
-      }))}
+      })}</View>; })}
+      {providers.length > 0 && providers.filter(provider => !modelProviderFilter || modelProviderFilter === provider.id).every(provider => !visibleModelChoices(providerModels[provider.id] ?? [provider.model], conversation?.providerId === provider.id ? conversation.providerModel : undefined).some(model => `${provider.label} ${model}`.toLowerCase().includes(modelSearch.trim().toLowerCase()))) && <Text accessibilityLiveRegion="polite" style={styles.modalText}>일치하는 모델이 없습니다.</Text>}
       {providers.length === 0 && <Text style={styles.modalText}>PC에 등록된 모델 공급자가 없습니다. PC 앱의 설정 → 모델에서 먼저 공급자를 추가하세요.</Text>}
       {providers.length > 0 && <View style={styles.customModelBox}>
-        <Text style={styles.modelProvider}>모델 ID 직접 지정</Text>
+        <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: customModelExpanded }} onPress={() => setCustomModelExpanded(value => !value)}><Text style={styles.modelProvider}>모델 ID 직접 지정 {customModelExpanded ? '⌃' : '⌄'}</Text></TouchableOpacity>
+        {customModelExpanded && <>
         <Text style={styles.faintChoice}>목록에 없는 모델도 공급자를 고른 뒤 정확한 모델 ID를 입력할 수 있습니다.</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.customProviderList} keyboardShouldPersistTaps="handled">
           {providers.map((provider) => <TouchableOpacity key={provider.id} style={[styles.customProviderChip, customProviderId === provider.id && styles.customProviderChipOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => { setCustomProviderId(provider.id); setCustomModel(provider.model); }}>
@@ -937,7 +967,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           style={styles.customModelInput}
           value={customModel}
           onChangeText={setCustomModel}
-          placeholder="예: gpt-5.6-terra"
+          placeholder="정확한 모델 ID"
           placeholderTextColor={colors.faint}
           autoCapitalize="none"
           autoCorrect={false}
@@ -948,6 +978,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <TouchableOpacity style={[styles.bigBtn, (!customProviderId || !customModel.trim() || savingConfiguration) && styles.disabledBtn]} disabled={!customProviderId || !customModel.trim() || savingConfiguration} onPress={() => void selectModel(customProviderId, customModel.trim())}>
           <Text style={styles.bigBtnText}>이 모델 사용</Text>
         </TouchableOpacity>
+        </>}
       </View>}
     </>
   );
@@ -1093,6 +1124,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           <View style={[styles.composerActionRow, shortKeyboardViewport && { flexShrink: 0 }]}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
             <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
+            {supportsDaybreak(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model) && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Daybreak" accessibilityState={{ selected: conversation?.daybreakEnabled === true, disabled: configurationLocked }} disabled={configurationLocked} onPress={() => void toggleDaybreak()} style={styles.composerSelectBtn}><Text style={[styles.composerSelectText, conversation?.daybreakEnabled && { color: colors.accent2 }]}>☀ {shortKeyboardViewport ? (conversation?.daybreakEnabled ? 'ON' : 'OFF') : `Daybreak ${conversation?.daybreakEnabled ? '켜짐' : '꺼짐'}`}</Text></TouchableOpacity>}
             {!shortKeyboardViewport && <View style={styles.composerToolbarSpacer} />}
             {!busy && (
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>

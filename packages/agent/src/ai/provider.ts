@@ -98,6 +98,7 @@ export type ProviderEvent =
   | { type: 'tool'; call: ProviderToolCall };
 
 export interface ChatRequest {
+  daybreakEnabled?: boolean;
   system?: string;
   turns: Turn[];
   tools?: NeutralTool[];
@@ -119,6 +120,7 @@ export interface NativeSteeringControl {
 }
 
 export interface NativeAgentRequest {
+  daybreakEnabled?: boolean;
   /** Host-only capability, never deserialized from remote requests. */
   hostTools?: NativeHostTools;
   prompt: string;

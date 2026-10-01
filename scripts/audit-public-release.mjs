@@ -47,7 +47,7 @@ function forbiddenTrackedPath(path) {
   const rootRuntimeFiles = new Set([
     'config.json', 'config.json.bak', 'conversations.json', 'conversations.json.bak',
     'memory.json', 'schedules.json', 'routing-traces.jsonl', 'pairing-secret.dpapi',
-    'android-password.dpapi', 'native-sessions.json',
+    'android-password.dpapi', 'native-sessions.json', 'run-journal.json',
   ]);
   if (rootRuntimeFiles.has(lower)) return 'repository-root runtime state';
   if (/^(?:\.mr-robot|context-cache|private|runtime|shared|voice|docker|signing)\//i.test(normalized)) {
@@ -126,7 +126,10 @@ function walkFiles(directory) {
 }
 
 const tracked = trackedFiles();
-for (const path of tracked) {
+// New implementation files also need scanning before they are staged. Ignored
+// private evaluation reports and runtime state are not source candidates.
+const candidates = [...new Set([...tracked, ...git(['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean)])];
+for (const path of candidates) {
   const reason = forbiddenTrackedPath(path);
   if (reason) failures.push(`tracked path is unsafe (${reason}): ${path}`);
 
@@ -157,7 +160,7 @@ for (const path of tracked.filter((item) => /^(?:release\/.*\.exe|release\/mobil
 
 const requiredIgnoreProbes = [
   'config.json', 'config.json.bak', 'conversations.json', 'memory.json', 'schedules.json',
-  'routing-traces.jsonl', 'native-sessions.json', 'pairing-secret.dpapi', 'plugins/remote-link.json',
+  'routing-traces.jsonl', 'native-sessions.json', 'run-journal.json', 'run-journal.json.fixture.tmp', 'pairing-secret.dpapi', 'plugins/remote-link.json',
   'context-cache/stats.json', 'private/work-calendar/state.bin', 'runtime/cloudflared.yml',
   'shared/private.txt', 'voice/model/file', 'docker/ctf-toolbox/Dockerfile',
   'signing/mr-robot-release.jks', 'android-password.dpapi', '.dev.vars.local',
@@ -210,7 +213,7 @@ if (failures.length) {
   for (const failure of failures) console.error(`  - ${failure}`);
   process.exitCode = 1;
 } else {
-  const sourceCount = tracked.filter((path) => !path.startsWith('release/')).length;
-  console.log(`PUBLIC RELEASE HYGIENE PASSED · ${sourceCount} source files · ${tracked.length - sourceCount} tracked release pointers`);
+  const sourceCount = candidates.filter((path) => !path.startsWith('release/')).length;
+  console.log(`PUBLIC RELEASE HYGIENE PASSED · ${sourceCount} tracked/untracked source files · ${tracked.filter(path => path.startsWith('release/')).length} tracked release entries`);
   console.log('Runtime/plugin state, platform credentials, signing material, and known token formats are absent from the public source surface and reachable Git history.');
 }

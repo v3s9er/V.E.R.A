@@ -6,6 +6,8 @@ import type { PermissionMode } from '@mr-robot/shared';
  * command params so an AI tool call cannot forge its workspace or approval.
  */
 export interface PluginExecutionContext {
+  /** Host-owned identity; never accepted from tool arguments. */
+  readonly scopeKey?: string;
   readonly signal?: AbortSignal;
   readonly permissionMode: PermissionMode;
   /** True only for the local administrator credential, never for paired-device tokens. */

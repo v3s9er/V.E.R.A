@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
-import { resolveProjectWorkspace } from '@mr-robot/shared';
+import { resolveProjectWorkspace, supportsDaybreak } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
@@ -12,11 +12,13 @@ import { inConversationSpace, selectConversationInSpace, type ConversationSpace 
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 import { RunActivityPanel } from '../components/RunActivityPanel.js';
+import { ModelPicker } from '../components/ModelPicker.js';
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
 interface RouteInfo { providerLabel: string; model: string; role: string; effort: ReasoningEffort; reason: string; advisor?: { providerLabel: string; model: string } }
 interface ConversationMenu { conversation: ConversationSummary; x: number; y: number }
 type ExecutionConfigPatch = {
+  daybreakEnabled?: boolean;
   reasoningEffort?: ReasoningEffort;
   providerId?: string | null;
   providerModel?: string | null;
@@ -74,7 +76,6 @@ const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
     { id: nextId(), role: 'assistant', content: '', tools: [], done: false },
   ];
 };
-const modelChoiceValue = (providerId: string, model: string): string => JSON.stringify([providerId, model]);
 const describe = (input: unknown): string => { try { const s = JSON.stringify(input); return s.length > 90 ? `${s.slice(0, 90)}…` : s; } catch { return ''; } };
 const fromDetail = (detail: ConversationDetail): UiMsg[] => detail.messages
   .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -381,9 +382,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     historyAnchor.current = null;
     setLoadingHistory(false);
     setHistoryError('');
-    const [detail, runs] = await Promise.all([
+    const [detail, runs, recovery] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
       client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+      client.call('chat.recovery', { conversationId: id }, 5000).catch(() => null) as Promise<{ message: string } | null>,
     ]);
     const selectedRun = runs.find((run) => run.conversationId === id);
     if (!inConversationSpace(detail, spaceRef.current)) return;
@@ -405,7 +407,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     selectedRef.current = detail;
     setSelected(detail);
     if (projectScopeRef.current !== '*' && detail.workspaceId !== projectScopeRef.current) { projectScopeRef.current = '*'; setProjectScope('*'); }
-    setComposerError(''); setNavigationOpen(false);
+    setComposerError(recovery?.message ?? ''); setNavigationOpen(false);
     const restored = fromDetail(detail);
     setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: `${selectedRun.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${selectedRun.partialText ?? ''}`, tools: [], done: false }] : restored);
     setHistoryPage({ id, info: detail.history });
@@ -1092,38 +1094,14 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           <div className="chat-actions">
             <div className="composer-options" aria-label="대화 실행 설정">
 {selected && <div className="composer-model-controls">
-              <Select
-                className="model-select"
-                aria-label="대화 모델"
-                onFocus={() => void discoverProviderModels(providers)}
-                value={selected.routingPresetId ? '' : selected.providerId ? modelChoiceValue(selected.providerId, selected.providerModel ?? providers.find((provider) => provider.id === selected.providerId)?.model ?? '') : ''}
-                onChange={(event) => {
-                  const target = selectedRef.current;
-                  if (!target) return;
-                  if (!event.target.value) {
-                    if (!target.routingPresetId) void updateExecutionConfig({
-                      providerId: null,
-                      providerModel: null,
-                      reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, defaultProvider),
-                    });
-                    return;
-                  }
-                  const [providerId, providerModel] = JSON.parse(event.target.value) as [string, string];
-                  void updateExecutionConfig({
-                    routingPresetId: null,
-                    providerId,
-                    providerModel,
-                    reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, providers.find((provider) => provider.id === providerId)),
-                  });
-                }}
-                disabled={executionControlsDisabled}
-              >
-                <option value="">{selected.routingPresetId ? '시나리오 자동 배정' : '기본 모델'}</option>
-                {providers.map((provider) => <optgroup key={provider.id} label={provider.label}>
-                  {[...new Set([...(providerModels[provider.id] ?? [provider.model]), ...(selected.providerId === provider.id && selected.providerModel ? [selected.providerModel] : [])])].map((model) => <option key={model} value={modelChoiceValue(provider.id, model)}>{model}</option>)}
-                </optgroup>)}
-              </Select>
-              <button type="button" className="model-refresh-button" aria-label="모델 목록 새로고침" title="공급자 모델 목록 새로고침 (선택 유지)" disabled={refreshingModels} onClick={() => void discoverProviderModels(providers, true)}>{refreshingModels ? '…' : '↻'}</button>
+              <ModelPicker providers={providers} catalogs={providerModels} providerId={selected.providerId} model={selected.providerModel} scenario={!!selected.routingPresetId} disabled={executionControlsDisabled} refreshing={refreshingModels} onRefresh={force => void discoverProviderModels(providers, force)} onSelect={(providerId, providerModel) => {
+                const target = selectedRef.current;
+                if (!target) return;
+                const next = providerId ? providers.find(p => p.id === providerId) : defaultProvider;
+                void updateExecutionConfig({ routingPresetId: null, providerId: providerId ?? null, providerModel: providerModel ?? null,
+                  daybreakEnabled: supportsDaybreak(next, providerModel ?? next?.model) && target.daybreakEnabled === true,
+                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, next) });
+              }} />
             </div>}
               <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
                 <span className="composer-control-icon" aria-hidden="true">◇</span>
@@ -1140,6 +1118,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 </Select>
               </label>
               <button type="button" className="composer-more" aria-label="추가 실행 설정" title="실행 PC · 프리셋 · 질문 예산" aria-haspopup="dialog" onClick={() => setShowComposerSettings(true)}>⋯</button>
+              {supportsDaybreak(reasoningProvider, selected?.providerModel ?? reasoningProvider?.model) && <button type="button" className="daybreak-toggle" aria-label="Daybreak" aria-pressed={selected?.daybreakEnabled === true} disabled={executionControlsDisabled} title="승인된 계정의 Daybreak 사용 · PC 접근 권한과 별개" onClick={() => void updateExecutionConfig({ daybreakEnabled: !selected?.daybreakEnabled })}>☀ <span>Daybreak</span><span className="daybreak-state">{selected?.daybreakEnabled ? '켜짐' : '꺼짐'}</span></button>}
             </div>
             <div className="composer-send-actions">
             <input ref={uploadRef} hidden type="file" multiple onChange={(event) => void uploadAttachment(event.target.files)} />

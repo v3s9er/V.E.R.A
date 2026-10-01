@@ -458,6 +458,7 @@ export class CliProvider implements AiProvider {
   }
 
   async runAgent(req: NativeAgentRequest): Promise<ProviderResult> {
+    if (this.type === 'codex-cli' && req.daybreakEnabled && !req.session) throw new Error('Daybreak에는 대화 세션을 사용하는 최신 Codex 연결이 필요합니다.');
     if (req.permissionMode === 'ask') throw new Error('네이티브 CLI에는 확인 대기 권한을 직접 전달할 수 없습니다. 먼저 명시적으로 승인해야 합니다.');
     if (this.type === 'claude-cli' && req.permissionMode !== 'full') {
       throw new Error('Claude Code 네이티브 도구는 OS 수준 작업공간 격리를 보장하지 않아 완전 접근에서만 실행할 수 있습니다.');

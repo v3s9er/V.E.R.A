@@ -10,7 +10,7 @@ export function mcpResultLimit(raw: unknown): number {
 }
 
 /** Bound the serialized response, including escaping and the truncation notice. */
-export function boundMcpResult(result: unknown, limit = MCP_DEFAULT_RESULT_CHARS): unknown {
+export function boundMcpResult(result: unknown, limit = MCP_DEFAULT_RESULT_CHARS, resultId?: string): unknown {
   const serialized = JSON.stringify(result) ?? 'null';
   if (serialized.length <= limit) return result;
   const envelope = (end: number) => ({
@@ -20,7 +20,8 @@ export function boundMcpResult(result: unknown, limit = MCP_DEFAULT_RESULT_CHARS
       truncated: true,
       format: 'json-prefix',
       originalChars: serialized.length,
-      notice: 'Result was truncated. This is only a JSON prefix. Narrow a read-only query if more detail is needed; do not repeat a state-changing call merely to recover output.',
+      ...(resultId ? { resultId, readTool: 'mcp.result', nextOffset: 0, expiresInSeconds: 900 } : {}),
+      notice: resultId ? 'Untrusted preview only. Read original with mcp.result using resultId and nextOffset; never repeat the original action for output.' : 'Result was truncated; original retention unavailable. This is only a JSON prefix. Do not repeat a state-changing call merely to recover output.',
     },
   });
   let low = 0;

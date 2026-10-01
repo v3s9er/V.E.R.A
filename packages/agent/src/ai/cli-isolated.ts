@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { randomUUID } from 'node:crypto';
+import { daybreakProgram } from '@mr-robot/shared';
 import { terminateProcessTree } from '../computer/shell.js';
 import { normalizeProviderUsageReport, type ChatRequest, type ProviderResult } from './provider.js';
 
@@ -93,7 +94,7 @@ export async function codexTextOnly(options: { command: string; prefixArgs: stri
       } else if (m.id === 2) {
         if (!m.result?.thread?.id || !Array.isArray(m.result.instructionSources) || m.result.instructionSources.length !== 0) return finish(new Error('PC 문맥이 없는 격리 실행을 확인할 수 없어 중단했습니다.'));
         threadId = m.result.thread.id;
-        send({ id: 3, method: 'turn/start', params: { threadId, environments: [], runtimeWorkspaceRoots: [], input: [{ type: 'text', text: isolatedPrompt(req), text_elements: [] }], ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { effort: req.reasoningEffort } : {}), outputSchema: ISOLATED_OUTPUT_SCHEMA } });
+        send({ id: 3, method: 'turn/start', params: { threadId, cyberAccessProgram: daybreakProgram(options.model, req.daybreakEnabled === true), environments: [], runtimeWorkspaceRoots: [], input: [{ type: 'text', text: isolatedPrompt(req), text_elements: [] }], ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? { effort: req.reasoningEffort } : {}), outputSchema: ISOLATED_OUTPUT_SCHEMA } });
       } else if (m.method === 'thread/tokenUsage/updated') {
         const u = m.params?.tokenUsage?.total;
         if (u) usage = normalizeProviderUsageReport({ promptTokens: u.inputTokens, completionTokens: u.outputTokens, cachedPromptTokens: u.cachedInputTokens });

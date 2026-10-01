@@ -45,3 +45,19 @@ test('an unsupported active profile fails before admission or provider execution
   await assert.rejects(loop.run([], 'hello', { reserveModelCall: () => { reserved = true; return { finish: () => true, accountedTokens: 0 }; } }), /temperature/);
   assert.equal(called, false); assert.equal(reserved, false);
 });
+
+test('automatic profile effort keeps adaptive API and native choices', async () => {
+  const profile: ModelTuningProfile = { id: 'auto-profile', name: 'Auto', reasoningEffort: 'auto', helperMode: 'off' };
+  let apiRequest: ChatRequest | undefined;
+  const selected = api(async request => { apiRequest = request; return answer(); });
+  await new AgentLoop(registry(selected, profile), {} as any).run([], '안녕', {}, [], { reasoningEffort: 'auto' });
+  assert.equal(apiRequest?.reasoningEffort, 'low');
+  let nativeRequest: NativeAgentRequest | undefined;
+  const native = { ...api(async () => { throw new Error('must use native'); }), type: 'codex-cli' as const, baseUrl: '', supportsTools: false,
+    chatIsolated: async () => answer(), runAgent: async (request: NativeAgentRequest) => { nativeRequest = request; return answer(); } };
+  await new AgentLoop(registry(native, profile), {} as any).run([], '취약점 분석', {}, [], {
+    workspacePath: 'C:/fixture-only', permissionMode: 'read-only', tokenPolicy: 'audit-only', cacheKey: 'synthetic',
+    nativeSessionDirectory: 'C:/fixture-only', reasoningEffort: 'auto',
+  });
+  assert.equal(nativeRequest?.reasoningEffort, 'high');
+});

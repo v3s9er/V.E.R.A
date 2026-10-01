@@ -3072,6 +3072,12 @@ body::before {
 .fatal-error-card > p:not(.eyebrow) { color: var(--text-dim); line-height: 1.6; }
 .fatal-error-card small { display: block; margin-top: 18px; color: var(--text-faint); }
 .fatal-error-actions { display: flex; justify-content: center; gap: 9px; margin-top: 22px; }
+.daybreak-toggle { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; border:1px solid transparent; border-radius:9px; padding:7px 9px; background:transparent; color:var(--text-muted, #aaa); cursor:pointer; font-size:12px; }
+.daybreak-toggle[aria-pressed="true"] { color:#d9ceff; background:rgba(124,92,255,.16); border-color:rgba(124,92,255,.4); }
+.daybreak-toggle:disabled { opacity:.5; cursor:default; }
+.daybreak-toggle:focus-visible { outline:2px solid var(--accent); }
+.daybreak-state { font-size:10px; opacity:.75; }
+@media (max-width:600px) { .daybreak-state { display:none; } }
 .composer-model-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .composer-model-controls select { max-width: min(200px, 100%); min-width: 0; height: 34px; }
 .chat-commandbar .chat-title-group { flex: 1; min-width: 0; }

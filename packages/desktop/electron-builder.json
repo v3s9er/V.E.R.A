@@ -1,7 +1,7 @@
 {
   "appId": "com.polaris.mrrobot",
   "productName": "Mr.Robot",
-  "electronVersion": "43.4.1",
+  "electronVersion": "43.7.7",
   "asar": true,
   "asarUnpack": ["integrations/discordbot/**", "integrations/lid-display/**", "integrations/computer-use/**", "integrations/local-training/**", "plugins/mr-robot/scripts/**"],
   "compression": "maximum",

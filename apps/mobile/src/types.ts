@@ -191,6 +191,7 @@ export interface ChatRunState {
 }
 
 export interface ConversationSummary {
+  daybreakEnabled?: boolean;
   id: string;
   title: string;
   status: 'active' | 'archived';

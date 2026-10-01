@@ -47,8 +47,9 @@ const mock = {
     if (method === 'workspaces.list' || method === 'projects.list') return projects;
     if (method === 'projects.create' || method === 'projects.update') { const project = method.endsWith('create') ? { id: crypto.randomUUID(), path: params.path || 'C:\\Fixture\\NewProject', createdAt: Date.now(), isDefault: false } : projects.find(p => p.id === params.id)!; Object.assign(project, { name: params.name, instructions: params.instructions }); if (method.endsWith('create')) projects.push(project as WorkspaceInfo); emit('workspaces.changed', [...projects]); return project; }
     if (method === 'projects.delete') { projects.splice(projects.findIndex(p => p.id === params.id), 1); emit('workspaces.changed', [...projects]); return { ok: true }; }
-    if (method === 'providers.list') return [{ id: 'demo', label: '테스트 공급자', model: 'demo-balanced', enabled: true, isDefault: true, kind: 'openai', supportedReasoning: ['low', 'medium', 'high'] }];
-    if (method === 'providers.catalog') return { models: ['demo-balanced', 'demo-fast'], state: 'fresh', source: 'provider' };
+    if (method === 'providers.list') return [{ id: 'demo', label: 'Codex 구독', type: 'codex-cli', model: 'gpt-6-sol', enabled: true, isDefault: true, supportedReasoning: ['auto', 'low', 'medium', 'high'] }, { id: 'claude', label: 'Claude 구독', type: 'claude-cli', model: 'claude-sonnet', enabled: true, isDefault: false, supportedReasoning: ['auto', 'high'] }];
+    if (method === 'providers.catalog') return { models: params.id === 'claude' ? ['claude-sonnet', 'claude-opus'] : ['gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-daybreak-blue-latest'], state: 'fresh', source: 'provider' };
+    if (method === 'chat.recovery') return null;
     if (method === 'routing.presets.list') return [];
     if (method === 'chat.runs') return pending ? [{ conversationId: pending.id, running: true, phase: 'working', steeringQueued: steering, partialText: '테스트 출력 복원', activity: [] }] : [];
     if (method === 'chat.pendingConfirm') return null;

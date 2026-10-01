@@ -202,6 +202,21 @@ test('server discovery is paginated without starting processes and invalid tool 
   await h.plugin.deactivate?.(h.ctx);
 });
 
+test('retained originals are scoped and invalidated when the server is removed', async () => {
+  const h = harness(async () => ({ client: { listTools: async () => ({ tools: [] }), callTool: async () => ({ content: [{ type: 'text', text: 'original'.repeat(4000) }] }) }, transport: { close: async () => {} } }));
+  await h.plugin.activate!(h.ctx);
+  await h.call('mcp.servers.add', { id: 'originals', command: 'node' });
+  const execution: PluginExecutionContext = { scopeKey: 'ticket:a:full', permissionMode: 'full', destructiveApproved: true, approvalSource: 'prompt' };
+  const response = await h.call('mcp.call', { serverId: 'originals', tool: 'read' }, execution);
+  assert.equal(typeof response._mrRobot.resultId, 'string');
+  const page = await h.call('mcp.result', { resultId: response._mrRobot.resultId }, execution);
+  assert.match(page.text, /original/);
+  await assert.rejects(h.call('mcp.result', { resultId: response._mrRobot.resultId }, { ...execution, scopeKey: 'ticket:b:full' }), /없거나 만료/);
+  await h.call('mcp.servers.remove', { id: 'originals' });
+  await assert.rejects(h.call('mcp.result', { resultId: response._mrRobot.resultId }, execution), /없거나 만료/);
+  await h.plugin.deactivate?.(h.ctx);
+});
+
 test('a cancelled waiter exits promptly while another request finishes connecting', async () => {
   let finish: (() => void) | undefined;
   const h = harness(async () => {

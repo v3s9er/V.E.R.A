@@ -24,6 +24,8 @@ web-build/
 /routing-traces.jsonl
 /native-sessions.json
 /native-sessions.json.*.tmp
+/run-journal.json
+/run-journal.json.*.tmp
 /pairing-secret.dpapi
 /context-cache/
 /plugins/*.json

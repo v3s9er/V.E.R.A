@@ -4972,7 +4972,7 @@ SPDX license expression: MIT
 License/notice files: none found in the installed package root.
 
 ================================================================================
-brace-expansion@5.0.9
+brace-expansion@5.0.12
 Products: Mobile
 SPDX license expression: MIT
 
@@ -8835,7 +8835,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-fast-uri@3.1.7
+fast-uri@3.1.8
 Products: Desktop
 SPDX license expression: BSD-3-Clause
 
@@ -9981,7 +9981,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-ip-address@10.5.0
+ip-address@10.7.2
 Products: Desktop
 SPDX license expression: MIT
 

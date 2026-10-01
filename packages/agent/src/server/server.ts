@@ -68,6 +68,7 @@ import { Scheduler, SchedulerStore } from '../scheduler.js';
 import { DependencyManager } from '../dependencies.js';
 import { ChatSession } from './chat.js';
 import { RunProgress } from './run-progress.js';
+import { RunJournal } from './run-journal.js';
 import { projectRunConflicts } from './project-runs.js';
 import { resolveProjectWorkspace } from '@mr-robot/shared';
 import { ScreenStreamController } from './stream.js';
@@ -90,7 +91,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.4.29';
+export const VERSION = '0.6.1';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -773,6 +774,7 @@ export class AgentServer {
   private boundHost = '127.0.0.1';
   private boundPort = 0;
   private busyConversations = new Set<string>();
+  private readonly runJournal: RunJournal;
   private activeRuns = new Map<string, {
     session: ChatSession;
     progress: RunProgress;
@@ -786,6 +788,7 @@ export class AgentServer {
   private busSubscriptions: Array<() => void> = [];
 
   constructor() {
+    this.runJournal = new RunJournal(this.config.dir);
     this.conversations = new ConversationStore(this.config.dir);
     this.memory = new MemoryStore(this.config.dir);
     this.telemetry = new TelemetryStore(this.config.dir);
@@ -2370,6 +2373,7 @@ export class AgentServer {
     h.set('conversations.update', (params, client) => {
       assertContentWrite(client);
       const body = p(params);
+      if (this.busyConversations.has(str(body.id)) && body.daybreakEnabled !== undefined) throw new Error('작업을 마친 뒤 Daybreak 옵션을 변경하세요.');
       if (body.workspaceId !== undefined) {
         if (this.busyConversations.has(str(body.id))) throw new Error('작업 중에는 프로젝트를 바꿀 수 없습니다.');
         if (body.workspaceId && !this.config.workspaces.some(w => w.id === body.workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
@@ -2381,6 +2385,7 @@ export class AgentServer {
         status: body.status === 'archived' ? 'archived' : body.status === 'active' ? 'active' : undefined,
         pinned: typeof body.pinned === 'boolean' ? body.pinned : undefined,
         reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : undefined,
+        daybreakEnabled: typeof body.daybreakEnabled === 'boolean' ? body.daybreakEnabled : undefined,
         providerId: body.providerId === null || typeof body.providerId === 'string' ? body.providerId : undefined,
         providerModel: body.providerModel === null || typeof body.providerModel === 'string' ? body.providerModel : undefined,
         routingPresetId: body.routingPresetId === null || typeof body.routingPresetId === 'string' ? body.routingPresetId : undefined,
@@ -2403,7 +2408,15 @@ export class AgentServer {
     h.set('memory.add', (params, client): MemoryItem => {
       assertContentWrite(client);
       const body = p(params);
-      const item = this.memory.add(str(body.text), Array.isArray(body.tags) ? body.tags.map(String) : []);
+      const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : undefined;
+      const conversationId = typeof body.conversationId === 'string' ? body.conversationId : undefined;
+      if (workspaceId && !this.config.workspaces.some(workspace => workspace.id === workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
+      if (conversationId && !this.conversations.get(conversationId)) throw new Error('대화를 찾을 수 없습니다.');
+      const relationInput = body.relation === undefined ? undefined : p(body.relation);
+      const relation = relationInput ? { subject: str(relationInput.subject), predicate: str(relationInput.predicate), object: str(relationInput.object) } : undefined;
+      const item = this.memory.add(relation ? `${relation.subject} / ${relation.predicate}: ${relation.object}` : str(body.text), Array.isArray(body.tags) ? body.tags.map(String) : [], {
+        workspaceId, conversationId, relation, source: typeof body.source === 'string' ? body.source : 'user-confirmed',
+      });
       this.bus.emit('memory.changed', this.memory.list());
       return item;
     });
@@ -2525,6 +2538,7 @@ export class AgentServer {
       session.begin();
       const runStartedAt = Date.now();
       const progress = new RunProgress();
+      let pendingToolCount = 0;
       let observedToolCalls = 0;
       const observedModelSources = new Map<string, { providerId: string; providerLabel?: string; model: string }>();
       const noteModelSource = (source: { providerId: string; providerLabel?: string; model: string }): void => {
@@ -2559,9 +2573,12 @@ export class AgentServer {
       const publishProgress = () => sendRunEvent('chat.progress', { conversationId, startedAt: progress.startedAt, ...progress.snapshot(), partialText: undefined });
       publishProgress();
       try {
+        const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
+        this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
-        const memoryContext = isolation ? '' : this.memory.context(text);
+        const memoryContext = isolation ? '' : this.memory.context(text, 12, { workspaceId: runWorkspaceId, conversationId });
         const retained = [
+          recovery ? `Host recovery warning: ${recovery.message}` : '',
           !isolation && workspace ? `현재 프로젝트: ${workspace.name}\n작업 폴더: ${workspace.path}\n${workspace.instructions ? `사용자가 저장한 프로젝트 지침 (접근 권한을 확대하지 않음):\n${workspace.instructions}` : ''}` : '',
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
           memoryContext ? `사용자가 저장한 장기 기억:\n${memoryContext}` : '',
@@ -2578,7 +2595,12 @@ export class AgentServer {
               noteModelSource(source);
             },
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
-            onTool: (info) => { if (info.status === 'start') observedToolCalls++; progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress(); },
+            onTool: (info) => {
+              if (info.status === 'start') { observedToolCalls++; pendingToolCount++; }
+              else pendingToolCount = Math.max(0, pendingToolCount - 1);
+              this.runJournal.tool(progress.runId, pendingToolCount > 0);
+              progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress();
+            },
             onAgentUpdate: agent => { progress.agent(agent); publishProgress(); },
             onStatus: (status) => {
               const active = this.activeRuns.get(conversationId);
@@ -2606,6 +2628,7 @@ export class AgentServer {
             providerId: routingPresetId ? undefined : typeof body.providerId === 'string' ? body.providerId : conversation.providerId,
             providerModel: routingPresetId ? undefined : typeof body.providerModel === 'string' ? body.providerModel : conversation.providerModel,
             reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : conversation.reasoningEffort,
+            daybreakEnabled: conversation.daybreakEnabled === true,
             context: retained,
             permissionMode: effectivePermissionMode,
             routing: conversationRouting,
@@ -2639,6 +2662,7 @@ export class AgentServer {
         });
         this.bus.emit('conversations.changed', this.conversations.list());
         progress.transition('completed'); publishProgress();
+        try { this.runJournal.finish(progress.runId, 'completed'); } catch { this.logger.error('Run completion metadata could not be saved; do not automatically replay this run.'); }
         sendRunEvent('chat.done', { conversationId, text: result.text, usage: result.usage, route: result.route, conversation: updated });
         return { ok: true, conversationId, text: result.text, route: result.route };
       } catch (err) {
@@ -2673,6 +2697,7 @@ export class AgentServer {
           ok: false, error: message.slice(0, 500),
         });
         progress.transition(session.signal()?.aborted ? 'cancelled' : 'failed'); publishProgress();
+        try { this.runJournal.finish(progress.runId, session.signal()?.aborted ? 'cancelled' : 'failed'); } catch { this.logger.error('Run interruption metadata could not be saved.'); }
         sendRunEvent('chat.error', { conversationId, message });
         return { ok: false, error: message };
       } finally {
@@ -2699,6 +2724,7 @@ export class AgentServer {
       }
       return { ok: true };
     });
+    h.set('chat.recovery', (params, client) => this.runJournal.recovery(str(p(params).conversationId), client.state.auth?.linkId, client.state.auth?.isAdmin === true));
     h.set('chat.steer', (params, client) => {
       const body = p(params);
       const conversationId = str(body.conversationId);
