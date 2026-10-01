@@ -33,6 +33,16 @@ Legacy turns already discarded by older versions cannot be reconstructed. The UI
 
 ## Verification
 
+### 0.6.3: bounded vote/hybrid councils
+
+Vote/hybrid deliberation no longer waits indefinitely for every candidate. Each analysis-only node has a deadline. After half the scheduled nodes (rounded up) return usable proposals, the host allows a short grace period for other proposals, then cancels outstanding candidates. This threshold is a latency policy, not proof of agreement or correctness. Empty responses and provider errors are not evidence. User cancellation and host budget failures remain fatal; they do not trigger retries or bypasses.
+
+Default total-deliberation / per-node / post-threshold grace budgets are 45/30/5 seconds for economy, 75/60/10 for balanced, and 90/75/15 for quality/manual. The total budget includes agenda, internal rounds and cross-group discussion; later stages are skipped when it expires. Independent groups start concurrently. Earlier valid proposals survive a failed later round. The judge receives the latest evidence once, rather than the entire repeated meeting transcript. These are provisional responsiveness defaults, not benchmark-proven optimal values. A host-only override exists for testing; remote RPC/model input cannot set it.
+
+The final judge independently checks partial evidence (or solves from the original request if none arrived). A native-capable judge in an authorized workspace now uses the same native sandbox/tool path as a single agent. Only the judge performs side effects; workers remain text-only, and ask-mode confirmation, Discord isolation, provider identity checks and per-call accounting are preserved. This improves final-tool parity; it does **not** make total compute or the internal harnesses identical between single and council execution.
+
+Progress includes node identity, actual provider/model, completion/failure/deadline/cancellation status and elapsed milliseconds, without candidate text or raw provider errors. An adapter that ignores cancellation can no longer block the host indefinitely: its late result is ignored and its unknown usage retains the admission reservation. Built-in adapters still receive abort to interrupt/retire the real request; remote providers may continue billing work already accepted. The final verification turn remains governed by the normal caller deadline, not the council deliberation deadline.
+
 `npm run test:coordination` exercises real host execution paths with fake providers/app-server processes. It covers model inheritance, context separation, path/tool denial, budget admission, cursor/progress deduplication, cancellation/draining, transcript transactions/paging, context budgets and MCP lifecycle/output bounds. Separate native-desktop and text-pool tests retain authorization and session-reuse checks. The UI preview uses fixture-only data and no AI calls.
 
 These checks demonstrate behavior and invariants, not a measured production-model speedup. Real latency depends on the selected model, reasoning level, account limits and task. No claim of universal peak performance is made.

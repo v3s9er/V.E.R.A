@@ -1,5 +1,6 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
 import { AdaptiveExecution } from './adaptive-execution.js';
+import { Council, councilLimits, untilAborted, type CouncilLimits, type CouncilOutcome } from './council.js';
 import { projectGuidance } from './project-guidance.js';
 import type {
   ChatUsage,
@@ -161,6 +162,8 @@ export interface LoopResult {
 }
 
 export interface RunOptions {
+  /** Host-only override for bounded council evaluation; never deserialized from RPC. */
+  councilLimits?: CouncilLimits;
   daybreakEnabled?: boolean;
   /** Server-only capability broker. Never deserialize from ordinary RPC input. */
   isolation?: { tools: NeutralTool[]; execute(name: string, input: unknown, signal?: AbortSignal): Promise<string> };
@@ -366,7 +369,8 @@ export class AgentLoop {
       return tuningSnapshot.get(key)!;
     };
     try {
-    const budgetedChat = async (actualProvider: AiProvider, request: ChatRequest, isolatedWorker = false, onUsage?: (usage: ProviderUsage) => void): Promise<ProviderResult> => {
+    const budgetedChat = async (actualProvider: AiProvider, request: ChatRequest, isolatedWorker = false, onUsage?: (usage: ProviderUsage) => void, boundedCancellation = false): Promise<ProviderResult> => {
+      request.signal?.throwIfAborted();
       if ((options.isolation || isolatedWorker) && actualProvider.type.endsWith('-cli') && !actualProvider.chatIsolated) throw new Error('이 구독 공급자는 권한 분리 실행을 지원하지 않습니다.');
       cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
       const boundedRequest: ChatRequest = applyModelTuning({
@@ -385,7 +389,8 @@ export class AgentLoop {
         && executionMode === 'single' && actualProvider.runBrokerAgent;
       try {
         callLease = cb.reserveModelCall?.(directBroker ? 'native' : 'api', directBroker ? Number.MAX_SAFE_INTEGER : providerCallMaximumTokens(boundedRequest));
-        const result = directBroker ? await actualProvider.runBrokerAgent!({
+        request.signal?.throwIfAborted();
+        const operation = directBroker ? actualProvider.runBrokerAgent!({
           ...boundedRequest,
           executeTool: async (name, input, signal) => {
             signal.throwIfAborted();
@@ -408,7 +413,8 @@ export class AgentLoop {
               throw error;
             }
           },
-        }) : (options.isolation || isolatedWorker) && actualProvider.chatIsolated ? await actualProvider.chatIsolated(boundedRequest) : await actualProvider.chat(boundedRequest);
+        }) : (options.isolation || isolatedWorker) && actualProvider.chatIsolated ? actualProvider.chatIsolated(boundedRequest) : actualProvider.chat(boundedRequest);
+        const result = boundedCancellation && request.signal ? await untilAborted(operation, request.signal) : await operation;
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;
         const reportedTokens = addRecordedTokens(result.usage.promptTokens, result.usage.completionTokens);
@@ -649,21 +655,26 @@ export class AgentLoop {
       const role = node.role ?? 'general';
       return this.registry.resolve(role, node.providerId, node.providerModel, scenario?.roles[role]);
     };
-    const stageCall = async (node: RoutingNode, system: string, content: string, status?: string) => {
-      runSignal.throwIfAborted();
+    const stageCall = async (node: RoutingNode, system: string, content: string, status?: string, stageSignal = runSignal, strict = false,
+      observation?: { provider(actual: AiProvider): void; usage(value: ProviderUsage): void }) => {
+      stageSignal.throwIfAborted();
       const stageProvider = providerForCall(providerForNode(node), node.role ?? 'general');
+      if (!stageProvider && strict) throw new Error('Council model unavailable');
       if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 의견을 내지 못했습니다.' };
+      observation?.provider(stageProvider);
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
       try {
         const response = await budgetedChat(stageProvider, {
           system: identifiedSystem(system, stageProvider),
           turns: [{ role: 'user', content }],
           reasoningEffort: effortFor(stageProvider),
-          signal: runSignal,
+          signal: stageSignal,
           promptCacheKey: options.cacheKey ? `${options.cacheKey}:stage:${node.id}` : undefined,
-        });
+        }, false, observation?.usage, strict);
+        if (strict && (!response.text.trim() || response.toolCalls.length)) throw new Error('Council proposal incomplete');
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: response.text };
       } catch (error) {
+        if (strict) throw error;
         if (error instanceof ModelBudgetExceededError) throw error;
         if (runSignal.aborted) throw runSignal.reason ?? error;
         return { label: node.label, model: `${stageProvider.label} / ${stageProvider.model}`, text: `단계 실패: ${error instanceof Error ? error.message : String(error)}` };
@@ -741,8 +752,10 @@ export class AgentLoop {
     // an approval policy rather than an OS boundary; keep Claude tool-less
     // unless the user explicitly selected full machine access.
     const requestedNativePermission = options.permissionMode ?? 'ask';
-    const nativeAllowedByPolicy = provider.type === 'codex-cli' || requestedNativePermission === 'full';
-    if (!options.isolation && (!semanticDesktop || provider.type === 'codex-cli') && executionMode === 'single' && provider.runAgent && options.workspacePath && nativeAllowedByPolicy) {
+    const canRunNative = (selected: AiProvider) => !options.isolation && (!semanticDesktop || selected.type === 'codex-cli')
+      && !!selected.runAgent && !!options.workspacePath && (selected.type === 'codex-cli' || requestedNativePermission === 'full');
+    const runNativeMain = async (provider: AiProvider): Promise<LoopResult> => {
+      runSignal.throwIfAborted();
       const nativeProvider = provider;
       let nativePermission = options.permissionMode ?? 'ask';
       if (nativePermission === 'ask') {
@@ -894,7 +907,9 @@ export class AgentLoop {
         usage,
         route: { providerId: actualNativeProvider.id, providerLabel: actualNativeProvider.label, model: actualNativeProvider.model, role: routeRole, effort: actualNativeEffort, reason: `${routeReason} · 네이티브 CLI 에이전트${actualNativeProvider.id !== nativeProvider.id ? ' · 고비용 상한 후 무료 모델 전환' : ''}` },
       };
-    }
+    };
+
+    if (executionMode === 'single' && canRunNative(provider)) return await runNativeMain(provider);
 
     if (executionMode === 'pipeline' && nodes.length > 1) {
       const finalNode = nodes[nodes.length - 1];
@@ -1002,14 +1017,59 @@ export class AgentLoop {
       const agendaNodes = executionMode === 'hybrid' ? nodes.filter((node) => node.id !== finalNode.id && node.role === 'router') : [];
       const candidates = nodes.filter((node) => node.id !== finalNode.id && !agendaNodes.some((agenda) => agenda.id === node.id));
       const meetingRounds = Math.max(1, Math.min(3, scenario?.meetingRounds ?? 2));
+      type Proposal = { label: string; model: string; text: string };
+      type Assignment = { node: RoutingNode; system: string; content: string; status: string };
+      const assignments = new Map<string, Assignment>();
+      const workerProgress = new Map<string, CoordinationAgent>();
+      let stageSequence = 0;
+      let incomplete = 0;
+      const states = { running: '분석 중', completed: '완료', failed: '모델 응답 실패', timed_out: '시간 예산 초과', superseded: '완료된 풀이로 검증 진행', cancelled: '작업 취소', skipped: '회의 예산 소진 · 생략' };
+      const council = new Council({
+        limits: options.councilLimits ?? councilLimits(scenario!.mode), signal: runSignal,
+        isFatal: error => error instanceof ModelBudgetExceededError,
+        onEvent: event => {
+          const assignment = assignments.get(event.id)!;
+          const key = `council:${assignment.node.id}`;
+          const previous = workerProgress.get(key);
+          const snapshot: CoordinationAgent = {
+            agentId: key, label: assignment.node.label.slice(0, 80),
+            providerId: previous?.providerId ?? '', model: previous?.model ?? '',
+            sequence: (previous?.sequence ?? 0) + 1,
+            turns: (previous?.turns ?? 0) + (event.state === 'running' ? 1 : 0),
+            state: event.state === 'running' || event.state === 'completed' ? event.state
+              : event.state === 'failed' || event.state === 'timed_out' ? 'failed' : 'cancelled',
+            status: `${assignment.status} · ${states[event.state]} · ${event.elapsedMs}ms`,
+            usage: previous?.usage ?? { promptTokens: 0, completionTokens: 0 },
+          };
+          workerProgress.set(key, snapshot);
+          cb.onAgentUpdate?.(snapshot);
+          if (event.state !== 'running') cb.onStatus?.(snapshot.status);
+        },
+      });
+      const collect = async (batch: Assignment[]): Promise<Array<Proposal & { nodeId: string }>> => {
+        const outcomes = await council.collect<Proposal>(batch.map(assignment => {
+          const id = String(++stageSequence);
+          assignments.set(id, assignment);
+          const key = `council:${assignment.node.id}`;
+          return { id, run: signal => stageCall(assignment.node, assignment.system, assignment.content, assignment.status, signal, true, {
+            provider: actual => { const item = workerProgress.get(key)!; item.providerId = actual.id; item.model = actual.model; item.sequence++; cb.onAgentUpdate?.({ ...item, usage: { ...item.usage } }); },
+            usage: value => { const item = workerProgress.get(key)!; item.usage = {
+              promptTokens: addRecordedTokens(item.usage.promptTokens, value.promptTokens),
+              completionTokens: addRecordedTokens(item.usage.completionTokens, value.completionTokens),
+            }; },
+          }) };
+        }));
+        incomplete += outcomes.filter(outcome => outcome.state !== 'completed').length;
+        return outcomes.filter((outcome): outcome is CouncilOutcome<Proposal> & { value: Proposal } => outcome.state === 'completed' && !!outcome.value)
+          .map(outcome => ({ ...outcome.value, nodeId: assignments.get(outcome.id)!.node.id }));
+      };
       const agendaResults: Array<{ label: string; model: string; text: string }> = [];
       for (const node of agendaNodes) {
-        agendaResults.push(await stageCall(
-          node,
-          `You are the lightweight agenda router for a hybrid AI council. Classify the task, isolate the key decisions and constraints, and create a concise agenda for the specialist groups. Do not solve the task or claim tools were executed.`,
-          [retainedContext, `Original user request:\n${userMessage}`].filter(Boolean).join('\n\n').slice(-30_000),
-          `혼합 분류 · ${node.label}`,
-        ));
+        agendaResults.push(...await collect([{
+          node, system: `You are the lightweight agenda router for a hybrid AI council. Classify the task, isolate the key decisions and constraints, and create a concise agenda for the specialist groups. Do not solve the task or claim tools were executed.`,
+          content: [retainedContext, `Original user request:\n${userMessage}`].filter(Boolean).join('\n\n').slice(-30_000),
+          status: `혼합 분류 · ${node.label}`,
+        }]));
       }
       const agendaContext = agendaResults.map((item) => `[Agenda · ${item.label} · ${item.model}]\n${item.text}`).join('\n\n');
       const groupDefinitions = new Map((scenario?.graph?.groups ?? []).map((group) => [group.id, group]));
@@ -1020,60 +1080,63 @@ export class AgentLoop {
         members.push(node);
         groups.set(group, members);
       }
-      const transcript: Array<{ group: string; round: number; label: string; model: string; text: string }> = [];
       const groupFinals = new Map<string, Array<{ label: string; model: string; text: string }>>();
-      for (const [groupId, members] of groups) {
+      const groupResults = await Promise.all([...groups].map(async ([groupId, members]) => {
         const definition = groupDefinitions.get(groupId);
         const group = definition?.name ?? groupId;
         const discussionMode = definition?.discussionMode ?? 'collaborative';
-        let previousRound: Array<{ label: string; model: string; text: string }> = [];
+        let previousRound: Array<Proposal & { nodeId: string }> = [];
         for (let round = 1; round <= meetingRounds; round++) {
           const firstRound = round === 1;
           // Hide provider identities during critique to reduce prestige and
           // same-family bias. Group members run concurrently; only the final
           // compact handoff is sent to the judge.
           const sharedOpinions = previousRound.map((item, index) => `[Candidate ${index + 1}]\n${item.text}`).join('\n\n');
-          const currentRound = await settleParallel(members.map((node) => stageCall(
-              node,
-              firstRound
+          const currentRound = await collect(members.map(node => ({
+              node, system: firstRound
                 ? `You are an independent member of AI decision group "${group}" named "${node.label}" with role ${node.role ?? 'general'}. The configured meeting style is "${discussionMode}". Other members may use different roles or models. Analyze independently, propose the best answer or execution plan, identify one major risk, and finish with a confidence score from 0 to 100. Do not claim tools were executed.`
                 : `You are member "${node.label}" in round ${round} of AI decision group "${group}" using the "${discussionMode}" meeting style. Read every group member's previous-round opinion. ${discussionMode === 'competitive' ? 'Compete on verifiable evidence and explicitly eliminate failed approaches.' : discussionMode === 'review' ? 'Actively search for errors, unsupported assumptions and missing validation.' : 'Combine complementary strengths while challenging weak assumptions.'} Revise your proposal, then cast one ballot. Finish with exactly "VOTE: <member label>" on its own line. You may vote for yourself only with a concrete reason. Do not claim tools were executed.`,
-              [retainedContext, agendaContext, `Meeting agenda — original user request:\n${userMessage}`, !firstRound && `All previous-round opinions in group "${group}":\n${sharedOpinions}`].filter(Boolean).join('\n\n').slice(-45_000),
-              `${executionMode === 'hybrid' ? '혼합 회의' : '회의'} ${round}/${meetingRounds} · ${group} · ${node.label}`,
-            )));
-          transcript.push(...currentRound.map((item) => ({ group, round, ...item })));
-          previousRound = currentRound;
+              content: [retainedContext, agendaContext, `Meeting agenda — original user request:\n${userMessage}`, !firstRound && `Available previous-round opinions in group "${group}" (some members may be missing):\n${sharedOpinions}`].filter(Boolean).join('\n\n').slice(-45_000),
+              status: `${executionMode === 'hybrid' ? '혼합 회의' : '회의'} ${round}/${meetingRounds} · ${group} · ${node.label}`,
+            })));
+          // Keep the latest valid evidence if a later round has no usable result.
+          if (currentRound.length) previousRound = [...new Map([...previousRound, ...currentRound].map(item => [item.nodeId, item])).values()];
+          if (currentRound.length < members.length) break;
         }
-        groupFinals.set(groupId, previousRound);
-      }
+        return [groupId, previousRound] as const;
+      }));
+      for (const [groupId, results] of groupResults) groupFinals.set(groupId, results);
       const crossGroupRounds = groups.size > 1 ? Math.max(0, Math.min(3, scenario?.crossGroupRounds ?? 1)) : 0;
       let groupExchange = [...groupFinals].map(([groupId, results]) => {
         const name = groupDefinitions.get(groupId)?.name ?? groupId;
         return `[Group ${name} final positions]\n${results.map((item, index) => `[Member ${index + 1}]\n${item.text}`).join('\n\n')}`;
       }).join('\n\n');
       for (let round = 1; round <= crossGroupRounds; round++) {
-        const representatives = await settleParallel([...groups].map(([groupId, members]) => {
+        const representatives = await collect([...groups].map(([groupId, members]) => {
           const name = groupDefinitions.get(groupId)?.name ?? groupId;
-          return stageCall(
-            members[0],
-            `You represent AI group "${name}" in cross-group council round ${round}. Read every group's final positions, disclose conflicts, adopt stronger external evidence, defend only what remains valid, and publish a revised group verdict. Finish with "GROUP VERDICT: <one concise decision>". Do not claim tools were executed.`,
-            [retainedContext, agendaContext, `Original user request:\n${userMessage}`, groupExchange].filter(Boolean).join('\n\n').slice(-48_000),
-            `그룹 간 회의 ${round}/${crossGroupRounds} · ${name}`,
-          );
+          return {
+            node: members[0], system: `You represent AI group "${name}" in cross-group council round ${round}. Read every group's available final positions, disclose conflicts, adopt stronger external evidence, defend only what remains valid, and publish a revised group verdict. Finish with "GROUP VERDICT: <one concise decision>". Do not claim tools were executed.`,
+            content: [retainedContext, agendaContext, `Original user request:\n${userMessage}`, groupExchange].filter(Boolean).join('\n\n').slice(-48_000),
+            status: `그룹 간 회의 ${round}/${crossGroupRounds} · ${name}`,
+          };
         }));
-        transcript.push(...representatives.map((item, index) => ({ group: `그룹 대표 ${index + 1}`, round: meetingRounds + round, ...item })));
-        groupExchange = representatives.map((item, index) => `[Cross-group round ${round} · Representative ${index + 1} · ${item.label}]\n${item.text}`).join('\n\n');
+        // A missing representative must not erase the evidence of its group.
+        if (representatives.length === groups.size) groupExchange = representatives.map((item, index) => `[Cross-group round ${round} · Representative ${index + 1} · ${item.label}]\n${item.text}`).join('\n\n');
+        else break;
       }
       provider = providerForNode(finalNode) ?? provider;
       routeRole = finalNode.role ?? routeRole;
-      routeReason = `${executionMode === 'hybrid' ? '분류·회의·검증 혼합' : '상호 토론·투표'} · ${groups.size}그룹 · 참가자 ${candidates.length}명 · 내부 ${meetingRounds}라운드${crossGroupRounds ? ` · 그룹 간 ${crossGroupRounds}라운드` : ''}`;
+      routeReason = `${executionMode === 'hybrid' ? '분류·회의·검증 혼합' : '상호 토론·투표'} · ${groups.size}그룹 · 참가자 ${candidates.length}명 · 내부 ${meetingRounds}라운드${crossGroupRounds ? ` · 그룹 간 ${crossGroupRounds}라운드` : ''}${incomplete ? ` · 미완료 단계 ${incomplete}개, 확보한 풀이로 검증` : ''}`;
       retainedContext = [
         retainedContext,
         agendaContext,
         groupExchange && `Latest cross-group exchange:\n${groupExchange}`,
-        'Full AI meeting transcript. As the final validation judge, tally the final-round VOTE lines but do not follow the majority blindly. Verify reasoning, reject factual errors and groupthink, prefer a stronger minority argument when justified, state the verdict, synthesize the strongest plan, and then complete the original user request:',
-        ...transcript.map((item) => `[Group ${item.group} · Round ${item.round} · ${item.label} · ${item.model}]\n${item.text}`),
+        `You are the final validation judge. The above contains only the latest available proposals, not proven facts. ${incomplete} stages failed, timed out, or were skipped. Never infer consensus from absent members. Independently check the reasoning and use permitted tools when helpful; do not blindly follow majority votes. If no valid proposal is available, solve the original request yourself and do not claim peer verification. Complete the original user request; disclose any important unverified limitation.`,
       ].filter(Boolean).join('\n\n').slice(-50_000);
+      cb.onStatus?.(`최종 검증 시작${incomplete ? ' · 일부 노드 미완료' : ''} · ${finalNode.label}`);
+      // The main judge owns all side effects. Council workers remain tool-less;
+      // the judge can use the same native sandbox/calculation tools as single mode.
+      if (canRunNative(provider)) return await runNativeMain(provider);
     }
     let advisor: { providerLabel: string; model: string } | undefined;
     if (!provider.supportsTools && tools.length > 0 && !(options.isolation && provider.chatIsolated)) {

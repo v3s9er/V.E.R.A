@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -46,7 +46,7 @@
     "test:runtime-ui": "node packages/web/test/runtime-ui.mjs",
     "test:session-events": "tsx packages/agent/test/cli-session-events.test.ts",
     "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts",
-    "test:coordination": "node --import tsx --test packages/agent/test/subagents.test.ts packages/agent/test/coordination-loop.test.ts packages/agent/test/mcp-efficiency.test.ts packages/agent/test/context-packing.test.ts packages/agent/test/conversation-transcripts.test.ts",
+    "test:coordination": "node --import tsx --test packages/agent/test/subagents.test.ts packages/agent/test/coordination-loop.test.ts packages/agent/test/council.test.ts packages/agent/test/mcp-efficiency.test.ts packages/agent/test/context-packing.test.ts packages/agent/test/conversation-transcripts.test.ts",
     "test:tuning": "node --import tsx --test packages/agent/test/model-tuning.test.ts packages/agent/test/model-tuning-loop.test.ts packages/agent/test/tuning-datasets.test.ts packages/agent/test/tuning-rpc-security.test.ts packages/agent/test/chat-telemetry-regression.test.ts packages/web/test/model-tuning-form.test.ts",
     "test:performance": "node --import tsx --test packages/agent/test/performance-evaluation.test.ts packages/agent/test/performance-telemetry.test.ts && tsc -p scripts/performance-tsconfig.json",
     "test:local-training": "node scripts/test-local-training.mjs",

@@ -51,7 +51,7 @@ export class RunProgress {
     }
   }
   agent(snapshot: CoordinationAgent): void {
-    if (TERMINAL.has(this.phase) || (!this.agents.has(snapshot.agentId) && this.agents.size >= 6)) return;
+    if (TERMINAL.has(this.phase) || (!this.agents.has(snapshot.agentId) && this.agents.size >= 8)) return;
     // Explicit projection: results, assignments and tool inputs never reach
     // progress even if a caller passes an internal worker snapshot.
     this.agents.set(snapshot.agentId, {
