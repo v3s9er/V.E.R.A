@@ -260,7 +260,7 @@ test('source council workers receive actual pixels through isolated calls, never
     writeFileSync(join(root, 'original.png'), PNG.sync.write(new PNG({ width: 2, height: 2 })));
     let observations = 0, judges = 0;
     const isolated: AiProvider['chatIsolated'] = async req => {
-      assert.deepEqual(req.tools?.map(t => t.name).sort(), ['evidence_image', 'evidence_python_syntax', 'evidence_text']);
+      assert.deepEqual(req.tools?.map(t => t.name).sort(), ['evidence_image', 'evidence_python_syntax', 'evidence_python_values', 'evidence_text']);
       if (!req.evidenceImages?.length) return { ...answer(''), toolCalls: [{ id: 'read', name: 'evidence_image', args: '{"path":"original.png"}' }] };
       observations++;
       assert.match(req.evidenceImages[0].dataUrl, /^data:image\/png;base64,/);

@@ -84,3 +84,32 @@ Live results and remaining limitations are recorded in
   permissions, account credentials, or global routing defaults were changed.
 
 See [ontology.md](ontology.md) for the exact supported rules and limitations.
+
+## Exact-value evidence refinement
+
+- Added integer-scale nearest-neighbour PNG crops (1–4x, bounded to 8MP).
+  The original hash and coordinates remain attached. Enlargement repeats actual
+  pixels; it does not invent detail or claim to repair OCR.
+- Whole-image reads can remove large, exactly uniform outer margins to avoid
+  shrinking text inside a mostly blank canvas. Every different pixel plus padding
+  is preserved, original coordinates remain explicit, and `trim:false` returns
+  the full canvas. Explicit crops and nonuniform corners are never auto-trimmed.
+- Added `evidence_python_values`, a fixed, bounded AST value interpreter for
+  ordered string/integer assignments, slices and character arithmetic. It cannot
+  import modules, open files, use the network, call arbitrary functions, loop,
+  or execute submitted source via eval/exec/compile. Values, AST size, steps,
+  output bytes and the helper lifetime are capped independently.
+- Image-code instructions now distinguish row order, transcription uncertainty,
+  complete output dependencies, and actual value checks. Row-to-trace checks
+  guard against dropping later updates merely because an earlier value in that
+  visual column was overwritten. Separate snippets must not be merged.
+  The checker verifies the supplied transcription,
+  **not** its fidelity to the source image. Original source restrictions and
+  user-selected authority are unchanged; ordinary tasks get no extra guidance.
+- Value checks have a distinct progress label and bounded, fixed failure codes.
+  They no longer appear as computer-screen observation.
+- Documented the Code Mode image-result representation after observing repeated
+  reads caused by treating a string result as an MCP `content[]` object.
+
+Repeated installed-app comparison and limitations are recorded in
+[EVIDENCE_VALUES_2026-10-02.md](EVIDENCE_VALUES_2026-10-02.md).

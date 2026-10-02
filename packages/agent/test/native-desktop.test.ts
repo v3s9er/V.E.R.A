@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { pooledNativeCodex, closeNativeWorkers } from '../src/ai/cli-native-pool.js';
 import { waitForCliRetirements } from '../src/ai/cli-process-retirement.js';
 import { DESKTOP_TOOLS } from '../src/computer/desktop-session.js';
+import { EVIDENCE_TOOLS } from '../src/ai/evidence.js';
 import type { NativeAgentRequest, NativeToolResult } from '../src/ai/provider.js';
 
 const output: NativeToolResult = { success: true, contentItems: [{ type: 'inputText', text: 'test only' }, { type: 'inputImage', imageUrl: 'data:image/png;base64,aGVsbG8=' }] };
@@ -54,4 +55,20 @@ test('cancellation aborts an active host capability and releases it', async () =
 });
 for (const permission of ['read-only', 'workspace', 'ask'] as const) test(`no desktop capability at ${permission}`, async () => {
   let count = 0; await assert.rejects(run('NORMAL', async () => { count++; return output; }, permission)); assert.equal(count, 0);
+});
+
+test('native pure-value evidence uses its scoped authorization and distinct progress label', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mrrobot-native-values-'));
+  const statuses: string[] = []; let calls = 0;
+  try {
+    await pooledNativeCodex({ command: process.execPath, prefixArgs: [fileURLToPath(new URL('./fixtures/native-desktop-app-server.mjs', import.meta.url))],
+      env: process.env, providerId: 'fixture', model: 'fixture', req: {
+        prompt: 'EVIDENCE_VALUES', cwd: directory, permissionMode: 'workspace', onStatus: status => statuses.push(status),
+        session: {key:'evidence-fixture',directory,input:'EVIDENCE_VALUES',history:[],context:'',instructions:'fixture only'},
+        hostTools: {tools:EVIDENCE_TOOLS.filter(t=>t.name==='evidence_python_values'), authorize:(name,mode)=>name==='evidence_python_values'&&mode==='workspace',
+          async execute(name) { assert.equal(name,'evidence_python_values'); calls++; return {success:true,contentItems:[{type:'inputText',text:'{"verified":true}'}]}; }, dispose() {}},
+      }});
+    assert.equal(calls,1); assert.ok(statuses.includes('값·연산 검산 중'));
+    assert.ok(!statuses.includes('PC 화면 확인 중'));
+  } finally { closeNativeWorkers(); await waitForCliRetirements(process.env); rmSync(directory,{recursive:true,force:true}); }
 });

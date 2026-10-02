@@ -8,8 +8,34 @@ import { createEvidenceTools, evidencePython, parsePythonOnly, needsSourceEviden
 import { evidenceImageInputs } from '../src/ai/cli-isolated.js';
 import { NativeToolEvents } from '../src/ai/native-tool-events.js';
 import type { NativeToolEvent } from '../src/ai/provider.js';
+import { evidenceContentBounds } from '../src/ai/evidence-pixels.js';
 
 const signal = () => new AbortController().signal;
+
+test('uniform-margin trimming preserves every differing pixel and can be disabled', async () => {
+  const root=mkdtempSync(join(tmpdir(),'mrrobot-margin-'));
+  try {
+    const png=new PNG({width:200,height:100});png.data.fill(255);
+    assert.deepEqual(evidenceContentBounds(png),{x:0,y:0,width:200,height:100});
+    for(let y=40;y<60;y++) for(let x=60;x<140;x++) png.data.fill(0,(y*200+x)*4,(y*200+x)*4+3);
+    const box={x:48,y:28,width:104,height:44};
+    assert.deepEqual(evidenceContentBounds(png),box);
+    writeFileSync(join(root,'p.png'),PNG.sync.write(png));
+    const tools=createEvidenceTools(root);
+    const read=await tools.execute('evidence_image',{path:'p.png'},signal());
+    const meta=JSON.parse((read.contentItems[0] as any).text);
+    assert.deepEqual(meta.crop,box);assert.equal(meta.uniformMarginsRemoved,true);
+    const decoded=PNG.sync.read(Buffer.from((read.contentItems[1] as any).imageUrl.split(',')[1],'base64'));
+    for(let y=0;y<box.height;y++) assert.deepEqual(decoded.data.subarray(y*box.width*4,(y+1)*box.width*4),png.data.subarray(((y+box.y)*200+box.x)*4,((y+box.y)*200+box.x+box.width)*4));
+    const full=await tools.execute('evidence_image',{path:'p.png',trim:false},signal());
+    assert.equal(JSON.parse((full.contentItems[0] as any).text).uniformMarginsRemoved,false);
+    const explicit=await tools.execute('evidence_image',{path:'p.png',crop:{x:0,y:0,width:200,height:100}},signal());
+    assert.equal(JSON.parse((explicit.contentItems[0] as any).text).displayWidth,200);
+    png.data[0]=0;
+    assert.deepEqual(evidenceContentBounds(png),{x:0,y:0,width:200,height:100});
+    await assert.rejects(tools.execute('evidence_image',{path:'p.png',trim:'yes'},signal()),/trim/);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
 test('native lifecycle counts once, handles missing start, rejects raw reasoning and never exposes payloads', () => {
   let now = 10;
   const events: NativeToolEvent[] = [];
@@ -57,6 +83,15 @@ test('workspace evidence is identity-bound, pixel-exact, bounded and read-only',
     assert.match(meta.sha256, /^[a-f0-9]{64}$/);
     const decoded = PNG.sync.read(Buffer.from((result.contentItems[1] as any).imageUrl.split(',')[1], 'base64'));
     for (let y = 0; y < 2; y++) assert.deepEqual(decoded.data.subarray(y * 12, (y + 1) * 12), png.data.subarray(((y + 1) * 8 + 2) * 4, ((y + 1) * 8 + 5) * 4));
+    const zoom = await tool.execute('evidence_image', { path:'a.png', crop:{x:2,y:1,width:3,height:2}, scale:3 }, signal());
+    const pixels = PNG.sync.read(Buffer.from((zoom.contentItems[1] as any).imageUrl.split(',')[1], 'base64'));
+    assert.equal(pixels.width, 9); assert.equal(pixels.height, 6);
+    for (let y=0; y<6; y++) for (let x=0; x<9; x++) {
+      const src=(Math.floor(y/3)*3+Math.floor(x/3))*4, dst=(y*9+x)*4;
+      assert.deepEqual(pixels.data.subarray(dst,dst+4), decoded.data.subarray(src,src+4));
+    }
+    assert.equal(JSON.parse((zoom.contentItems[0] as any).text).sha256,meta.sha256);
+    await assert.rejects(tool.execute('evidence_image', {path:'a.png',scale:99},signal()), /bound/);
     await assert.rejects(tool.execute('evidence_image', { path: 'a.png', expectedSha256: '0'.repeat(64) }, signal()), /hash changed/);
     await assert.rejects(tool.execute('evidence_image', { path: 'a.png', crop: { x: 0, y: 0, width: 9, height: 4 } }, signal()), /Crop/);
     await assert.rejects(tool.execute('evidence_image', { path: '../outside.png' }, signal()), /밖/);
@@ -100,4 +135,46 @@ test('visual transport rejects URLs, overflow, and preserves source labels', () 
   assert.throws(() => evidenceImageInputs({ ...req, evidenceImages: Array(5).fill(req.evidenceImages[0]) }));
   assert.equal(needsSourceEvidence('read tablet.png'), true);
   assert.equal(needsSourceEvidence('hello'), false);
+});
+
+test('pure-value checker retains assignment order, slices and exact character arithmetic', async t => {
+  if (!evidencePython()) { t.skip('CPython not installed'); return; }
+  const root = mkdtempSync(join(tmpdir(), 'mrrobot-values-'));
+  try {
+    const tools = createEvidenceTools(root);
+    const result = await tools.execute('evidence_python_values', { source: 'x="discard"; x="C"\nx+=chr(79); x+="DE"\ny=x[::-1]\nn=(17^3)+len(x)\nx[1:3]' }, signal());
+    const data = JSON.parse((result.contentItems[0] as any).text);
+    assert.equal(data.verified, true); assert.equal(data.originalExecuted, false);
+    assert.deepEqual(data.values, { x:'CODE', y:'EDOC', n:22 });
+    assert.deepEqual(data.trace.map((s:any)=>s.value), ['discard','C','CO','CODE','EDOC',22,'OD']);
+    assert.equal(data.trace[0].line, 1); assert.equal(data.trace[1].line, 1);
+    assert.match(data.sha256, /^[a-f0-9]{64}$/);
+  } finally { rmSync(root, {recursive:true,force:true}); }
+});
+
+test('pure-value checker refuses effects, dynamic execution, shadowed calls and resource bombs', async t => {
+  if (!evidencePython()) { t.skip('CPython not installed'); return; }
+  const root = mkdtempSync(join(tmpdir(), 'mrrobot-values-deny-'));
+  try {
+    const tools = createEvidenceTools(root), marker=join(root, 'must-not-exist');
+    for (const source of [
+      `open(${JSON.stringify(marker)},'w').write('no')`, 'import os', '__import__("os")',
+      'eval("1+1")', 'exec("pass")', 'x=(1).__class__', 'x=[x for x in range(100)]',
+      'while True: pass', 'x=2**999999', 'x="a"*999999999', 'x=1<<999999',
+      'x="abc"[::0]', 'chr="shadow"; x=chr(65)', 'x="a"*4096\ny=x*4096',
+      Array(8).fill('x="a"*4096').join('\n'), Array(129).fill('x=1').join('\n'),
+    ]) {
+      const result = await tools.execute('evidence_python_values', {source}, signal());
+      const data=JSON.parse((result.contentItems[0] as any).text);
+      assert.equal(data.verified, false, source); assert.equal(data.originalExecuted, false);
+      assert.equal(data.values, undefined, 'partial evaluations must not look verified');
+    }
+    assert.equal(existsSync(marker), false);
+    const unsupported = await tools.execute('evidence_python_values', {source:'import os'},signal());
+    assert.equal(JSON.parse((unsupported.contentItems[0] as any).text).reason, 'unsupported_statement');
+    await assert.rejects(tools.execute('evidence_python_values', {path:'a.py'},signal()), /source text only/);
+    await assert.rejects(tools.execute('evidence_python_values', {source:' '.repeat(8193)},signal()), /size bound/);
+    const aborted = new AbortController(); aborted.abort();
+    await assert.rejects(tools.execute('evidence_python_values', {source:'x=1'},aborted.signal));
+  } finally { rmSync(root, {recursive:true,force:true}); }
 });
