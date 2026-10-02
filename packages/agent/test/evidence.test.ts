@@ -4,13 +4,38 @@ import { mkdtempSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PNG } from 'pngjs';
-import { createEvidenceTools, evidencePython, parsePythonOnly, needsSourceEvidence, namedPngSources } from '../src/ai/evidence.js';
+import { runInNewContext } from 'node:vm';
+import { createEvidenceTools, evidencePython, parsePythonOnly, needsSourceEvidence, namedPngSources, EVIDENCE_IMAGE_RENDER_EXAMPLE, EVIDENCE_TOOLS } from '../src/ai/evidence.js';
 import { evidenceImageInputs } from '../src/ai/cli-isolated.js';
 import { NativeToolEvents } from '../src/ai/native-tool-events.js';
 import type { NativeToolEvent } from '../src/ai/provider.js';
 import { evidenceContentBounds, evidenceReviewSheet } from '../src/ai/evidence-pixels.js';
 
 const signal = () => new AbortController().signal;
+
+test('Code Mode example renders every original/review image without swallowing metadata or printing base64', async () => {
+  const source=new PNG({width:20,height:10});for(let i=0;i<source.data.length;i++)source.data[i]=i%251;
+  const review=evidenceReviewSheet(source,[{x:3,y:2,width:5,height:4}])!;
+  const urls=[PNG.sync.write(source),review.bytes].map(bytes=>`data:image/png;base64,${bytes.toString('base64')}`);
+  const metadata=[JSON.stringify({source:'a.png',imageCount:2}),JSON.stringify({kind:'ocr-disagreement-original-pixels',regions:review.regions})];
+  const contentItems=urls.flatMap((imageUrl,i)=>[{type:'inputText',text:metadata[i]},{type:'inputImage',imageUrl}]);
+  for(const result of [metadata[0]+'\n'+urls[0]+'\n'+metadata[1]+'\n'+urls[1],{success:true,contentItems}]) {
+    const emitted:string[]=[],textItems:string[]=[];
+    await runInNewContext(`(async()=>{${EVIDENCE_IMAGE_RENDER_EXAMPLE}})()`,{
+      tools:{evidence_image:async()=>result},image:(url:string)=>emitted.push(url),text:(s:string)=>textItems.push(s.trim()),
+    },{timeout:1000});
+    assert.deepEqual(emitted,urls);
+    assert.deepEqual(textItems,metadata);
+    assert.ok(!textItems.some(text=>text.includes('base64')));
+    for(const [i,url] of emitted.entries())assert.deepEqual(PNG.sync.read(Buffer.from(url.split(',')[1],'base64')).data,i===0?source.data:PNG.sync.read(review.bytes).data);
+  }
+  const errors:string[]=[];
+  await runInNewContext(`(async()=>{${EVIDENCE_IMAGE_RENDER_EXAMPLE}})()`,{
+    tools:{evidence_image:async()=>'{"error":"Source changed"}'},image:()=>assert.fail('error is not an image'),text:(s:string)=>errors.push(s),
+  },{timeout:1000});
+  assert.equal(errors.length,1);
+  assert.ok(EVIDENCE_TOOLS.find(t=>t.name==='evidence_image')!.description.includes(EVIDENCE_IMAGE_RENDER_EXAMPLE));
+});
 
 test('uncertain-word review sheet preserves original RGBA pixels and maps every enlarged region',()=>{
   const source=new PNG({width:20,height:10});for(let i=0;i<source.data.length;i++)source.data[i]=i%251;

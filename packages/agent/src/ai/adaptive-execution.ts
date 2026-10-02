@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from '@mr-robot/shared';
+import type { Turn } from './provider.js';
 
 export type ExecutionDepth = 'direct' | 'standard' | 'deep';
 /** Cheap initial hint, corrected by observed failures. Never selects a model or grants authority. */
@@ -6,11 +7,12 @@ export class AdaptiveExecution {
   readonly initial: ExecutionDepth;
   private failures = 0;
   private successes = 0;
-  constructor(text: string) {
+  constructor(text: string, history: readonly Turn[] = []) {
     this.initial = /취약점|침투|보안.*분석|아키텍처|근본.*원인|증명|vulnerability|root cause|threat model|architecture|mathematical proof/i.test(text) ? 'deep'
       : /^(?:안녕(?:하세요)?|(?:ㅎㅇ){1,3}|하이|고마워(?:요)?|감사합니다|hello|hi|thanks)[.!?~\s]*$/i.test(text.trim())
         || /^(?:너|지금|현재).{0,12}(?:무슨|어떤|뭔)\s*모델.{0,6}[?？]?$/u.test(text.trim())
-        || /^(?=.*\d)(?=.*[+*/-])[\d+*/().\s-]{1,80}[=?]?$/.test(text.trim()) ? 'direct' : 'standard';
+        || /^(?=.*\d)(?=.*[+*/-])[\d+*/().\s-]{1,80}[=?]?$/.test(text.trim())
+        || simpleAnswerEcho(text, history) ? 'direct' : 'standard';
   }
   get depth(): ExecutionDepth { return this.failures >= 2 ? 'deep' : this.initial; }
   observe(success: boolean, kind: 'task' | 'environment' = 'task') {
@@ -34,4 +36,15 @@ export class AdaptiveExecution {
       : 'Use a short plan only if useful. Batch independent reads, execute dependent changes in order and verify actual artifacts.';
     return `Execution depth hint: ${this.depth}. ${instruction} Reassess based on actual evidence. Never broaden access with difficulty, silently replace the selected model, repeat an uncertain write, or report completion without evidence. Authentication/environment failures require concrete repairs, not more reasoning.`;
   }
+}
+
+/** Repeat a bounded, directly preceding trivial answer, not its side effects.
+ * Generic "again", work continuations and older context remain substantive.
+ */
+function simpleAnswerEcho(text: string, history: readonly Turn[]): boolean {
+  if (!/^(?:(?:방금|직전|바로 전)\s*(?:계산한\s*)?(?:식과\s*)?(?:답|답변|응답)(?:을|를)?\s*(?:다시|한\s*번\s*더)\s*(?:말해\s*줘|보여\s*줘|알려\s*줘)|repeat\s+(?:the\s+)?(?:last|previous)\s+answer)[.!?~\s]*$/i.test(text.trim())) return false;
+  const answer=history.at(-1),request=history.at(-2);
+  return answer?.role === 'assistant' && request?.role === 'user'
+    && answer.content.length > 0 && answer.content.length <= 2000 && !answer.toolCalls?.length
+    && new AdaptiveExecution(request.content).initial === 'direct';
 }

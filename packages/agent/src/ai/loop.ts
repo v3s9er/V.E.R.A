@@ -345,7 +345,7 @@ export class AgentLoop {
       return settled.map((item) => (item as PromiseFulfilledResult<T>).value);
     };
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
-    const adaptive = new AdaptiveExecution(userMessage);
+    const adaptive = new AdaptiveExecution(userMessage, history);
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
@@ -864,7 +864,7 @@ export class AgentLoop {
       const runNative = async (prompt: string, input: string) => {
         const actualProvider = providerForCall(nativeProvider, routeRole, false, true);
         if (!actualProvider?.runAgent) return undefined;
-        const nativePolicy = input === userMessage ? adaptive : new AdaptiveExecution(input);
+        const nativePolicy = input === userMessage ? adaptive : new AdaptiveExecution(input, sessionHistory);
         const requestedEffort = options.reasoningEffort && options.reasoningEffort !== 'auto' ? options.reasoningEffort : tuningFor(actualProvider).reasoningEffort ?? 'auto';
         const actualEffort = scenario ? effortFor(actualProvider) : nativePolicy.effort(requestedEffort, actualProvider.supportedReasoning);
         if (nativePolicy.depth === 'direct' && actualEffort === 'low' && options.reasoningEffort && options.reasoningEffort !== 'auto' && options.reasoningEffort !== 'low') {

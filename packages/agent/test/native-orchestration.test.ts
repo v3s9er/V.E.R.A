@@ -181,6 +181,23 @@ test('simple text preserves queued task steering and re-enters native work with 
   assert.equal(result.usage.promptTokens,2);
 });
 
+test('trivial answer echo keeps text-session history and real work restores native high effort', async () => {
+  let textCalls=0,nativeCalls=0;
+  const provider={id:'fixture',label:'Fixture',type:'codex-cli',model:'same-model',supportedReasoning:['auto','low','high'],supportsTools:false,
+    chat:async(req:any)=>{textCalls++;assert.equal(req.reasoningEffort,'low');assert.deepEqual(req.tools,[]);
+      if(textCalls===2)assert.deepEqual(req.turns.map((t:any)=>t.content),['2 + 2 =','2 + 2 = 4','방금 계산한 식과 답을 다시 말해줘.']);
+      return {text:'2 + 2 = 4',toolCalls:[],usage:{promptTokens:1,completionTokens:1}};},
+    runAgent:async(req:NativeAgentRequest)=>{nativeCalls++;assert.equal(req.reasoningEffort,'high');assert.equal(req.permissionMode,'read-only');assert.match(req.prompt,/2 \+ 2 = 4/);return {text:'Task done',toolCalls:[],usage:{promptTokens:1,completionTokens:1}};},
+  };
+  const loop=new AgentLoop({default:()=>provider} as any,{} as any);
+  const options={workspacePath:tmpdir(),permissionMode:'read-only' as const,reasoningEffort:'high' as const};
+  const first=await loop.run([],'2 + 2 =',{},[],options);
+  const echo=await loop.run(first.turns,'방금 계산한 식과 답을 다시 말해줘.',{},[],options);
+  assert.equal(textCalls,2);assert.equal(nativeCalls,0);assert.equal(echo.route?.effort,'low');assert.equal(echo.route?.model,'same-model');
+  await loop.run(echo.turns,'프로젝트 분석',{},[],options);
+  assert.equal(nativeCalls,1);assert.equal(textCalls,2);
+});
+
 test('cancelled simple text cannot continue queued native work', async () => {
   const abort=new AbortController();let nativeCalls=0;
   const provider={id:'fixture',label:'Fixture',type:'codex-cli',model:'same-model',supportedReasoning:['auto','low','high'],supportsTools:false,

@@ -6,9 +6,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
+import { ConfigStore } from '../../packages/agent/dist/config.js';
 
 const privateTestDir = mkdtempSync(join(tmpdir(), 'mrrobot-ui-recovery-'));
 const root = resolve(import.meta.dirname, '../..');
+// A fresh data directory still defaults to 8787; never compete with the user's
+// installed agent. Let the OS assign an isolated loopback port for this test.
+const config = new ConfigStore(join(privateTestDir, 'agent'));
+config.updateSettings({network:{...config.settings.network,host:'127.0.0.1',port:0,externalAccess:false}});
 const app = await _electron.launch({
   executablePath: createRequire(import.meta.url)('electron'),
   args: [join(root, 'packages/desktop/.stage'), `--user-data-dir=${join(privateTestDir, 'desktop')}`],

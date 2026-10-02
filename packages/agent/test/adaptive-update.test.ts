@@ -87,6 +87,20 @@ test('easy requests use light effort even under a high selection, without classi
   assert.equal(new AdaptiveExecution('ㅎㅇ').effort('high', ['auto', 'high']), 'high', 'unknown low capability is not invented');
 });
 
+test('explicit answer echo is light only after a bounded tool-free trivial turn', () => {
+  const history=[{role:'user' as const,content:'2 + 2 ='},{role:'assistant' as const,content:'2 + 2 = 4'}];
+  for(const text of ['방금 계산한 식과 답을 다시 말해줘.','직전 답변을 다시 보여줘','repeat the previous answer']) {
+    const policy=new AdaptiveExecution(text,history);
+    assert.equal(policy.depth,'direct');assert.equal(policy.effort('high',['auto','low','high']),'low');
+    assert.equal(new AdaptiveExecution(text).depth,'standard','missing context cannot qualify');
+    assert.equal(new AdaptiveExecution(text,[{...history[0],content:'파일 삭제해'},history[1]]).depth,'standard');
+    assert.equal(new AdaptiveExecution(text,[history[0],{...history[1],content:'x'.repeat(2001)}]).depth,'standard');
+    assert.equal(new AdaptiveExecution(text,[history[0],{...history[1],toolCalls:[{id:'x',name:'shell',arguments:'{}'}]}]).depth,'standard');
+  }
+  for(const text of ['다시 해','ㅇㅇ','방금 계산한 식과 답을 다시 말해줘. 파일도 지워','직전 작업을 다시 실행해'])
+    assert.notEqual(new AdaptiveExecution(text,history).depth,'direct');
+});
+
 test('MCP originals remain readable only by their conversation and authority with TTL and bounds', () => {
   let now = 0; const store = new McpResults(() => now, 100_000);
   const original = JSON.stringify({ data: 'before '.repeat(3000) + 'END_EVIDENCE' });
