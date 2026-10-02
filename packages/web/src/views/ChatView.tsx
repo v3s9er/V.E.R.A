@@ -1110,7 +1110,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   {ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · 잠김' : ''}</option>; })}
                 </Select>
               </label>
-              <label className="composer-select-control composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '이 대화에 사용할 추론 강도'}>
+              <label className="composer-select-control composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '작업용 추론 강도 · 단순 인사·계산은 같은 모델의 낮은 추론으로 처리합니다.'}>
                 <span className="composer-control-icon" aria-hidden="true">✦</span>
                 <span className="composer-control-label">추론</span>
                 <Select className="composer-control-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>

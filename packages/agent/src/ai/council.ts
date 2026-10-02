@@ -22,6 +22,8 @@ export interface CouncilLimits {
   nodeMs: number;
   /** Brief opportunity for more evidence once enough proposals have arrived. */
   graceMs: number;
+  /** Bound independent calls; queued jobs do not consume a node deadline. */
+  maxConcurrent?: number;
 }
 
 export function councilLimits(mode: RoutingMode): CouncilLimits {
@@ -60,6 +62,25 @@ export function untilAborted<T>(operation: Promise<T>, signal: AbortSignal): Pro
 /** Analysis only: never grants tools, authority, retries, or a different model. */
 export class Council {
   private readonly deadline: number;
+  private readonly fatalStop = new AbortController();
+  private occupied = 0;
+  private readonly waiting = new Set<() => void>();
+  private acquire(signal: AbortSignal): Promise<() => void> {
+    return new Promise((resolve, reject) => {
+      const abort = () => { this.waiting.delete(tryAcquire); signal.removeEventListener('abort', abort); reject(signal.reason); };
+      const tryAcquire = () => {
+        if (signal.aborted) { abort(); return; }
+        if (this.occupied >= (this.options.limits.maxConcurrent ?? 4)) { this.waiting.add(tryAcquire); return; }
+        this.waiting.delete(tryAcquire); signal.removeEventListener('abort', abort); this.occupied++;
+        let released = false;
+        resolve(() => {
+          if (released) return; released = true; this.occupied--;
+          for (const wake of [...this.waiting]) wake();
+        });
+      };
+      signal.addEventListener('abort', abort, { once: true }); tryAcquire();
+    });
+  }
   private emit(event: CouncilEvent): void {
     // A disconnected progress consumer cannot change the execution outcome.
     try { this.options.onEvent?.(event); } catch { /* best-effort progress */ }
@@ -70,15 +91,18 @@ export class Council {
     isFatal(error: unknown): boolean;
     onEvent?(event: CouncilEvent): void;
   }) {
-    for (const value of Object.values(options.limits)) {
+    for (const value of [options.limits.deliberationMs, options.limits.nodeMs, options.limits.graceMs]) {
       if (!Number.isFinite(value) || value < 1 || value > 600_000) throw new Error('Invalid council time budget');
     }
+    const concurrency = options.limits.maxConcurrent ?? 4;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error('Invalid council concurrency');
     this.deadline = performance.now() + options.limits.deliberationMs;
   }
 
   async collect<T>(jobs: Array<{ id: string; run(signal: AbortSignal): Promise<T> }>, requiredResults?: number): Promise<CouncilOutcome<T>[]> {
     const { signal: parent, limits } = this.options;
     parent.throwIfAborted();
+    this.fatalStop.signal.throwIfAborted();
     const remaining = this.deadline - performance.now();
     if (remaining <= 0) return jobs.map(job => {
       const event = { id: job.id, state: 'skipped' as const, elapsedMs: 0 };
@@ -89,26 +113,36 @@ export class Council {
     const threshold = requiredResults ?? Math.ceil(jobs.length / 2);
     if (!Number.isInteger(threshold) || threshold < 1 || threshold > jobs.length) throw new Error('Invalid council completion threshold');
     const batch = new AbortController();
-    const batchSignal = AbortSignal.any([parent, batch.signal]);
+    const batchSignal = AbortSignal.any([parent, batch.signal, this.fatalStop.signal]);
     const budgetTimer = setTimeout(() => batch.abort(new CouncilStop('timed_out')), Math.ceil(remaining));
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     let completed = 0;
     // This is an evidence threshold, NOT a correctness/consensus vote.
     let fatal: unknown;
     try {
-      const outcomes = await Promise.all(jobs.map(async job => {
-        const start = performance.now();
+      const outcomes: CouncilOutcome<T>[] = new Array(jobs.length);
+      let cursor = 0;
+      const run = async (job: typeof jobs[number]): Promise<CouncilOutcome<T>> => {
+        let start = performance.now();
         const local = new AbortController();
         const signal = AbortSignal.any([batchSignal, local.signal]);
-        const timer = setTimeout(() => local.abort(new CouncilStop('timed_out')), limits.nodeMs);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let release: (() => void) | undefined;
         const event = (state: CouncilState): CouncilEvent => ({ id: job.id, state, elapsedMs: Math.round(performance.now() - start) });
         try {
+          release = await this.acquire(batchSignal);
           signal.throwIfAborted();
+          start = performance.now();
+          timer = setTimeout(() => local.abort(new CouncilStop('timed_out')), limits.nodeMs);
           this.emit(event('running'));
-          const value = await untilAborted(Promise.resolve().then(() => {
+          const operation = Promise.resolve().then(() => {
             signal.throwIfAborted();
             return job.run(signal);
-          }), signal);
+          });
+          // Physical capacity is released only when the adapter really settles,
+          // across all parallel groups/rounds, not merely when we stop awaiting.
+          void operation.then(release, release); release = undefined;
+          const value = await untilAborted(operation, signal);
           completed++;
           if (completed >= threshold && !graceTimer && !batchSignal.aborted) {
             graceTimer = setTimeout(() => batch.abort(new CouncilStop('superseded')), limits.graceMs);
@@ -117,16 +151,30 @@ export class Council {
           this.emit(event('completed'));
           return outcome;
         } catch (error) {
-          if (this.options.isFatal(error)) { fatal ??= error; batch.abort(error); }
+          if (this.options.isFatal(error)) { fatal ??= error; batch.abort(error); this.fatalStop.abort(error); }
           const state: CouncilState = parent.aborted || fatal ? 'cancelled'
             : signal.aborted && signal.reason instanceof CouncilStop ? signal.reason.state : 'failed';
           const outcome = { ...event(state), ...(state === 'failed' ? { failureCode: councilFailureCode(error) } : {}) };
           // No provider errors, prompts, model output or credentials in telemetry.
           this.emit(outcome);
           return outcome;
-        } finally { clearTimeout(timer); }
+        } finally { clearTimeout(timer); release?.(); }
+      };
+      await Promise.all(Array.from({ length: Math.min(jobs.length, limits.maxConcurrent ?? 4) }, async () => {
+        while (cursor < jobs.length && !batchSignal.aborted) {
+          const index = cursor++;
+          outcomes[index] = await run(jobs[index]);
+          // An adapter may ignore abort. Never reuse its slot while it might
+          // still be running; remaining jobs may use the other bounded slots.
+          if (outcomes[index].state === 'timed_out') break;
+        }
       }));
+      for (let index = 0; index < jobs.length; index++) if (!outcomes[index]) {
+        outcomes[index] = { id: jobs[index].id, state: parent.aborted || fatal ? 'cancelled' : 'skipped', elapsedMs: 0 };
+        this.emit(outcomes[index]);
+      }
       if (fatal) throw fatal;
+      this.fatalStop.signal.throwIfAborted();
       parent.throwIfAborted();
       return outcomes;
     } finally {

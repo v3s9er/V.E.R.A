@@ -61,3 +61,27 @@ test('automatic profile effort keeps adaptive API and native choices', async () 
   });
   assert.equal(nativeRequest?.reasoningEffort, 'high');
 });
+
+test('simple requests lower actual API and native effort without changing model, saved preference or authority', async () => {
+  const profile: ModelTuningProfile = { id: 'deep', name: 'Deep', reasoningEffort: 'high', helperMode: 'off' };
+  let apiRequest: ChatRequest | undefined;
+  const selected = api(async request => { apiRequest = request; return answer(); });
+  const apiResult = await new AgentLoop(registry(selected, profile), {} as any).run([], 'ㅎㅇ', {}, [], { reasoningEffort: 'high', daybreakEnabled: true });
+  assert.equal(apiRequest?.reasoningEffort, 'low'); assert.equal(apiResult.route?.effort, 'low');
+  assert.equal(apiRequest?.daybreakEnabled, true); assert.equal(profile.reasoningEffort, 'high');
+  assert.equal(apiResult.route?.model, selected.model);
+  let nativeRequest: NativeAgentRequest | undefined;
+  const native = { ...selected, type: 'codex-cli' as const, baseUrl: '', supportsTools: false,
+    runAgent: async (request: NativeAgentRequest) => { nativeRequest = request; return answer(); } };
+  const options = { workspacePath: 'C:/fixture-only', permissionMode: 'read-only' as const, reasoningEffort: 'high' as const, daybreakEnabled: true };
+  const loop = new AgentLoop(registry(native, profile), {} as any);
+  const first = await loop.run([], 'ㅎㅇ', {}, [], options);
+  assert.equal(nativeRequest, undefined, 'simple turn does not start the native computer harness');
+  assert.equal(apiRequest?.reasoningEffort, 'low'); assert.equal(first.route?.effort, 'low');
+  assert.deepEqual(apiRequest?.tools, []); assert.equal(apiRequest?.daybreakEnabled, true);
+  const next = await loop.run(first.turns, '이 코드 취약점을 분석해', {}, [], options);
+  assert.equal(nativeRequest?.reasoningEffort, 'high'); assert.equal(next.route?.effort, 'high');
+  assert.equal(nativeRequest?.permissionMode, 'read-only'); assert.equal(nativeRequest?.daybreakEnabled, true);
+  assert.match(nativeRequest?.prompt ?? '', /ㅎㅇ/); assert.equal(options.reasoningEffort, 'high');
+  assert.equal(next.route?.model, first.route?.model);
+});

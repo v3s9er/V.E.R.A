@@ -10,6 +10,26 @@ import { TelemetryStore } from '../src/telemetry.js';
 const fact = (subject: string,predicate: string,object: string,id = `${subject}/${predicate}/${object}`): MemoryItem => ({ id,text:`${subject} ${predicate} ${object}`,tags:[],createdAt:1,updatedAt:1,source:'fixture-only',relationMode:'fact',relation:{subject,predicate,object} });
 const has = (result: ReturnType<typeof retrieveKnowledge>,s: string,p: string,o: string) => result.facts.some(f => f.subject===s && f.predicate===p && f.object===o);
 
+test('literal values and generic query predicates do not pull unrelated subjects into a named-entity query', () => {
+  const rows=[fact('Atlas','status','ready'),...Array.from({length:200},(_,i)=>fact(`unrelated${i}`,'status','ready'))];
+  for (const query of ['Atlas', 'Atlas status']) {
+    const r=retrieveKnowledge(rows,query);
+    assert.equal(r.metrics.asserted,1);assert.equal(r.facts.length,1);
+    assert.doesNotMatch(r.context,/unrelated/);assert.equal(r.facts[0].status,'asserted');
+  }
+});
+
+test('one entity disjointness does not invalidate shared taxonomy for another entity', () => {
+  const rows=[fact('X','is_a','Hot'),fact('Hot','subclass_of','Warm'),fact('X','is_a','Cold'),fact('Warm','disjoint_with','Cold'),fact('Y','is_a','Hot')];
+  for (const input of [rows,[...rows].reverse()]) {
+    const r=retrieveKnowledge(input,'X Y');
+    assert.equal(r.facts.find(f=>f.subject==='X'&&f.object==='Warm')?.status,'unresolved');
+    assert.equal(r.facts.find(f=>f.subject==='Y'&&f.object==='Warm')?.status,'inferred');
+    assert.equal(r.facts.find(f=>f.subject==='Hot'&&f.object==='Warm')?.status,'asserted');
+    assert.match(r.context,/"recordedAt":1,"updatedAt":1/);
+  }
+});
+
 test('typed ontology derives type ancestry with premise IDs, not a second model call', () => {
   const r = retrieveKnowledge([fact('Atlas','is_a','Laptop','a'),fact('Laptop','subclass_of','Computer','b'),fact('Computer','subclass_of','Device','c')],'Atlas');
   assert.ok(has(r,'Atlas','is_a','Device'));

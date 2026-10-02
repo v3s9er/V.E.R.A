@@ -1,6 +1,6 @@
 {
   "name": "@mr-robot/agent",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -19,12 +19,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@mr-robot/shared": "*",
     "express": "^5.2.1",
     "fflate": "0.8.3",
     "pngjs": "7.0.0",
     "tldts": "7.4.11",
+    "tesseract.js": "7.0.0",
     "ws": "^8.18.0",
     "zod": "^4.4.3"
   }

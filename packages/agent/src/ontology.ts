@@ -1,13 +1,15 @@
 import type { MemoryItem, KnowledgeMetrics } from '@mr-robot/shared';
 
 type Triple = NonNullable<MemoryItem['relation']>;
-export interface KnowledgeFact extends Triple { evidence: string[]; rules: string[] }
+export interface KnowledgeFact extends Triple { evidence: string[]; rules: string[]; status: 'asserted' | 'inferred' | 'unresolved' }
 export interface KnowledgeConflict { kind: 'single_value' | 'disjoint_types' | 'cycle'; subject: string; predicate: string; evidence: string[] }
 export interface KnowledgeResult { context: string; facts: KnowledgeFact[]; conflicts: KnowledgeConflict[]; metrics: KnowledgeMetrics }
 const key = (t: Triple) => JSON.stringify([t.subject, t.predicate, t.object]);
 const pair = (t: Triple) => JSON.stringify([t.subject, t.predicate]);
 const functional = new Set(['located_in', 'owner', 'status']);
 const transitive = new Set(['subclass_of', 'part_of', 'depends_on']);
+// Literal values such as status=ready must not become graph join keys.
+const entityEdges = new Set(['is_a', 'subclass_of', 'part_of', 'depends_on', 'requires', 'disjoint_with', 'owner', 'located_in']);
 const MAX_ASSERTIONS = 128, MAX_FACTS = 512, MAX_CONTEXT_BYTES = 7000;
 const terms = (s: string) => [...new Set(s.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter(Boolean).flatMap(token => {
   // Keep the original as well: this is recall assistance, not entity identity rewriting.
@@ -44,16 +46,17 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
   result.metrics.truncated = eligible.length > available.length;
   const score = (item: MemoryItem) => {
     const r = item.relation!;
-    const entity = `${norm(r.subject)} ${norm(r.object)}`;
+    const entity = `${norm(r.subject)} ${entityEdges.has(r.predicate) ? norm(r.object) : ''}`;
     const rest = norm(`${r.predicate} ${item.text} ${item.tags.join(' ')}`);
     return scoreText(entity,rest);
   };
-  const ranked = available.map(item => ({ item, score: score(item) })).filter(x => x.score > 0).sort((a,b) => b.score-a.score || b.item.updatedAt-a.item.updatedAt || a.item.id.localeCompare(b.item.id));
+  const ranked = available.map(item => ({ item, score: score(item), entityScore: scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`)) })).filter(x => x.score > 0).sort((a,b) => b.score-a.score || b.item.updatedAt-a.item.updatedAt || a.item.id.localeCompare(b.item.id));
   if (!ranked.length) return finish();
   const selected = new Map<string, MemoryItem>();
   const entities = new Set<string>();
-  const add = (item: MemoryItem) => { selected.set(item.id,item); entities.add(item.relation!.subject); entities.add(item.relation!.object); };
-  for (const { item } of ranked.slice(0, 24)) add(item);
+  const add = (item: MemoryItem) => { selected.set(item.id,item); entities.add(item.relation!.subject); if (entityEdges.has(item.relation!.predicate)) entities.add(item.relation!.object); };
+  const seeds = ranked.some(x => x.entityScore > 0) ? ranked.filter(x => x.entityScore > 0) : ranked;
+  for (const { item } of seeds.slice(0, 24)) add(item);
   // Connected facts, including contradictory values, not a full memory dump.
   for (let hop = 0; hop < 6; hop++) {
     const frontier = new Set(entities);
@@ -61,7 +64,7 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
     for (const item of available) {
       if (selected.has(item.id)) continue;
       const r = item.relation!;
-      if (!frontier.has(r.subject) && !frontier.has(r.object)) continue;
+      if (!frontier.has(r.subject) && !(entityEdges.has(r.predicate) && frontier.has(r.object))) continue;
       if (selected.size === MAX_ASSERTIONS) { result.metrics.truncated = true; break; }
       add(item); added++;
     }
@@ -73,7 +76,7 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
     const r = item.relation!;
     const previous = facts.get(key(r));
     if (previous) previous.evidence = union(previous.evidence, [item.id]);
-    else facts.set(key(r), { ...r, evidence: [item.id], rules: [] });
+    else facts.set(key(r), { ...r, evidence: [item.id], rules: [], status: 'asserted' });
   }
   result.metrics.asserted = facts.size;
   const blocked = new Set<string>();
@@ -85,7 +88,7 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
     evidence.forEach(id => blocked.add(id));
   }
   const derive = (a: KnowledgeFact, b: KnowledgeFact, predicate: string, rule: string) => {
-    const next: KnowledgeFact = { subject: a.subject, predicate, object: b.object, evidence: union(a.evidence,b.evidence), rules: union(a.rules,b.rules,[rule]) };
+    const next: KnowledgeFact = { subject: a.subject, predicate, object: b.object, evidence: union(a.evidence,b.evidence), rules: union(a.rules,b.rules,[rule]), status: 'inferred' };
     if (facts.has(key(next))) return false;
     if (next.evidence.length > 24) { result.metrics.truncated = true; return false; }
     if (facts.size >= MAX_FACTS) { result.metrics.truncated = true; return false; }
@@ -107,14 +110,20 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
   const all = [...facts.values()];
   for (const f of all) if (f.subject === f.object && transitive.has(f.predicate)) result.conflicts.push({ kind: 'cycle', subject: f.subject, predicate: f.predicate, evidence: f.evidence });
   const types = all.filter(f => f.predicate === 'is_a');
+  const unresolvedTypes = new Set<string>();
   for (const disjoint of all.filter(f => f.predicate === 'disjoint_with')) {
     for (const left of types.filter(f => f.object === disjoint.subject)) {
       const right = types.find(f => f.subject === left.subject && f.object === disjoint.object);
-      if (right) result.conflicts.push({ kind: 'disjoint_types', subject: left.subject, predicate: 'is_a', evidence: union(left.evidence,right.evidence,disjoint.evidence) });
+      if (right) {
+        result.conflicts.push({ kind: 'disjoint_types', subject: left.subject, predicate: 'is_a', evidence: union(left.evidence,right.evidence,disjoint.evidence) });
+        unresolvedTypes.add(key(left)); unresolvedTypes.add(key(right));
+      }
     }
   }
   // Conflicted deductions stay explicitly unresolved; never report a winner.
-  for (const c of result.conflicts) c.evidence.forEach(id => blocked.add(id));
+  // Disjointness is an entity-specific contradiction, not evidence that every
+  // other entity using the same class hierarchy is also contradictory.
+  for (const c of result.conflicts) if (c.kind !== 'disjoint_types') c.evidence.forEach(id => blocked.add(id));
   result.metrics.conflicts = result.conflicts.length;
   if (result.conflicts.length > 64) { result.conflicts = result.conflicts.slice(0,64); result.metrics.truncated = true; }
   result.metrics.inferred = all.filter(f => f.rules.length > 0).length;
@@ -127,10 +136,11 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
   const relevance = new Map(all.map(f => [f,scoreText(norm(`${f.subject} ${f.object}`),norm(f.predicate))]));
   const ordered = all.sort((a,b) => relevance.get(b)!-relevance.get(a)! || b.rules.length-a.rules.length || key(a).localeCompare(key(b)));
   for (const f of ordered) {
-    const status = f.evidence.some(id => blocked.has(id)) ? 'unresolved' : f.rules.length ? 'inferred' : 'asserted';
+    const status = f.evidence.some(id => blocked.has(id)) || unresolvedTypes.has(key(f)) ? 'unresolved' : f.rules.length ? 'inferred' : 'asserted';
+    f.status = status;
     // Deduplicate provenance instead of repeating UUID/source text for every inference.
     // Each fact and its previously undisclosed sources are packed atomically.
-    const sources = f.evidence.filter(id => !published.has(id)).map(id => `SOURCE ${aliases.get(id)} ${JSON.stringify({ id, source: selected.get(id)?.source?.slice(0,160) ?? 'user-memory' })}`);
+    const sources = f.evidence.filter(id => !published.has(id)).map(id => `SOURCE ${aliases.get(id)} ${JSON.stringify({ id, source: selected.get(id)?.source?.slice(0,160) ?? 'user-memory', recordedAt: selected.get(id)?.createdAt, updatedAt: selected.get(id)?.updatedAt })}`);
     const line = JSON.stringify({ ...f, status, evidence: f.evidence.map(id => aliases.get(id)) });
     if (!push([...sources,line].join('\n'))) continue;
     f.evidence.forEach(id => published.add(id));

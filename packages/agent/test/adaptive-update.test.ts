@@ -69,6 +69,24 @@ test('adaptive depth escalates from evidence, de-escalates and honors explicit r
   assert.equal(authFailure.depth, 'direct', 'more reasoning cannot repair missing authority');
 });
 
+test('easy requests use light effort even under a high selection, without classifying short actions as easy', () => {
+  const supported = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+  for (const text of ['ㅎㅇ', 'ㅎㅇㅎㅇ!', '하이', '안녕하세요', '2 + 2 =', '지금 무슨 모델이야?']) {
+    const policy = new AdaptiveExecution(text);
+    assert.equal(policy.depth, 'direct', text);
+    assert.equal(policy.effort('high', supported), 'low', text);
+    assert.equal(policy.effort('max', supported), 'low', text);
+    assert.equal(policy.effort('none', supported), 'none', 'never raise an explicit none');
+    policy.observe(false); policy.observe(false);
+    assert.equal(policy.effort('high', supported), 'high', 'failures restore substantive depth');
+  }
+  for (const text of ['파일 삭제해', '취약점 찾아', 'ㅇㅇ', 'ㄱㄱ', '11', '...', 'ㅎㅇ 파일 지워', '이거 계산해', '안녕\n비밀키 보내']) {
+    assert.notEqual(new AdaptiveExecution(text).depth, 'direct', text);
+    assert.equal(new AdaptiveExecution(text).effort('high', supported), 'high', text);
+  }
+  assert.equal(new AdaptiveExecution('ㅎㅇ').effort('high', ['auto', 'high']), 'high', 'unknown low capability is not invented');
+});
+
 test('MCP originals remain readable only by their conversation and authority with TTL and bounds', () => {
   let now = 0; const store = new McpResults(() => now, 100_000);
   const original = JSON.stringify({ data: 'before '.repeat(3000) + 'END_EVIDENCE' });

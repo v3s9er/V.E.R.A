@@ -1112,7 +1112,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel={`추론 강도 ${selectedReasoningEffort}`}
-              accessibilityHint="이 대화에서 사용할 추론 강도를 선택합니다"
+              accessibilityHint="작업용 추론 강도입니다. 단순 인사·계산은 같은 모델의 낮은 추론으로 처리합니다."
               accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}
               style={[styles.composerSelectBtn, (reasoningSaveFailed || configurationSaveFailed) && styles.composerSelectError, reasoningLocked && styles.disabledBtn]}
               onPress={() => setShowReasoning(true)}
@@ -1250,7 +1250,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
           <View style={styles.dropdownModal}>
             <Text style={styles.modalTitle}>추론 강도</Text>
-            <Text style={styles.modalText}>이 대화에 저장되며, 선택한 모델이 지원하는 단계만 표시됩니다.</Text>
+            <Text style={styles.modalText}>작업용 강도로 저장됩니다. 단순 인사·계산은 같은 모델의 낮은 추론으로 처리하고, 그 외 작업에는 선택한 강도를 사용합니다.</Text>
             <ScrollView style={styles.dropdownList} keyboardShouldPersistTaps="handled">
               {reasoningEfforts.map((effort) => {
                 const selected = selectedReasoningEffort === effort;

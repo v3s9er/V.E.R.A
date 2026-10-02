@@ -5,7 +5,8 @@
  * the web UI in a native window. Closing the window hides it to the tray —
  * the agent keeps running so phones can keep connecting.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, safeStorage, session, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, safeStorage, screen, session, shell, Tray } from 'electron';
+import { fitWindowBounds, initialWindowBounds } from './window-bounds.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { appendFileSync, closeSync, copyFileSync, createWriteStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -688,11 +689,9 @@ async function startAgent() {
 }
 
 function createWindow(url) {
+  const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
   win = new BrowserWindow({
-    width: 1320,
-    height: 860,
-    minWidth: 760,
-    minHeight: 620,
+    ...initialWindowBounds(area),
     title: 'Mr.Robot',
     backgroundColor: '#0b0f1a',
     autoHideMenuBar: true,
@@ -714,6 +713,22 @@ function createWindow(url) {
   // secret, while the exact embedded loopback API remains fully functional.
   const localOrigin = new URL(url).origin;
   const currentWindow = win;
+  const fitDisplay = () => {
+    if (currentWindow.isDestroyed()) return;
+    const bounds = currentWindow.getBounds();
+    const fitted = fitWindowBounds(bounds, screen.getDisplayMatching(bounds).workArea);
+    currentWindow.setMinimumSize(fitted.minWidth, fitted.minHeight);
+    if (!currentWindow.isMaximized() && !currentWindow.isFullScreen()) {
+      const { x, y, width, height } = fitted;
+      if (x !== bounds.x || y !== bounds.y || width !== bounds.width || height !== bounds.height) currentWindow.setBounds({ x, y, width, height });
+    }
+  };
+  screen.on('display-removed', fitDisplay);
+  screen.on('display-metrics-changed', fitDisplay);
+  currentWindow.once('closed', () => {
+    screen.removeListener('display-removed', fitDisplay);
+    screen.removeListener('display-metrics-changed', fitDisplay);
+  });
   const desktopRendererId = currentWindow.webContents.id;
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['<all_urls>'] }, (details, callback) => {
     const headers = { ...details.requestHeaders };

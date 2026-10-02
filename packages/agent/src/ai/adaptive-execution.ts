@@ -8,9 +8,9 @@ export class AdaptiveExecution {
   private successes = 0;
   constructor(text: string) {
     this.initial = /취약점|침투|보안.*분석|아키텍처|근본.*원인|증명|vulnerability|root cause|threat model|architecture|mathematical proof/i.test(text) ? 'deep'
-      : /^(?:안녕(?:하세요)?|고마워|감사합니다|hello|hi|thanks)[.!?~\s]*$/i.test(text.trim())
+      : /^(?:안녕(?:하세요)?|(?:ㅎㅇ){1,3}|하이|고마워(?:요)?|감사합니다|hello|hi|thanks)[.!?~\s]*$/i.test(text.trim())
         || /^(?:너|지금|현재).{0,12}(?:무슨|어떤|뭔)\s*모델.{0,6}[?？]?$/u.test(text.trim())
-        || /^[\d+*/().\s-]{1,80}[=?]?$/.test(text.trim()) ? 'direct' : 'standard';
+        || /^(?=.*\d)(?=.*[+*/-])[\d+*/().\s-]{1,80}[=?]?$/.test(text.trim()) ? 'direct' : 'standard';
   }
   get depth(): ExecutionDepth { return this.failures >= 2 ? 'deep' : this.initial; }
   observe(success: boolean, kind: 'task' | 'environment' = 'task') {
@@ -19,6 +19,11 @@ export class AdaptiveExecution {
     else { this.failures = Math.min(4, this.failures + 1); this.successes = 0; }
   }
   effort(requested: ReasoningEffort, supported: readonly ReasoningEffort[]): ReasoningEffort {
+    // The user's selected depth is for substantive work, not a mandatory cost
+    // floor for an unambiguous greeting/calculation. Never infer simplicity
+    // from message length, lower an unknown capability, or change the model.
+    if (this.depth === 'direct' && supported.includes('low')
+      && ['auto', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(requested)) return 'low';
     if (requested !== 'auto') return supported.includes(requested) ? requested : 'auto';
     const preferred = this.depth === 'deep' ? 'high' : this.depth === 'direct' ? 'low' : 'medium';
     return supported.includes(preferred) ? preferred : 'auto';

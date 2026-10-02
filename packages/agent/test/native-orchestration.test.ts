@@ -167,3 +167,27 @@ test('print-CLI continuation persists the full verified transcript, not only the
     { workspacePath: tmpdir(), permissionMode: 'read-only' });
   assert.deepEqual(result.turns.map(t => t.content), ['original', 'answer 1', 'follow-up', 'answer 2']);
 });
+
+test('simple text preserves queued task steering and re-enters native work with the selected depth', async () => {
+  let textCalls=0, nativeCalls=0, steeringReads=0;
+  const provider={id:'fixture',label:'Fixture',type:'codex-cli',model:'same-model',supportedReasoning:['auto','low','high'],supportsTools:false,
+    chat:async (req:any)=>{textCalls++;assert.equal(req.reasoningEffort,'low');assert.deepEqual(req.tools,[]);req.onEvent?.({type:'text',text:'Hello'});return {text:'Hello',toolCalls:[],usage:{promptTokens:1,completionTokens:1}};},
+    runAgent:async (req:NativeAgentRequest)=>{nativeCalls++;assert.equal(req.reasoningEffort,'high');assert.equal(req.permissionMode,'read-only');assert.match(req.prompt,/Hello/);assert.match(req.prompt,/프로젝트 분석/);return {text:'Task done',toolCalls:[],usage:{promptTokens:1,completionTokens:1}};},
+  };
+  const loop=new AgentLoop({default:()=>provider} as any,{} as any);
+  const result=await loop.run([],'ㅎㅇ',{takeSteering:()=>++steeringReads===1?['프로젝트 분석']:[]},[],{workspacePath:tmpdir(),permissionMode:'read-only',reasoningEffort:'high'});
+  assert.equal(textCalls,1);assert.equal(nativeCalls,1);assert.equal(result.route?.model,'same-model');assert.equal(result.route?.effort,'high');
+  assert.deepEqual(result.turns.map(t=>t.content),['ㅎㅇ','Hello','프로젝트 분석','Task done']);
+  assert.equal(result.usage.promptTokens,2);
+});
+
+test('cancelled simple text cannot continue queued native work', async () => {
+  const abort=new AbortController();let nativeCalls=0;
+  const provider={id:'fixture',label:'Fixture',type:'codex-cli',model:'same-model',supportedReasoning:['auto','low','high'],supportsTools:false,
+    chat:async (req:any)=>{abort.abort(new Error('owned cancellation'));req.signal.throwIfAborted();},
+    runAgent:async ()=>{nativeCalls++;throw Error('must not run');},
+  };
+  const loop=new AgentLoop({default:()=>provider} as any,{} as any);
+  await assert.rejects(loop.run([],'ㅎㅇ',{takeSteering:()=>['파일 수정'],signal:abort.signal},[],{workspacePath:tmpdir(),permissionMode:'read-only',reasoningEffort:'high'}),/owned cancellation/);
+  assert.equal(nativeCalls,0);
+});

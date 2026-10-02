@@ -1,0 +1,15 @@
+Offline OCR third-party components
+
+Tesseract.js and Tesseract.js Core: Apache-2.0.
+https://github.com/naptha/tesseract.js
+https://github.com/naptha/tesseract.js-core
+
+The @tesseract.js-data/eng@1.0.0 package declares MIT for its packaging.
+Its 4.0.0 traineddata is sourced from the Apache-2.0 Tesseract tessdata
+repository, via naptha/tessdata. The application retains the additional
+Apache-2.0 license in THIRD_PARTY_NOTICES.txt; the package's MIT declaration
+must not be interpreted as relicensing those traineddata files.
+https://github.com/naptha/tessdata
+https://github.com/tesseract-ocr/tessdata
+
+Language data is shipped unmodified. Engine output is fallible, not verified.

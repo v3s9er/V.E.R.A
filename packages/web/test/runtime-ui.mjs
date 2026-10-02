@@ -10,7 +10,7 @@ const output = await mkdtemp(join(tmpdir(), 'mrrobot-ui-'));
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
 const failures = [], errors = [];
 try {
-  for (const [width, height] of [[1280,800], [820,650], [390,780], [390,430]]) {
+  for (const [width, height] of [[1280,800], [1248,650], [992,530], [820,650], [390,780], [390,430]]) {
     const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
     page.setDefaultTimeout(5000);
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());

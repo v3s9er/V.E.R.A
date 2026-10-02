@@ -247,6 +247,13 @@ function render(inventory) {
     '',
   ];
 
+  // The npm wrapper's MIT metadata does not relicense its Apache-2.0 data.
+  if (inventory.some(record => record.name === '@tesseract.js-data/eng')) {
+    lines.push(readFileSync(join(repoRoot, 'integrations', 'evidence-ocr', 'NOTICE.txt'), 'utf8'));
+    lines.push('--- Apache-2.0 license for bundled Tesseract traineddata ---');
+    lines.push(readFileSync(join(repoRoot, 'node_modules', 'tesseract.js', 'LICENSE.md'), 'utf8'));
+  }
+
   for (const record of inventory) {
     lines.push('='.repeat(80));
     lines.push(`${record.name}@${record.version}`);

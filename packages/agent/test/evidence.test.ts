@@ -8,9 +8,22 @@ import { createEvidenceTools, evidencePython, parsePythonOnly, needsSourceEviden
 import { evidenceImageInputs } from '../src/ai/cli-isolated.js';
 import { NativeToolEvents } from '../src/ai/native-tool-events.js';
 import type { NativeToolEvent } from '../src/ai/provider.js';
-import { evidenceContentBounds } from '../src/ai/evidence-pixels.js';
+import { evidenceContentBounds, evidenceReviewSheet } from '../src/ai/evidence-pixels.js';
 
 const signal = () => new AbortController().signal;
+
+test('uncertain-word review sheet preserves original RGBA pixels and maps every enlarged region',()=>{
+  const source=new PNG({width:20,height:10});for(let i=0;i<source.data.length;i++)source.data[i]=i%251;
+  const boxes=[{x:2,y:1,width:4,height:3},{x:10,y:5,width:5,height:4}];
+  const review=evidenceReviewSheet(source,boxes)!;const decoded=PNG.sync.read(review.bytes);
+  assert.equal(review.regions.length,2);
+  for(const r of review.regions)for(let y=0;y<r.sheet.height;y++)for(let x=0;x<r.sheet.width;x++){
+    const a=((r.source.y+Math.floor(y/r.scale))*source.width+r.source.x+Math.floor(x/r.scale))*4;
+    const b=((r.sheet.y+y)*decoded.width+r.sheet.x+x)*4;
+    assert.deepEqual(decoded.data.subarray(b,b+4),source.data.subarray(a,a+4));
+  }
+  assert.equal(evidenceReviewSheet(source,[{x:-1,y:0,width:3,height:2}]),undefined);
+});
 
 test('uniform-margin trimming preserves every differing pixel and can be disabled', async () => {
   const root=mkdtempSync(join(tmpdir(),'mrrobot-margin-'));

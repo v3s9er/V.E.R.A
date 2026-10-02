@@ -14,6 +14,48 @@ const never = <T>(): Promise<T> => new Promise(() => {});
 const answer = (text = 'verified answer'): ProviderResult => ({ text, toolCalls: [], usage: { promptTokens: 3, completionTokens: 2, reportStatus: 'reported' } });
 const limits = { nodeMs: 80, deliberationMs: 120, graceMs: 15 };
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+test('large councils bound active calls and preserve caller ordering', async () => {
+  let active=0,peak=0;
+  const council=new Council({limits:{nodeMs:1000,deliberationMs:5000,graceMs:100,maxConcurrent:3},signal:new AbortController().signal,isFatal:()=>false});
+  const results=await council.collect(Array.from({length:11},(_,i)=>({id:String(i),run:async()=>{peak=Math.max(peak,++active);await pause(10);active--;return i;}})),11);
+  assert.equal(peak,3);assert.equal(active,0);
+  assert.deepEqual(results.map(r=>r.value),Array.from({length:11},(_,i)=>i));
+});
+
+test('a timed-out uncooperative node does not free capacity for queued calls', async () => {
+  let calls=0;
+  const council=new Council({limits:{nodeMs:15,deliberationMs:100,graceMs:10,maxConcurrent:1},signal:new AbortController().signal,isFatal:()=>false});
+  const r=await council.collect(Array.from({length:3},(_,i)=>({id:String(i),run:async()=>{calls++;return never();}})),3);
+  assert.equal(calls,1);assert.deepEqual(r.map(x=>x.state),['timed_out','skipped','skipped']);
+  assert.throws(()=>new Council({limits:{...limits,maxConcurrent:99},signal:new AbortController().signal,isFatal:()=>false}),/concurrency/);
+});
+
+test('parent cancellation never starts queued council jobs', async () => {
+  const controller=new AbortController();let calls=0;
+  const council=new Council({limits:{...limits,maxConcurrent:1},signal:controller.signal,isFatal:()=>false});
+  await assert.rejects(council.collect(Array.from({length:3},(_,i)=>({id:String(i),run:async()=>{calls++;controller.abort(new Error('STOP'));return never();}}))),/STOP/);
+  assert.equal(calls,1);
+});
+
+test('parallel groups share one physical concurrency budget', async () => {
+  let active=0,peak=0;
+  const council=new Council({limits:{nodeMs:1000,deliberationMs:5000,graceMs:100,maxConcurrent:2},signal:new AbortController().signal,isFatal:()=>false});
+  const group=(prefix:string)=>council.collect(Array.from({length:4},(_,i)=>({id:prefix+i,run:async()=>{peak=Math.max(peak,++active);await pause(10);active--;return i;}})),4);
+  const results=await Promise.all([group('a'),group('b'),group('c')]);
+  assert.equal(peak,2);assert.equal(results.flat().filter(r=>r.state==='completed').length,12);
+});
+
+test('fatal admission in one group aborts the other groups and future rounds', async () => {
+  const failure=new Error('FATAL_ADMISSION');let sibling:AbortSignal|undefined;
+  const council=new Council({limits:{nodeMs:1000,deliberationMs:5000,graceMs:100,maxConcurrent:2},signal:new AbortController().signal,isFatal:e=>e===failure});
+  const results=await Promise.allSettled([
+    council.collect([{id:'slow',run:async signal=>{sibling=signal;return never();}}]),
+    council.collect([{id:'fatal',run:async()=>{throw failure;}}]),
+  ]);
+  assert.ok(sibling?.aborted);assert.ok(results.every(r=>r.status==='rejected'&&r.reason===failure));
+  await assert.rejects(council.collect([{id:'later',run:async()=>{throw Error('must not start');}}]),e=>e===failure);
+});
 test('council failure diagnostics use fixed codes, not private error strings', async () => {
   assert.equal(councilFailureCode(new Error('PRIVATE_TOKEN')), 'worker_failed');
   assert.equal(councilFailureCode(new Error('구독 모델의 작업 응답 형식이 올바르지 않습니다.')), 'response_format');
