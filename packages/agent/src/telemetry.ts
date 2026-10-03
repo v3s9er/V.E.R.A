@@ -170,8 +170,29 @@ function distribution(values: number[]) {
 }
 function performanceSummary(entries: RoutingTrace[]) {
   const completed = entries.filter(entry => entry.ok);
+  const attempts = entries.filter(entry => !entry.cancelled);
+  const firstSubmission = (entry: RoutingTrace) => entry.transport?.find(t => t.stage === 'submitted')?.atMs;
+  const startup = attempts.flatMap(entry => {
+    const value = firstSubmission(entry);
+    return value === undefined ? [] : [value];
+  });
   return {
     window: entries.length, successes: completed.length, cancelled: entries.filter(entry => entry.cancelled).length,
+    failures: attempts.filter(entry => !entry.ok).length,
+    // Failed attempts consume real waiting time too. Keep successful-only
+    // historical metrics for compatibility, and expose an honest all-attempt view.
+    attemptMs: distribution(attempts.map(entry => entry.latencyMs)),
+    failedMs: distribution(attempts.filter(entry => !entry.ok).map(entry => entry.latencyMs)),
+    firstSubmissionMs: distribution(startup),
+    observedFirstTextMs: distribution(attempts.flatMap(entry => entry.firstTextMs === undefined ? [] : [entry.firstTextMs])),
+    missingFirstText: attempts.filter(entry => entry.firstTextMs === undefined).length,
+    executionGroups: [...new Set(entries.map(entry => JSON.stringify([entry.model ?? '', entry.effort ?? '', entry.transport?.[0]?.transport ?? 'unknown'])))].map(key => {
+      const [model, effort, transport] = JSON.parse(key);
+      const group = attempts.filter(entry => JSON.stringify([entry.model ?? '', entry.effort ?? '', entry.transport?.[0]?.transport ?? 'unknown']) === key);
+      return { model, effort, transport, samples: group.length, successes: group.filter(entry => entry.ok).length,
+        completionMs: distribution(group.map(entry => entry.latencyMs)),
+        firstTextMs: distribution(group.flatMap(entry => entry.firstTextMs === undefined ? [] : [entry.firstTextMs])) };
+    }).filter(group => group.samples).sort((a,b) => b.samples-a.samples),
     completionMs: distribution(completed.map(entry => entry.latencyMs)),
     firstTextMs: distribution(completed.flatMap(entry => entry.firstTextMs === undefined ? [] : [entry.firstTextMs])),
     byModel: [...new Set(entries.map(entry => entry.model ?? '알 수 없음'))].map(model => {

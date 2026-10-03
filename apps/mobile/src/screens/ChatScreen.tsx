@@ -326,19 +326,20 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     deltaTimer.current = null;
     const [detail, runList, recovery] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
-      client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+      client.call('chat.runs', {}, 5000).catch(() => null) as Promise<ChatRunState[] | null>,
       client.call('chat.recovery', { conversationId: id }, 5000).catch(() => null) as Promise<{ message: string } | null>,
     ]);
     if (generation !== loadGeneration.current) return;
-    const active = runList.find((run) => run.conversationId === id);
+    const active = runList?.find((run) => run.conversationId === id && run.running);
     const pendingConfirm = active
       ? await client.call('chat.pendingConfirm', { conversationId: id }, 5000).catch(() => null) as ChatConfirmRequest | null
       : null;
     if (generation !== loadGeneration.current) return;
-    setRuns((current) => ({ ...current, ...Object.fromEntries(runList.map((run) => [run.conversationId, run])) }));
-    if (pendingConfirm) setConfirm(pendingConfirm);
+    setRuns((current) => ({ ...current, ...Object.fromEntries((runList ?? []).map((run) => [run.conversationId, run])),
+      [id]: active ?? { conversationId: id, running: runList === null, steeringQueued: 0, status: runList === null ? 'PC 실행 상태 확인 필요' : '' } }));
+    setConfirm(current => pendingConfirm ?? (current?.conversationId === id ? null : current));
     setConversation(detail);
-    setHistoryError(recovery?.message ?? '');
+    setHistoryError(runList === null ? '실행 상태를 확인하지 못했습니다. 새 요청을 보내지 않았습니다. 연결을 확인하고 이 대화를 다시 선택하세요.' : recovery?.message ?? '');
     setHistoryPage({ id, info: detail.history });
     setActivity([]); setShowActivity(false);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
@@ -1072,7 +1073,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         onContentSizeChange={() => { if (stickToBottom.current) listRef.current?.scrollToOffset({ offset: 0, animated: false }); }}
         ListFooterComponent={(currentHistory?.hasMore || currentHistory?.unavailable || currentHistory?.missingMessages || currentHistory?.displayTruncated || historyError) ? <View style={{ alignItems: 'center', gap: 8, paddingVertical: 12 }}>
           {currentHistory?.hasMore && <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: loadingHistory, busy: loadingHistory }} disabled={loadingHistory} onPress={() => void loadPreviousMessages()} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 18 }}><Text style={{ color: colors.accent2 }}>{loadingHistory ? '이전 메시지 불러오는 중…' : '이전 메시지 불러오기'}</Text></TouchableOpacity>}
-          {historyError ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>{historyError}</Text> : null}
+          {historyError ? <><Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>{historyError}</Text><TouchableOpacity accessibilityRole="button" onPress={() => { if (conversation) void loadConversation(conversation.id).catch(() => setHistoryError('상태를 다시 확인하지 못했습니다. 연결을 확인하세요.')); }}><Text style={{ color: colors.accent2 }}>상태 다시 확인</Text></TouchableOpacity></> : null}
           {currentHistory?.displayTruncated ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>매우 긴 메시지는 일부만 표시하며 보관된 원문은 유지됩니다.</Text> : null}
           {currentHistory?.unavailable ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>이전 대화 보관 파일을 읽을 수 없어 현재 남아 있는 메시지를 표시합니다.</Text> : (currentHistory?.missingMessages ?? 0) > 0 ? <Text style={{ color: colors.dim, fontSize: 12, textAlign: 'center' }}>과거에 원문이 저장되지 않은 메시지 {currentHistory!.missingMessages.toLocaleString()}개는 표시할 수 없습니다.</Text> : null}
         </View> : null}
@@ -1108,7 +1109,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
       {(busy || activity.length > 0 || activeRun?.phase) ? <View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : ['failed', 'cancelled'].includes(activeRun?.phase ?? '') ? '!' : '✓'}</Text><Text numberOfLines={1} style={styles.runStatusText}>{activeRun?.phase === 'approval' ? '승인이 필요해요' : activeRun?.phase === 'cancelling' ? '안전하게 중지하는 중…' : activeRun?.phase === 'completed' ? '작업 완료' : activeRun?.phase === 'failed' ? '작업 오류 확인' : activeRun?.phase === 'cancelled' ? '작업 중지됨' : activity.at(-1) || activeRun?.status || '요청 준비 중'}{activeRun?.steeringQueued ? ` · 추가 지시 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : ['failed', 'cancelled'].includes(activeRun?.phase ?? '') || activeRun?.activity?.some(item => item.state === 'error') ? '!' : '✓'}</Text><Text numberOfLines={1} style={styles.runStatusText}>{activeRun?.phase === 'approval' ? '승인이 필요해요' : activeRun?.phase === 'cancelling' ? '안전하게 중지하는 중…' : activeRun?.phase === 'completed' ? (activeRun.activity?.some(item => item.state === 'error') ? '응답 완료 · 실행 오류 확인' : '응답 완료') : activeRun?.phase === 'failed' ? '작업 오류 확인' : activeRun?.phase === 'cancelled' ? '작업 중지됨' : activity.at(-1) || activeRun?.status || '요청 준비 중'}{activeRun?.steeringQueued ? ` · 추가 지시 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
         {showActivity && !shortKeyboardViewport && <ScrollView style={{ maxHeight: 180, paddingHorizontal: 18 }} nestedScrollEnabled>
           {activeRun?.agents?.map(agent => <View key={agent.agentId} style={{ paddingVertical: 7, gap: 3 }}>
             <Text style={{ color: agent.state === 'failed' ? colors.err : colors.text }}>{agent.label} · {{ queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지' }[agent.state]}</Text>

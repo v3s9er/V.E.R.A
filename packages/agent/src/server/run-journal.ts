@@ -36,7 +36,7 @@ export class RunJournal {
   finish(runId: string, phase: 'completed' | 'failed' | 'cancelled') {
     const entry = this.entries.find(entry => entry.runId === runId); if (!entry) return;
     // A timeout/cancellation does not prove an in-flight external side effect failed.
-    entry.phase = phase !== 'completed' && entry.toolPending ? 'uncertain' : phase;
+    entry.phase = entry.toolPending ? 'uncertain' : phase;
     entry.at = Date.now(); this.save();
   }
   recovery(conversationId: string, ownerLinkId?: string, admin = false) {

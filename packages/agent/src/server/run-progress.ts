@@ -21,7 +21,12 @@ export class RunProgress {
     this.phase = phase;
     this.updatedAt = this.now();
     if (TERMINAL.has(phase)) for (const item of this.activity) if (item.state === 'running') {
-      item.state = phase === 'completed' ? 'done' : 'error'; item.finishedAt = this.updatedAt;
+      // Model completion is not proof that an unacknowledged tool succeeded.
+      item.state = 'error'; item.finishedAt = this.updatedAt;
+    }
+    if (TERMINAL.has(phase)) for (const agent of this.agents.values()) if (agent.state === 'queued' || agent.state === 'running') {
+      agent.state = phase === 'cancelled' ? 'cancelled' : 'failed';
+      agent.status = '보조 작업의 완료 확인 없이 응답이 종료되었습니다.';
     }
   }
   text(delta: string) {
@@ -46,7 +51,7 @@ export class RunProgress {
       this.activity.push({ id: `${id}:${++this.serial}`, label: info.name.slice(0, 100), state: 'running', startedAt: this.now() });
       this.activity = this.activity.slice(-32);
     } else {
-      const item = this.activity.find(item => item.id.startsWith(`${id}:`) && item.state === 'running');
+      const item = this.activity.find(item => item.id.slice(0, item.id.lastIndexOf(':')) === id && item.state === 'running');
       if (item) { item.state = info.status; item.finishedAt = this.now(); }
     }
   }

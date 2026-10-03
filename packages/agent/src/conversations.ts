@@ -73,15 +73,6 @@ const MAX_CONVERSATION_TURNS_BYTES = 4 * 1024 * 1024;
 const MAX_RECORDED_TOKEN_COUNT = 1_000_000_000_000;
 const SYNC_REVISION = /^[a-f0-9]{64}$/;
 
-function utf8Tail(value: string, maxBytes: number): string {
-  const bytes = Buffer.from(value, 'utf8');
-  if (bytes.length <= maxBytes) return value;
-  let start = bytes.length - maxBytes;
-  // Do not begin inside a multi-byte UTF-8 code point.
-  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
-  return bytes.subarray(start).toString('utf8');
-}
-
 function conversationRevision(item: StoredConversation): string {
   // Access/token policies and workspace binding are destination-local state.
   // The id and wall-clock updatedAt are also excluded so a deterministic
@@ -882,8 +873,7 @@ export class ConversationStore {
       }
     }
     const old = item.turns.slice(0, cut);
-    const digest = conversationCheckpoint(old);
-    item.summary = utf8Tail([item.summary, digest].filter(Boolean).join('\n'), MAX_SUMMARY_BYTES);
+    item.summary = conversationCheckpoint(old, item.summary, MAX_SUMMARY_BYTES);
     item.compactedMessages += old.filter((t) => t.role === 'user' || t.role === 'assistant').length;
     item.turns = item.turns.slice(cut);
   }

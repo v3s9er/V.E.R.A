@@ -1,6 +1,6 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
 import { AdaptiveExecution } from './adaptive-execution.js';
-import { isTextOnlyTask } from './request-shape.js';
+import { isTextOnlyTask, isSelfContainedRequest } from './request-shape.js';
 import { contextualTurns } from './request-context.js';
 import { KNOWLEDGE_TOOL, KNOWLEDGE_GUIDANCE, knowledgeQuery } from './knowledge-tool.js';
 import { Council, councilFailureCode, councilLimits, untilAborted, type CouncilLimits, type CouncilOutcome } from './council.js';
@@ -353,8 +353,7 @@ export class AgentLoop {
     };
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
     const adaptive = new AdaptiveExecution(userMessage, history);
-    const selfContained = (!options.routing || options.routing.executionMode === 'adaptive') && !options.isolation
-      && (adaptive.depth === 'direct' || isTextOnlyTask(userMessage, history));
+    const selfContained = isSelfContainedRequest(userMessage, history, options.routing?.executionMode, Boolean(options.isolation));
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };

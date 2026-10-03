@@ -166,4 +166,23 @@ test('restart and cancellation preserve uncertainty without replay or cross-devi
   assert.ok(journal.recovery('ticket', 'device-a'));
   journal.begin('run-3', 'ticket', 'device-a'); journal.finish('run-3', 'completed');
   assert.equal(new RunJournal(dir).recovery('ticket', 'device-a'), null);
+  journal.begin('unacknowledged', 'ticket', 'device-a'); journal.tool('unacknowledged', true); journal.finish('unacknowledged', 'completed');
+  assert.equal(new RunJournal(dir).recovery('ticket', 'device-a')?.uncertainTool, true, 'model completion is not a tool acknowledgement');
+  journal.begin('acknowledged', 'ticket', 'device-a'); journal.tool('acknowledged', true); journal.tool('acknowledged', false); journal.finish('acknowledged', 'completed');
+  assert.equal(new RunJournal(dir).recovery('ticket', 'device-a'), null);
+});
+
+test('repeated checkpoints retain early restrictions, recent changes and legacy as quoted data', () => {
+  let checkpoint = conversationCheckpoint([{ role: 'user', content: 'Never send private files.\n반드시 PROJECT_ALPHA 안에서만 작업하세요.' }], 'old legacy note');
+  for (let i = 0; i < 70; i++) checkpoint = conversationCheckpoint([
+    { role: 'user', content: `일반 요청 ${i}` }, { role: 'assistant', content: `검증 완료 주장 ${i}` },
+  ], checkpoint);
+  checkpoint = conversationCheckpoint([{ role: 'user', content: '새 조건: 반드시 PROJECT_BETA도 제외하세요.' }], checkpoint);
+  assert.match(checkpoint, /Never send private files/); assert.match(checkpoint, /PROJECT_ALPHA/); assert.match(checkpoint, /PROJECT_BETA/);
+  assert.match(checkpoint, /old legacy note/); assert.match(checkpoint, /assistant_claims/);
+  assert.match(checkpoint, /not verified evidence/);
+  assert.ok(Buffer.byteLength(checkpoint) <= 64 * 1024);
+  const limited = conversationCheckpoint([{ role: 'user', content: '반드시 ' + '한글'.repeat(2000) }], checkpoint, 1024);
+  assert.ok(Buffer.byteLength(limited) <= 1024); assert.ok(!limited.includes('\uFFFD'));
+  for (const line of limited.split('\n').filter(x => /^- (user|assistant|legacy):/.test(x))) assert.doesNotThrow(() => JSON.parse(line.slice(line.indexOf(':') + 2)));
 });

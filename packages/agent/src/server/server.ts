@@ -2,8 +2,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { networkInterfaces, hostname as osHostname, platform, homedir } from 'node:os';
 import { join as joinFilePath } from 'node:path';
 import { chatFileRoot } from './chat-file-access.js';
-import { AdaptiveExecution } from '../ai/adaptive-execution.js';
-import { isTextOnlyTask } from '../ai/request-shape.js';
+import { isSelfContainedRequest } from '../ai/request-shape.js';
 import { readDiscordFile } from './discord-files.js';
 import { createDiscordIsolation, readIsolatedArtifact } from './discord-isolation.js';
 import type { AddressInfo } from 'node:net';
@@ -94,7 +93,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.14';
+export const VERSION = '0.6.15';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -2596,10 +2595,9 @@ export class AgentServer {
       try {
         const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
-        const extraTools = isolation ? [] : this.plugins.aiTools(text);
         const history = this.conversations.turns(conversationId);
-        const selfContained = !conversationRouting && !isolation
-          && (new AdaptiveExecution(text, history).depth === 'direct' || isTextOnlyTask(text, history));
+        const selfContained = isSelfContainedRequest(text, history, conversationRouting?.executionMode, Boolean(isolation));
+        const extraTools = isolation || selfContained ? [] : this.plugins.aiTools(text);
         let observed = !isolation && !selfContained && workspace && runWorkspaceId
           ? await readProjectKnowledge(workspace.path, runWorkspaceId) : { facts: [], partial: false };
         session.signal()?.throwIfAborted();

@@ -1,4 +1,12 @@
 import type { Turn } from './provider.js';
+import { AdaptiveExecution } from './adaptive-execution.js';
+
+/** Shared by preparation and execution, so an adaptive text request does not
+ * enumerate plugins or retrieve project knowledge before taking the text lane. */
+export function isSelfContainedRequest(text: string, history: readonly Turn[], executionMode?: string, isolated = false): boolean {
+  return (!executionMode || executionMode === 'adaptive') && !isolated
+    && (new AdaptiveExecution(text, history).depth === 'direct' || isTextOnlyTask(text, history));
+}
 
 /** Recognize only self-contained inline text transformations. This is capability
  * reduction, not a model selector or a reasoning-quality classifier. */
@@ -9,9 +17,14 @@ export function isInlineTextTask(text: string): boolean {
   const instruction = text.slice(0, separator).trim();
   const payload = text.slice(separator + 1).trim();
   if (!payload || /^(?:https?:\/\/\S+|[A-Za-z]:[\\/].*|\/[^\s]+)$/i.test(payload)) return false;
-  if (/파일|저장|첨부|링크|페이지|검색|웹|인터넷|최신|실시간|실행|업로드|다운로드|수정하고|적용|컴퓨터|프로젝트|폴더|\b(?:file|save|attach|url|link|page|search|browse|latest|current|execute|run|upload|download|project|folder|send)\b/i.test(instruction)) return false;
+  if (/파일|저장|첨부|링크|페이지|검색|웹|인터넷|최신|실시간|실행|업로드|다운로드|수정하고|적용|컴퓨터|프로젝트|폴더|\b(?:files?|save|attach|attachments?|urls?|links?|pages?|search|browse|latest|current|execute|run|upload|download|projects?|folders?|director(?:y|ies)|send)\b/i.test(instruction)) return false;
   return /^(?:다음|아래|이)\s*(?:문장|텍스트|글|내용|문구)[\s\S]*(?:번역|요약|교정|다듬|분류|추출)/u.test(instruction)
-    || /^(?:translate|summarize|rewrite|proofread|classify|extract)\b/i.test(instruction);
+    || /^(?:translate|summarize|rewrite|proofread|classify|extract)\b/i.test(instruction)
+    // Only inline numeric data: free-form tasks, references and arbitrary code
+    // still receive their normal tools. This changes startup, not reasoning.
+    || /^[\d\s.,+*/%()=;\[\]{}−-]+$/u.test(payload) && (
+      /^(?:다음|아래|이)\s*(?:숫자|수치|값|목록|데이터)[\s\S]*(?:계산|합산|합계|개수|평균|정렬|분류|추출|세어)/u.test(instruction)
+      || /^(?:calculate|compute|sum|count|sort)\b/i.test(instruction));
 }
 
 /** Explicitly in-conversation recall/summarization can use the same text lane.

@@ -4,7 +4,7 @@ import type { ChatRunActivity, ChatRunPhase, CoordinationAgent } from '@mr-robot
 
 const LABELS: Record<ChatRunPhase, string> = {
   starting: '요청 준비', working: '도구로 작업 중', answering: '답변 작성 중', approval: '승인이 필요해요',
-  cancelling: '작업을 안전하게 중지하는 중', completed: '작업 완료', failed: '확인이 필요한 오류', cancelled: '작업 중지됨',
+  cancelling: '작업을 안전하게 중지하는 중', completed: '응답 완료', failed: '확인이 필요한 오류', cancelled: '작업 중지됨',
 };
 const TOOLS: Record<string, string> = { read_file: '파일 읽기', list_files: '폴더 확인', shell_exec: '명령 실행',
   write_file: '파일 수정', native_agent: '네이티브 에이전트', screenshot: '화면 확인', mouse_click: '화면 조작',
@@ -39,6 +39,6 @@ export function RunActivityPanel({ phase, activity = [], agents = [], startedAt,
       <small>{item.finishedAt ? `${Math.max(0, (item.finishedAt - item.startedAt) / 1000).toFixed(1)}초` : '진행 중'}</small>
     </li>) : !agents.length && <li>{fallback || '아직 도구 실행 기록이 없습니다.'}</li>}</ol>
     </div>
-    <p>실제 실행 이벤트만 표시합니다. 모델 내부 추론은 표시하지 않습니다.</p>
+    <p>응답 종료와 결과 검증은 다릅니다. 실제 도구 이벤트를 표시하며, 모델의 설명만으로 작업 성공을 보증하지 않습니다.</p>
   </details>;
 }

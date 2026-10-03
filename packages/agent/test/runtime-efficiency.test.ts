@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentLoop } from '../src/ai/loop.js';
 import { contextualTurns, conversationInput } from '../src/ai/request-context.js';
-import { isInlineTextTask, isTextOnlyTask } from '../src/ai/request-shape.js';
+import { isInlineTextTask, isTextOnlyTask, isSelfContainedRequest } from '../src/ai/request-shape.js';
 import { OpenAICompatibleProvider } from '../src/ai/openai.js';
 import { AnthropicProvider } from '../src/ai/anthropic.js';
 import type { AiProvider, ChatRequest, ProviderResult, Turn } from '../src/ai/provider.js';
@@ -13,6 +13,21 @@ const base = (chat: AiProvider['chat']): AiProvider => ({ id: 'fixture', label: 
   chat, models: async () => [], ping: async () => ({ ok: true }) });
 const registry = (provider: AiProvider) => ({ default: () => provider }) as any;
 const inline = '다음 텍스트에서 token 값만 추출해: token=DELTA-83';
+
+test('preparation and execution share the same narrow text-lane decision', () => {
+  for (const mode of [undefined, 'adaptive']) {
+    assert.equal(isSelfContainedRequest(inline, [], mode), true);
+    assert.equal(isSelfContainedRequest('안녕하세요', [], mode), true);
+    assert.equal(isSelfContainedRequest('파일을 읽어서 검증해', [], mode), false);
+    assert.equal(isSelfContainedRequest(inline, [], mode, true), false);
+  }
+  for (const mode of ['pipeline', 'council', 'single']) assert.equal(isSelfContainedRequest(inline, [], mode), false);
+});
+
+test('inline numeric transformations skip PC context without classifying external calculations', () => {
+  for (const text of ['아래 값에서 양수만 합산해. 정수만 답해: -12, 19, 20', '다음 숫자를 정렬해: 9, 1, -4', 'Compute the average: [12, 30, 48]']) assert.equal(isInlineTextTask(text), true, text);
+  for (const text of ['아래 값에 최신 환율을 적용해서 계산해: 12, 30', 'Count files: 12, 30', 'Compute: data.csv', 'Calculate: https://example.invalid', '아래 목록 개수를 세어: 기존 폴더의 파일', '아래 값을 합산하고 파일로 저장해: 1, 2']) assert.equal(isInlineTextTask(text), false, text);
+});
 
 test('CLI envelope distinguishes the active task from prior messages and untrusted tool records', () => {
   const turns: Turn[] = [

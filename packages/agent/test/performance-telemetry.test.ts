@@ -8,6 +8,37 @@ import { TelemetryStore, type RoutingTrace } from '../src/telemetry.js';
 
 const trace = (n: number): RoutingTrace => ({ id: String(n), at: n, model: 'fixture-model', promptTokens: 100, completionTokens: 20, toolCalls: 1, latencyMs: 100 + n, estimatedCost: 0, ok: true });
 
+test('failed slow tails remain visible, missing text is not zero, and effort is separate', t => {
+  const home = mkdtempSync(join(tmpdir(), 'mrrobot-tail-test-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const store = new TelemetryStore(home);
+  store.record({ ...trace(1), effort: 'low', firstTextMs: 20, transport: [{ transport: 'codex-text', stage: 'submitted', elapsedMs: 4, atMs: 12, reused: true }] });
+  store.record({ ...trace(2), effort: 'high', ok: false, latencyMs: 90000 });
+  store.record({ ...trace(3), cancelled: true, ok: false, latencyMs: 120000 });
+  const p = new TelemetryStore(home).summary().performance;
+  assert.equal(p.failures, 1); assert.equal(p.cancelled, 1);
+  assert.deepEqual(p.attemptMs, { samples: 2, p50: 101, p95: 90000 });
+  assert.equal(p.failedMs.p95, 90000);
+  assert.deepEqual(p.observedFirstTextMs, { samples: 1, p50: 20, p95: 20 });
+  assert.equal(p.missingFirstText, 1); assert.equal(p.firstSubmissionMs.p50, 12);
+  assert.equal(p.executionGroups.length, 2);
+  assert.equal(p.executionGroups.find(x => x.effort === 'high')?.successes, 0);
+});
+
+test('response completion cannot certify unacknowledged tools or helpers', () => {
+  const run = new RunProgress();
+  run.tool({ name: 'write_file', status: 'start', callId: 'id:child' });
+  run.tool({ name: 'read_file', status: 'start', callId: 'id' });
+  run.tool({ name: 'read_file', status: 'done', callId: 'id' });
+  assert.deepEqual(run.snapshot().activity?.map(x => x.state), ['running', 'done']);
+  run.agent({ agentId: 'helper', label: 'helper', model: 'fixture', providerId: 'fixture', state: 'running', sequence: 1, turns: 1, status: 'working', usage: { promptTokens: 1, completionTokens: 0 } });
+  run.transition('completed');
+  assert.deepEqual(run.snapshot().activity?.map(x => x.state), ['error', 'done']);
+  assert.equal(run.snapshot().agents?.[0].state, 'failed');
+  run.tool({ name: 'write_file', status: 'done', callId: 'id:child' });
+  assert.equal(run.snapshot().activity?.[0].state, 'error');
+});
+
 test('first visible text latency ignores status, empty deltas, and late events', () => {
   let clock = 100;
   const run = new RunProgress(() => clock);

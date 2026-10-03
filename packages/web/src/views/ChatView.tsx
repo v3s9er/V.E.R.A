@@ -405,13 +405,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setHistoryError('');
     const [detail, runs, recovery] = await Promise.all([
       client.call('conversations.get', { id }) as Promise<ConversationDetail>,
-      client.call('chat.runs', {}, 5000).catch(() => []) as Promise<ChatRunState[]>,
+      client.call('chat.runs', {}, 5000).catch(() => null) as Promise<ChatRunState[] | null>,
       client.call('chat.recovery', { conversationId: id }, 5000).catch(() => null) as Promise<{ message: string } | null>,
     ]);
-    const selectedRun = runs.find((run) => run.conversationId === id);
+    const selectedRun = runs?.find((run) => run.conversationId === id && run.running);
     if (!inConversationSpace(detail, spaceRef.current)) return;
     const controlledRun = selectedRun;
-    const confirmations = await Promise.all(runs.filter(run => run.conversationId === id).map((run) => (
+    const confirmations = await Promise.all((runs ?? []).filter(run => run.conversationId === id).map((run) => (
       client.call('chat.pendingConfirm', { conversationId: run.conversationId }, 5000)
         .catch(() => null) as Promise<ChatConfirmRequest | null>
     )));
@@ -423,22 +423,22 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }
       setInput(drafts.current.get(id) ?? '');
     }
-    setRunningIds(runs.filter(run => run.running).map(run => run.conversationId));
+    if (runs) setRunningIds(runs.filter(run => run.running).map(run => run.conversationId));
     selectedId.current = id;
     selectedRef.current = detail;
     setSelected(detail);
     if (projectScopeRef.current !== '*' && detail.workspaceId !== projectScopeRef.current) { projectScopeRef.current = '*'; setProjectScope('*'); }
-    setComposerError(recovery?.message ?? ''); setNavigationOpen(false);
+    setComposerError(runs === null ? '실행 상태를 확인하지 못했습니다. 새 요청을 보내지 않았습니다. 연결을 확인하고 이 대화를 다시 선택하세요.' : recovery?.message ?? ''); setNavigationOpen(false);
     const restored = fromDetail(detail);
     setMessages(selectedRun ? [...restored, { id: nextId(), role: 'assistant', content: `${selectedRun.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${selectedRun.partialText ?? ''}`, tools: [], done: false }] : restored);
     setHistoryPage({ id, info: detail.history });
     setRunProgress(controlledRun ?? {});
     setVisibleMessageLimit(160);
     setRoute(null);
-    runningConversationRef.current = controlledRun?.conversationId ?? null;
-    busyRef.current = Boolean(controlledRun);
-    setBusy(Boolean(controlledRun));
-    setStatus(controlledRun?.status ?? '');
+    runningConversationRef.current = controlledRun?.conversationId ?? (runs === null ? id : null);
+    busyRef.current = runs === null || Boolean(controlledRun);
+    setBusy(runs === null || Boolean(controlledRun));
+    setStatus(runs === null ? 'PC 실행 상태 확인 필요' : controlledRun?.status ?? '');
     setConfirm(confirmations.find((item): item is ChatConfirmRequest => item !== null) ?? null);
   }, [client]);
 
@@ -1141,7 +1141,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         <div ref={composerBar} className="chat-inputbar composer-minimal">
           {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} agents={runProgress.agents} startedAt={runProgress.startedAt} busy={busy} fallback={status || route?.model} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
-          {composerError && <div className="composer-error"><span>!</span>{composerError}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
+          {composerError && <div className="composer-error"><span>!</span>{composerError}{selected && <button type="button" onClick={() => void loadConversation(selected.id).catch(() => setComposerError('상태를 다시 확인하지 못했습니다. 연결을 확인하세요.'))}>상태 다시 확인</button>}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}
           <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '추가 지시를 입력하세요. 진행 중인 작업은 유지됩니다.' : '무엇을 도와드릴까요?'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">

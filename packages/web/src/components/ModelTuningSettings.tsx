@@ -9,6 +9,8 @@ import './ModelTuningSettings.css';
 interface Distribution { samples: number; p50: number | null; p95: number | null }
 export interface TuningPerformance {
   window: number; successes: number; cancelled: number; completionMs: Distribution; firstTextMs: Distribution;
+  failures?: number; attemptMs?: Distribution; failedMs?: Distribution; firstSubmissionMs?: Distribution; missingFirstText?: number;
+  executionGroups?: Array<{ model: string; effort: string; transport: string; samples: number; successes: number; completionMs: Distribution; firstTextMs: Distribution }>;
   byModel: Array<{ model: string; samples: number; successes: number; completionMs: Distribution; firstTextMs: Distribution; averageTokens: number }>;
 }
 interface TuningResponse { settings: ProviderTuningSettings; capabilities: ModelTuningCapabilities; warning?: string }
@@ -130,7 +132,23 @@ export function ModelTuningSettings({ client, providers, nativeDesktopAdmin }: {
 
     <Card className="panel tuning-performance"><div className="panel-head"><div><h3>실제 실행 성능</h3><p className="panel-hint">측정한 실행만 표시합니다. 아래 값은 속도 향상을 보장하지 않습니다.</p></div><Button variant="ghost" disabled={statsBusy} onClick={() => void refreshStats()}>{statsBusy ? '불러오는 중…' : '측정값 새로고침'}</Button></div>
       {statsError && <p className="tuning-message tuning-error" role="alert">{statsError}</p>}
-      {performance ? <><p className="tuning-hint">최근 {performance.window.toLocaleString()}회 · 성공 {performance.successes.toLocaleString()}회 · 취소 {performance.cancelled.toLocaleString()}회</p><div className="tuning-metrics"><div><span>첫 응답 · 중앙값</span><b>{displayLatency(performance.firstTextMs.p50)}</b><small>{performance.firstTextMs.samples}개 측정 · P95 {displayLatency(performance.firstTextMs.p95)}</small></div><div><span>완료 시간 · 중앙값</span><b>{displayLatency(performance.completionMs.p50)}</b><small>{performance.completionMs.samples}개 측정 · P95 {displayLatency(performance.completionMs.p95)}</small></div></div><details className="tuning-advanced"><summary>모델별 측정 보기 ({performance.byModel.length})</summary><div className="tuning-model-stats">{performance.byModel.map(row => <div key={row.model}><b>{row.model}</b><span>성공 {row.successes}/{row.samples}회 · 평균 {Math.round(row.averageTokens).toLocaleString()} 토큰</span><span>첫 응답 {displayLatency(row.firstTextMs.p50)} ({row.firstTextMs.samples}개) · 완료 {displayLatency(row.completionMs.p50)} ({row.completionMs.samples}개)</span></div>)}</div></details><p className="tuning-hint">시간 통계는 성공한 실행 기준입니다. 과거 기록에 첫 응답 측정이 없으면 제외합니다. 서로 다른 질문·모델·추론 수준의 결과를 직접적인 성능 비교로 해석하지 마세요.</p></> : !statsBusy && <p className="tuning-hint">아직 측정값이 없습니다. 작업 실행 후 새로고침하세요.</p>}
+      {performance ? <>
+        <p className="tuning-hint">최근 {performance.window.toLocaleString()}회 · 정상 종료 {performance.successes.toLocaleString()}회 · 실패 {performance.failures ?? '미측정'}회 · 취소 {performance.cancelled.toLocaleString()}회</p>
+        <div className="tuning-metrics">
+          <div><span>첫 응답 · 정상 종료 기준</span><b>{displayLatency(performance.firstTextMs.p50)}</b><small>{performance.firstTextMs.samples}개 측정 · P95 {displayLatency(performance.firstTextMs.p95)}</small></div>
+          <div><span>종료 시간 · 실패 포함</span><b>{displayLatency((performance.attemptMs ?? performance.completionMs).p50)}</b><small>{(performance.attemptMs ?? performance.completionMs).samples}개 측정 · P95 {displayLatency((performance.attemptMs ?? performance.completionMs).p95)}{!performance.attemptMs && ' · 구버전: 정상 종료만'}</small></div>
+        </div>
+        <details className="tuning-advanced"><summary>지연 원인과 같은 실행 조건 비교</summary>
+          <p className="tuning-hint">첫 공급자 제출까지 {displayLatency(performance.firstSubmissionMs?.p50 ?? null)} · 실패한 실행 P95 {displayLatency(performance.failedMs?.p95 ?? null)} · 첫 응답 미측정 {performance.missingFirstText ?? '알 수 없음'}회</p>
+          <div className="tuning-model-stats">{performance.executionGroups?.map(row => <div key={JSON.stringify([row.model, row.effort, row.transport])}>
+            <b>{row.model} · {EFFORT_LABEL[row.effort] ?? (row.effort || '추론 미기록')} · {row.transport}</b>
+            <span>정상 종료 {row.successes}/{row.samples}회 · 첫 응답 {displayLatency(row.firstTextMs.p50)} · 종료 P95 {displayLatency(row.completionMs.p95)}</span>
+            {row.samples < 20 && <small>표본이 적습니다. 질문 난이도까지 같다는 뜻은 아닙니다.</small>}
+          </div>)}</div>
+        </details>
+        <details className="tuning-advanced"><summary>모델별 측정 보기 ({performance.byModel.length})</summary><div className="tuning-model-stats">{performance.byModel.map(row => <div key={row.model}><b>{row.model}</b><span>정상 종료 {row.successes}/{row.samples}회 · 평균 {Math.round(row.averageTokens).toLocaleString()} 토큰</span><span>첫 응답 {displayLatency(row.firstTextMs.p50)} ({row.firstTextMs.samples}개) · 정상 종료 {displayLatency(row.completionMs.p50)} ({row.completionMs.samples}개)</span></div>)}</div></details>
+        <p className="tuning-hint">정상 종료는 정답이나 결과 검증을 뜻하지 않습니다. 실패 포함 종료 시간은 사용자 취소를 제외합니다. 미측정은 0초로 계산하지 않습니다. 서로 다른 질문의 결과를 직접적인 성능 비교로 해석하지 마세요.</p>
+      </> : !statsBusy && <p className="tuning-hint">아직 측정값이 없습니다. 작업 실행 후 새로고침하세요.</p>}
     </Card>
     {nativeDesktopAdmin && <LocalTrainingSettings client={client} />}
     <Modal open={deleting} title="튜닝 프로필 삭제" onClose={() => { if (!busy) setDeleting(false); }}><p>‘{original?.name}’ 프로필을 삭제할까요?{active ? ' 현재 적용 중인 프로필이므로 기본값으로 돌아갑니다.' : ''} 대화와 파일은 삭제하지 않습니다.</p><div className="tuning-actions"><Button variant="ghost" disabled={busy} onClick={() => setDeleting(false)}>취소</Button><Button variant="danger" disabled={busy} onClick={() => { if (!data) return; const next: ProviderTuningSettings = { profiles: data.settings.profiles.filter(item => item.id !== selectedId), ...(!active && data.settings.activeProfileId ? { activeProfileId: data.settings.activeProfileId } : {}) }; void persist(next, '', '프로필을 삭제했습니다.'); }}>삭제</Button></div></Modal>
