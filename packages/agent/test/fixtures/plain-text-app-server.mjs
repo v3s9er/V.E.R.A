@@ -21,6 +21,10 @@ createInterface({input:process.stdin}).on('line',line=>{
  const mode=m.params.input[0].text;const turnId=`turn-${++count}`;const itemId=`message-${count}`;
  const p={threadId,turnId};
  send({id:m.id,result:{turn:{id:turnId}}});
+ if(mode.includes('PARTIAL')){
+  send({method:'item/agentMessage/delta',params:{...p,itemId,delta:'unfinished'}});
+  return send({method:'turn/completed',params:{...p,turn:{id:turnId,status:'completed'}}});
+ }
  if(mode.includes('ATTACK'))return send({method:'item/started',params:{...p,item:{type:'commandExecution'}}});
  if(mode.includes('WAIT'))return;
  send({method:'item/reasoning/textDelta',params:{...p,delta:'PRIVATE_REASONING'}});

@@ -221,8 +221,9 @@ export class TextWorker {
       this.mark('firstDelta');
       if (!this.broker && !this.plain) return;
       const { itemId, delta } = m.params ?? {};
-      if (typeof itemId !== 'string' || typeof delta !== 'string') return this.close(new Error('구독 스트림 형식 오류'));
+      if (typeof itemId !== 'string' || !itemId || itemId.length > 200 || typeof delta !== 'string') return this.close(new Error('구독 스트림 형식 오류'));
       if (active.completedMessages.has(itemId)) return this.close(new Error('완료된 구독 메시지의 추가 출력을 차단했습니다.'));
+      if ([...active.deltas.keys()].some(id => id !== itemId && !active.completedMessages.has(id))) return this.close(new Error('구독 메시지 순서 불일치'));
       active.streamBytes += delta.length;
       if (active.streamBytes > 384 * 1024) return this.close(new Error('구독 응답 크기를 초과했습니다.'));
       const text = (active.deltas.get(itemId) ?? '') + delta;
@@ -236,13 +237,14 @@ export class TextWorker {
       if (m.method === 'item/started' && item?.type === 'reasoning') active.req.onEvent?.({ type: 'status', text: '모델이 요청을 검토하고 있습니다' });
       if (m.method === 'item/completed' && item?.type === 'agentMessage') {
         if (typeof item.text !== 'string' || item.text.length > 384 * 1024) return this.close(new Error('구독 응답 형식 오류'));
-        if (this.plain && typeof item.id !== 'string') return this.close(new Error('구독 메시지 식별자 오류'));
+        if ((this.plain || this.broker) && (typeof item.id !== 'string' || !item.id || item.id.length > 200)) return this.close(new Error('구독 메시지 식별자 오류'));
         if (active.completedMessages.has(item.id)) {
           if (active.completedMessages.get(item.id) !== item.text) return this.close(new Error('구독 완료 메시지가 변경되었습니다.'));
           return;
         }
+        if (active.completedMessages.size >= 128 || [...active.deltas.keys()].some(id => id !== item.id && !active.completedMessages.has(id))) return this.close(new Error('구독 메시지 순서 또는 개수 오류'));
         active.completedMessages.set(item.id, item.text);
-        active.text = this.plain ? active.text + item.text : item.text;
+        active.text = this.plain || this.broker ? active.text + item.text : item.text;
         if (active.text.length > 384 * 1024) return this.close(new Error('구독 응답 크기를 초과했습니다.'));
         if (this.broker || this.plain) {
           const streamed = active.deltas.get(item.id) ?? '';
@@ -253,6 +255,7 @@ export class TextWorker {
     } else if (m.method === 'turn/completed') {
       if (m.params?.turn?.status !== 'completed') return this.close(classifyCliFailure(m.params?.turn?.error));
       if (active.pending) return this.close(new Error('도구 실행 중 구독이 종료되었습니다.'));
+      if ([...active.deltas.keys()].some(id => !active.completedMessages.has(id))) return this.close(new Error('구독 응답이 완성되기 전에 종료되었습니다.'));
       try {
         const result = this.broker || this.plain ? { text: active.text, toolCalls: [], usage: active.usage } : parseIsolatedReply(active.text, { ...active.req, onEvent: e => { if (e.type === 'text') this.emitText(e.text); else active.req.onEvent?.(e); } }, active.usage);
         this.mark('completed');

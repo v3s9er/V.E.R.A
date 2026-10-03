@@ -471,6 +471,7 @@ export class AgentLoop {
         const preference = tuningInstructions(tuning);
         const result = await actualProvider.runAgent({
           ...request,
+          onTiming: cb.onProviderTiming,
           daybreakEnabled: options.daybreakEnabled === true,
           ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : tuning.reasoningEffort ? { reasoningEffort: tuning.reasoningEffort } : {}),
           ...(preference ? {

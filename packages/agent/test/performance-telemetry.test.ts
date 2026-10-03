@@ -68,5 +68,7 @@ test('transport milestones are bounded and never persist arbitrary payloads', ()
     assert.deepEqual(store.list(1)[0].transport, [{ transport: 'codex-text', stage: 'firstDelta', elapsedMs: 42, atMs: 55, reused: false }]);
     store.record({ ...trace(2), ok: false, transport: Array(200).fill(timing) });
     assert.equal(new TelemetryStore(home).list(1)[0].transport?.length, 128);
+    store.record({ ...trace(3), transport: [{ ...timing, transport: 'codex-native' } as any] });
+    assert.deepEqual(store.list(1)[0].transport, [{ transport: 'codex-native', stage: 'firstDelta', elapsedMs: 42, atMs: 55, reused: false }]);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

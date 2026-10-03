@@ -58,7 +58,7 @@
   .conversation-layout .chat-commandbar { padding: 12px 14px; }
   .conversation-layout .context-trigger { max-width: 145px; }
   .conversation-layout .chat-inputbar.composer-minimal { width: calc(100% - 20px); margin-bottom: 10px; padding: 8px; border-radius: 17px; }
-  .conversation-layout .composer-options { flex-basis: 100%; flex-wrap:nowrap; gap:1px; }
+  .conversation-layout .composer-options { flex-basis: 100%; flex-wrap:wrap; gap:1px; }
   .conversation-layout .composer-model-controls { min-width:65px; flex:1 1 90px; }
   .conversation-layout .composer-model-controls select { min-width:0; }
   .conversation-layout .composer-send-actions { width: 100%; justify-content: flex-end; }

@@ -2,15 +2,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
-import react from '@vitejs/plugin-react';
 import { chromium } from '@playwright/test';
+import { fixtureServer } from './fixture-server.mjs';
 
 const output = await mkdtemp(join(tmpdir(), 'mrrobot-calendar-ui-'));
-const server = await createServer({ configFile: false, root: fileURLToPath(new URL('..', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: {} } });
-await server.listen();
-const origin = 'http://127.0.0.1:'+server.httpServer.address().port;
+const server = await fixtureServer();
+const origin = server.origin;
 let browser; const errors = [];
 try {
   browser = await chromium.launch({ channel: 'msedge', headless: true });

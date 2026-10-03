@@ -18,6 +18,10 @@ try {
   const second = next(base, a.text);
   const b = await call(second);
   assert.equal(b.text, 'answer 2'); assert.equal(b.usage.promptTokens, 100);
+  const differentEnvironment = await pooledNativeCodex({ command: process.execPath,
+    prefixArgs: [fileURLToPath(new URL('./fixtures/native-app-server.mjs', import.meta.url))],
+    env: { ...process.env, MRROBOT_TEST_TRANSPORT_IDENTITY: 'different-environment' }, providerId: 'test', model: 'test', req: next(second, b.text) });
+  assert.equal(differentEnvironment.text, 'answer 1', 'environment boundary cannot reuse a previous CLI process or checkpoint');
   closeNativeWorkers();
   const c = await call(next(second, b.text));
   assert.equal(c.text, 'answer 3', 'resume exact persisted thread after worker shutdown');

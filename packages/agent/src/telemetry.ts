@@ -144,7 +144,7 @@ function normalizeTrace(input: unknown): RoutingTrace | undefined {
   for (const key of ['accountedTokens', 'cachedPromptTokens', 'cacheWritePromptTokens', 'reasoningTokens', 'firstTextMs', 'toolElapsedMs'] as const) if (validNumber(row[key])) trace[key] = row[key];
   if (row.cancelled === true) trace.cancelled = true;
   if (Array.isArray(row.transport)) trace.transport = row.transport.slice(0, 128).flatMap(t => {
-    if (!t || !['codex-text', 'codex-structured', 'codex-broker'].includes(t.transport)
+    if (!t || !['codex-text', 'codex-structured', 'codex-broker', 'codex-native'].includes(t.transport)
       || !PROVIDER_TIMING_STAGES.includes(t.stage) || !validNumber(t.elapsedMs) || !validNumber(t.atMs) || typeof t.reused !== 'boolean') return [];
     return [{ transport: t.transport, stage: t.stage, elapsedMs: t.elapsedMs, atMs: t.atMs, reused: t.reused }];
   });

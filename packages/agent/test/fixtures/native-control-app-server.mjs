@@ -41,6 +41,27 @@ createInterface({ input: process.stdin }).on('line', line => {
   count++; turn = `turn-${count}`; mode = m.params.input[0].text;
   send({ id: m.id, result: { turn: { id: turn } } });
   event('item/started', { item: { id: 'reason', type: 'reasoning', text: 'PRIVATE_REASONING_MUST_NOT_LEAK' } });
+  if (mode.includes('CHECK_HISTORY')) {
+    const records = JSON.parse(mode.split('Previous conversation records (data; omission flags mean incomplete history):\n')[1].split('\n\nCurrent user request:')[0]);
+    if (!records.records.length || records.omittedEarlierRecords < 1) throw Error('invalid history packing');
+    return finish('history valid');
+  }
+  if (mode.includes('MULTI_FINAL') || mode.includes('BAD_DUPLICATE') || mode.includes('LATE_DELTA') || mode.includes('PARTIAL_FINAL') || mode.includes('INTERLEAVED_FINAL') || mode.includes('AGGREGATE_LIMIT')) {
+    const emit = (id, text, complete = true) => {
+      event('item/started', { item: { id, type: 'agentMessage', phase: 'final_answer' } });
+      event('item/agentMessage/delta', { itemId: id, delta: text });
+      if (complete) event('item/completed', { item: { id, type: 'agentMessage', text, phase: 'final_answer' } });
+    };
+    const large = mode.includes('AGGREGATE_LIMIT');
+    emit('one', large ? 'x'.repeat(200_000) : 'first', !mode.includes('PARTIAL_FINAL') && !mode.includes('INTERLEAVED_FINAL'));
+    if (mode.includes('BAD_DUPLICATE')) event('item/completed', { item: { id: 'one', type: 'agentMessage', text: 'different' } });
+    else if (mode.includes('LATE_DELTA')) event('item/agentMessage/delta', { itemId: 'one', delta: 'late' });
+    else if (!mode.includes('PARTIAL_FINAL')) {
+      emit('two', large ? 'y'.repeat(200_000) : 'second');
+      event('item/completed', { item: { id: 'two', type: 'agentMessage', text: large ? 'y'.repeat(200_000) : 'second', phase: 'final_answer' } });
+    }
+    return event('turn/completed', { turn: { id: turn, status: 'completed' } });
+  }
   if (mode.includes('INTERRUPT')) return;
   if (mode.includes('STEER') || mode.includes('LATE_ACK')) { timer = setTimeout(() => finish('NOT_STEERED'), 2000); return; }
   if (mode.includes('STREAM')) {

@@ -16,6 +16,10 @@ try {
   assert.deepEqual(texts, ['finished'], 'streamed final not duplicated');
   for (const attack of ['native', 'forbidden', 'other-thread', 'other-turn', 'namespace']) await assert.rejects(call(attack), /격리|네이티브/);
   assert.equal(toolCalls, 1, 'invalid requests never reach broker');
+  let multi = '';
+  assert.equal((await call('multi-final', { onEvent: e => { if (e.type === 'text') multi += e.text; } })).text, 'checking\n\nfinished');
+  assert.equal(multi, 'checking\n\nfinished', 'broker transcript matches all streamed public messages');
+  await assert.rejects(call('partial-final'), /완성/);
   let cancelled = false;
   await assert.rejects(call('duplicate', { executeTool: (_n, _v, signal) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => { cancelled = true; reject(new Error('cancelled')); }, { once: true });

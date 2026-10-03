@@ -3,32 +3,41 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from '@playwright/test';
+import { fixtureServer } from './fixture-server.mjs';
 
-// Requires the local Vite fixture server. An isolated headless Edge profile is
+// Starts a private, ephemeral Vite fixture server. An isolated Edge profile is
 // used; no cookies, open user tabs, PC RPC endpoints or model accounts are used.
 const output = await mkdtemp(join(tmpdir(), 'mrrobot-ui-'));
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const server = await fixtureServer();
+let browser;
 const failures = [], errors = [];
 try {
-  for (const [width, height] of [[1280,800], [1248,650], [992,530], [820,650], [390,780], [390,430]]) {
+  browser = await chromium.launch({ channel: 'msedge', headless: true });
+  for (const [width, height] of [[1280,800], [1248,650], [992,530], [820,650], [390,780], [390,430], [320,480]]) {
     const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
     page.setDefaultTimeout(5000);
-    await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+    await page.route('**/*', server.route);
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto('http://127.0.0.1:5178/test/runtime-preview.html?embedded');
+    await page.goto(server.origin + '/test/runtime-preview.html?embedded');
     await page.getByLabel('대화 이름').waitFor();
     const screenshot = async name => page.screenshot({ path: join(output, `${width}x${height}-${name}.png`) });
     const check = async name => {
       const geometry = await page.evaluate(() => {
         const r = sel => { const el = document.querySelector(sel); const box = el?.getBoundingClientRect(); return box ? { x: box.x, y: box.y, right: box.right, bottom: box.bottom, height: box.height } : null; };
         const composer = document.querySelector('.chat-inputbar');
-        return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, input: r('.chat-input'), composer: r('.chat-inputbar'), actions: r('.composer-send-actions'), scroll: r('.chat-scroll'), clippedControls: composer.scrollHeight > composer.clientHeight + 1 };
+        const card = composer.getBoundingClientRect();
+        const outside = [...composer.querySelectorAll('button,select')].filter(el => {
+          const box = el.getBoundingClientRect();
+          return box.width && (box.left < card.left || box.right > card.right || box.bottom > card.bottom);
+        }).map(el => el.getAttribute('aria-label') || el.textContent);
+        return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, input: r('.chat-input'), composer: r('.chat-inputbar'), actions: r('.composer-send-actions'), scroll: r('.chat-scroll'), clippedControls: composer.scrollHeight > composer.clientHeight + 1, outside };
       });
       await screenshot(name);
       assert.ok(geometry.scrollWidth <= width + 1, `horizontal overflow ${JSON.stringify(geometry)}`);
       assert.ok(geometry.input && geometry.input.y >= 0 && geometry.input.bottom <= height + 1, `input hidden ${JSON.stringify(geometry)}`);
       assert.ok(geometry.composer.bottom <= height + 1, `composer hidden ${JSON.stringify(geometry)}`);
       assert.ok(!geometry.clippedControls && geometry.actions.bottom <= height + 1, `send/stop clipped ${JSON.stringify(geometry)}`);
+      assert.deepEqual(geometry.outside, [], 'all composer controls must remain inside their card');
       assert.ok(geometry.scroll.height >= 60, `messages squeezed ${JSON.stringify(geometry)}`);
     };
     try {
@@ -61,7 +70,7 @@ try {
     } catch (error) { await screenshot('failure'); failures.push(`${width}x${height}: ${error.message}`); }
     finally { await page.close(); }
   }
-} finally { await browser.close(); }
+} finally { await browser?.close(); await server.close(); }
 console.log(`Screenshots: ${output}`);
 assert.deepEqual(errors, [], 'browser runtime errors');
 assert.deepEqual(failures, [], 'UI regressions');

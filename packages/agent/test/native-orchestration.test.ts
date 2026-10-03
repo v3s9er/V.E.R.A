@@ -12,6 +12,7 @@ import { waitForCliRetirements } from '../src/ai/cli-process-retirement.js';
 import { ChatSession } from '../src/server/chat.js';
 import { AgentLoop } from '../src/ai/loop.js';
 import type { NativeAgentRequest, Turn } from '../src/ai/provider.js';
+import { nativeHistory } from '../src/ai/native-history.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/native-control-app-server.mjs', import.meta.url));
 async function sandbox(fn: (base: NativeAgentRequest, call: (req: NativeAgentRequest) => ReturnType<typeof pooledNativeCodex>) => Promise<void>) {
@@ -79,6 +80,54 @@ for (const mode of ['STREAM', 'STREAM_NO_START']) test(`public text streams befo
   const result = await pending;
   assert.equal(text, result.text); assert.equal(text.includes('PRIVATE_REASONING'), false);
   console.log(`[synthetic ${mode}] first text ${Math.round(first - started)}ms; complete ${Math.round(performance.now() - started)}ms`);
+}));
+
+test('multiple final messages match streamed output, persisted history and warm follow-up', () => sandbox(async (base, call) => {
+  let text = ''; const timings: any[] = [];
+  const req = { ...base, session: { ...base.session!, input: 'MULTI_FINAL' }, onText: (t: string) => text += t, onTiming: (t: any) => timings.push(t) };
+  const result = await call(req);
+  assert.equal(result.text, 'first\n\nsecond'); assert.equal(text, result.text);
+  const history: Turn[] = [{ role: 'user', content: 'MULTI_FINAL' }, { role: 'assistant', content: result.text }];
+  const followTimings: any[] = [];
+  assert.equal((await call({ ...base, session: { ...base.session!, history, input: 'next' }, onTiming: t => followTimings.push(t) })).text, 'answer 2');
+  assert.deepEqual(timings.map(t => t.stage), ['queue', 'retirement', 'worker', 'initialized', 'thread', 'submitted', 'accepted', 'firstDelta', 'firstText', 'completed']);
+  assert.ok(timings.every((t, i) => t.transport === 'codex-native' && (!i || t.elapsedMs >= timings[i - 1].elapsedMs)));
+  assert.equal(followTimings.find(t => t.stage === 'worker').reused, true);
+  assert.ok(!JSON.stringify(timings).includes('first\\n'));
+}));
+
+for (const mode of ['BAD_DUPLICATE', 'LATE_DELTA', 'PARTIAL_FINAL', 'INTERLEAVED_FINAL', 'AGGREGATE_LIMIT']) test(`native malformed or incomplete output fails closed: ${mode}`, () => sandbox(async (base, call) => {
+  const timings: any[] = [];
+  await assert.rejects(call({ ...base, session: { ...base.session!, input: mode }, onTiming: t => timings.push(t) }), /네이티브/);
+  assert.equal(timings.at(-1).stage, 'failed');
+  assert.equal(timings.some(t => t.stage === 'completed'), false);
+  assert.equal((await call(base)).text, 'answer 1', 'failed partial output must not be checkpointed');
+}));
+
+test('history packing preserves valid records, newest groups, tool pairs and explicit omissions', () => {
+  const history: Turn[] = [{ role: 'user', content: 'old'.repeat(20_000) }, { role: 'assistant', content: 'old reply' },
+    { role: 'user', content: 'latest request' }, { role: 'assistant', content: '', toolCalls: [{ id: 't', name: 'read', args: '{}' }] },
+    { role: 'tool', content: '', toolResults: [{ id: 't', name: 'read', content: 'result' }] }, { role: 'assistant', content: 'recent reply' }];
+  const packed = nativeHistory(history); assert.ok(packed.length <= 48_000);
+  assert.deepEqual(JSON.parse(packed), { omittedEarlierRecords: 2, records: history.slice(2) });
+  const huge: Turn[] = [{ role: 'user', content: `HEAD-${'한😀'.repeat(30_000)}-TAIL` }, { role: 'assistant', content: 'recent answer' }];
+  for (const limit of [512, 1024, 48_000]) {
+    const p = nativeHistory(huge, limit); assert.ok(p.length <= limit);
+    const value = JSON.parse(p); assert.equal(value.incompleteRecords, true);
+    assert.match(value.records[0].content, /HEAD/); assert.match(value.records[0].content, /TAIL/);
+    assert.ok([...value.records[0].content as string].every(c => c.codePointAt(0)! < 0xd800 || c.codePointAt(0)! > 0xdfff), 'no broken Unicode code points');
+    assert.equal(value.records.at(-1).content, 'recent answer');
+  }
+  assert.deepEqual(JSON.parse(nativeHistory([])), { omittedEarlierRecords: 0, records: [] });
+});
+
+test('long history is sent to native transport as valid data records', () => sandbox(async (base, call) => {
+  const history: Turn[] = [{ role: 'user', content: 'old'.repeat(20_000) }, { role: 'assistant', content: 'old' }, { role: 'user', content: 'recent' }, { role: 'assistant', content: 'recent reply' }];
+  assert.equal((await call({ ...base, session: { ...base.session!, history, input: 'CHECK_HISTORY' } })).text, 'history valid');
+}));
+
+test('throwing native timing consumer cannot break an otherwise valid run', () => sandbox(async (base, call) => {
+  assert.equal((await call({ ...base, onTiming: () => { throw Error('UI disconnected'); } })).text, 'answer 1');
 }));
 
 for (const mode of ['LIVE_STEER', 'LATE_ACK']) test(`active-turn steering commits once and preserves warm session: ${mode}`, () => sandbox(async (base, call) => {

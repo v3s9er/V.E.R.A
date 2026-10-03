@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -46,6 +46,7 @@
     "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts && tsx packages/web/test/model-catalog.test.ts",
     "test:agent-runtime": "tsx --test packages/agent/test/agent-runtime.test.ts packages/agent/test/projects.test.ts",
     "test:runtime-ui": "node packages/web/test/runtime-ui.mjs",
+    "test:ui-live": "node packages/web/test/runtime-ui.mjs && node packages/web/test/model-picker-ui.mjs && node packages/web/test/calendar-layout.mjs",
     "test:session-events": "tsx packages/agent/test/cli-session-events.test.ts && tsx --test packages/agent/test/cli-plain-text.test.ts",
     "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts",
     "test:coordination": "node --import tsx --test packages/agent/test/subagents.test.ts packages/agent/test/coordination-loop.test.ts packages/agent/test/council.test.ts packages/agent/test/evidence.test.ts packages/agent/test/mcp-efficiency.test.ts packages/agent/test/context-packing.test.ts packages/agent/test/conversation-transcripts.test.ts",

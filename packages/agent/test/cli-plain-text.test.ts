@@ -24,7 +24,7 @@ test('plain isolated text streams immediately, completes the suffix once, and re
   assert.equal((await call({...req,system:'new permissions',turns:next})).text,'답변 1: 안녕 👋');
   let fallback='';const b=await call({turns:[{role:'user',content:'NO_DELTA'}],onEvent:e=>{if(e.type==='text')fallback+=e.text;}});assert.equal(fallback,b.text);
   let multi='';const c=await call({turns:[{role:'user',content:'MULTI'}],onEvent:e=>{if(e.type==='text')multi+=e.text;}});assert.equal(multi,c.text);assert.equal(multi,'답변 1: 안녕 👋next!');
-  for(const mode of ['ATTACK','MISMATCH','FOREIGN','FAIL'])await assert.rejects(call({turns:[{role:'user',content:mode}]}));
+  for(const mode of ['ATTACK','MISMATCH','FOREIGN','FAIL','PARTIAL'])await assert.rejects(call({turns:[{role:'user',content:mode}]}));
   await assert.rejects(call({turns:[{role:'user',content:'WAIT'}],signal:AbortSignal.timeout(250)}),/중지/);
   closeTextWorkers();await waitForCliRetirements(process.env);
   await call({promptCacheKey:'reset-from',system:'DENY_UNSUBSCRIBE'});

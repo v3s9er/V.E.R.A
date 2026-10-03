@@ -120,7 +120,7 @@ export interface ChatRequest {
 
 export const PROVIDER_TIMING_STAGES = ['queue', 'retirement', 'worker', 'initialized', 'skills', 'thread', 'submitted', 'accepted', 'firstDelta', 'firstText', 'completed', 'failed'] as const;
 export interface ProviderTiming {
-  transport: 'codex-text' | 'codex-structured' | 'codex-broker';
+  transport: 'codex-text' | 'codex-structured' | 'codex-broker' | 'codex-native';
   stage: typeof PROVIDER_TIMING_STAGES[number];
   /** Monotonic milliseconds since entry into this provider call, including queue. */
   elapsedMs: number;
@@ -135,6 +135,8 @@ export interface NativeSteeringControl {
 }
 
 export interface NativeAgentRequest {
+  /** Host-owned metadata callback; never accepts provider text or arguments. */
+  onTiming?: (timing: ProviderTiming) => void;
   daybreakEnabled?: boolean;
   /** Host-only capability, never deserialized from remote requests. */
   hostTools?: NativeHostTools;

@@ -17,6 +17,11 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (mode.includes('model-unavailable')) return send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: "The 'fixture' model is not supported with this account. private-value" } } } });
     if (mode.includes('quota-unavailable')) return send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Usage limit exceeded: private-value' } } } });
     if (mode.includes('native')) return send({ method: 'item/started', params: { threadId, turnId, item: { type: 'commandExecution' } } });
+    if (mode.includes('multi-final') || mode.includes('partial-final')) {
+      send({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'preface', delta: 'checking\n\n' } });
+      if (mode.includes('partial-final')) return send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+      send({ method: 'item/completed', params: { threadId, turnId, item: { type: 'agentMessage', id: 'preface', text: 'checking\n\n' } } });
+    }
     const p = { threadId, turnId, callId: 'call-1', namespace: null, tool: 'public_search', arguments: { query: 'fixture' } };
     if (mode.includes('other-thread')) p.threadId = 'other';
     if (mode.includes('other-turn')) p.turnId = 'other';
