@@ -38,7 +38,7 @@ export function KnowledgeEditor({ canWrite }: { canWrite: boolean }) {
     finally { setSaving(false); }
   };
   return <details className="panel" style={{ marginTop: 12 }}><summary>프로젝트 지식 · 온톨로지와 출처</summary>
-    <p className="panel-hint">유형·소속·의존 관계를 연결하고 충돌을 검사합니다. 추론은 저장된 사실에서 나온 결론일 뿐 검증된 원본이나 접근 권한이 아닙니다. 사용자 정의 관계는 저장·검색만 합니다.</p>
+    <p className="panel-hint">유형·소속·의존 관계를 연결하고 충돌을 검사합니다. 선택한 프로젝트의 package.json·workspace 패키지 선언은 작업할 때 자동으로 읽습니다. 패키지 이름으로 조회하면 저장한 지식과 함께 확인할 수 있습니다. 문서·비밀 파일은 자동 수집하지 않습니다. 추론은 선언에서 나온 결론일 뿐 실행 검증이나 접근 권한이 아닙니다.</p>
     <div className="form-grid">
       <Field label="사용 범위"><Select value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">개인 공통</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select></Field>
       <Field label="대상"><Input value={subject} maxLength={200} onChange={event => setSubject(event.target.value)} placeholder="프로젝트 A" /></Field>

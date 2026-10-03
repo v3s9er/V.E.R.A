@@ -63,26 +63,35 @@ export class MemoryStore {
     return true;
   }
 
-  inspect(query: string, scope: Pick<MemoryItem, 'workspaceId' | 'conversationId'> = {}): KnowledgeResult {
+  inspect(query: string, scope: Pick<MemoryItem, 'workspaceId' | 'conversationId'> = {}, observed: readonly MemoryItem[] = []): KnowledgeResult {
     const started = performance.now();
     const cacheKey = JSON.stringify([scope.workspaceId, scope.conversationId, query.slice(0, 16000)]);
-    const cached = this.knowledgeCache.get(cacheKey);
+    // Fresh project observations are ephemeral and must never share the saved-memory cache.
+    const cached = observed.length ? undefined : this.knowledgeCache.get(cacheKey);
     if (cached) {
       this.knowledgeCache.delete(cacheKey); this.knowledgeCache.set(cacheKey,cached);
       const result = structuredClone(cached);
       result.metrics.retrievalMs = Math.round((performance.now()-started)*1000)/1000;
       return result;
     }
-    const scoped = this.items.filter(item => !item.supersededBy && (!item.workspaceId || item.workspaceId === scope.workspaceId)
+    const scoped = [...this.items, ...observed].filter(item => !item.supersededBy && (!item.workspaceId || item.workspaceId === scope.workspaceId)
       && (!item.conversationId || item.conversationId === scope.conversationId));
     const result = retrieveKnowledge(scoped, query);
-    if (this.knowledgeCache.size >= 24) this.knowledgeCache.delete(this.knowledgeCache.keys().next().value!);
-    this.knowledgeCache.set(cacheKey,result);
+    if (!observed.length) {
+      if (this.knowledgeCache.size >= 24) this.knowledgeCache.delete(this.knowledgeCache.keys().next().value!);
+      this.knowledgeCache.set(cacheKey,result);
+    }
     return structuredClone(result);
   }
 
-  retainedContext(query: string, scope: Pick<MemoryItem, 'workspaceId' | 'conversationId'> = {}): KnowledgeResult {
-    const result = this.inspect(query,scope);
+  retainedContext(query: string, scope: Pick<MemoryItem, 'workspaceId' | 'conversationId'> = {}, options: { observed?: readonly MemoryItem[]; previousUserQuery?: string } = {}): KnowledgeResult {
+    let result = this.inspect(query,scope,options.observed);
+    // Only explicit referential follow-ups with no current match may use the last
+    // user request. Never mine assistant guesses or concatenate the entire history.
+    if (!result.metrics.asserted && query.length <= 500 && /^(?:(?:그럼 |그러면 )?(?:그거|그것|이거|이것|해당 (?:프로젝트|서비스|패키지)|그 프로젝트|그 서비스|그 패키지)|(?:it|that)\b)/i.test(query.trim()) && options.previousUserQuery) {
+      query = `${query}\n${options.previousUserQuery.slice(0, 1600)}`;
+      result = this.inspect(query,scope,options.observed);
+    }
     // Relation facts already have a compact proof-carrying representation.
     const plain = this.context(query,12,scope,true);
     const plainLines: string[] = [];

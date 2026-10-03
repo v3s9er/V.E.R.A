@@ -45,6 +45,7 @@ import { desktopCoordinator } from '../computer/desktop-session.js';
 import { ModelRouter } from '../ai/router.js';
 import { ConversationStore } from '../conversations.js';
 import { MemoryStore } from '../memory.js';
+import { readProjectKnowledge } from '../project-knowledge.js';
 import { TelemetryStore } from '../telemetry.js';
 import { LocalTuningDatasets } from '../tuning-datasets.js';
 import { activeTuningProfile, getTuningCapabilities, normalizeProviderTuningSettings, resolveModelTuning } from '../ai/model-tuning.js';
@@ -91,7 +92,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.8';
+export const VERSION = '0.6.9';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -2405,9 +2406,15 @@ export class AgentServer {
       return { ok };
     });
     h.set('memory.list', () => this.memory.list());
-    h.set('memory.inspect', (params) => {
+    h.set('memory.inspect', async (params) => {
       const body = p(params);
-      return this.memory.inspect(str(body.query), { workspaceId: typeof body.workspaceId === 'string' ? body.workspaceId : undefined, conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined });
+      const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : undefined;
+      const workspace = workspaceId ? this.config.workspaces.find(w => w.id === workspaceId) : undefined;
+      if (workspaceId && !workspace) throw new Error('프로젝트를 찾을 수 없습니다.');
+      const observed = workspace ? await readProjectKnowledge(workspace.path, workspace.id) : { facts: [], partial: false };
+      const result = this.memory.inspect(str(body.query), { workspaceId, conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined }, observed.facts);
+      result.metrics.truncated ||= observed.partial;
+      return result;
     });
     h.set('memory.add', (params, client): MemoryItem => {
       assertContentWrite(client);
@@ -2588,7 +2595,23 @@ export class AgentServer {
         const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
-        const knowledge = isolation ? undefined : this.memory.retainedContext(text, { workspaceId: runWorkspaceId, conversationId });
+        const history = this.conversations.turns(conversationId);
+        let observed = !isolation && workspace && runWorkspaceId
+          ? await readProjectKnowledge(workspace.path, runWorkspaceId) : { facts: [], partial: false };
+        session.signal()?.throwIfAborted();
+        const knowledgeScope = { workspaceId: runWorkspaceId, conversationId };
+        const hasKnowledge = !isolation && (observed.facts.length > 0 || this.memory.list().some(m => !m.supersededBy
+          && (!m.workspaceId || m.workspaceId === runWorkspaceId) && (!m.conversationId || m.conversationId === conversationId)));
+        const inspectKnowledge = (query: string, previousUserQuery?: string) => {
+          const result = this.memory.retainedContext(query, knowledgeScope, { observed: observed.facts, previousUserQuery });
+          if (observed.partial && result.context) {
+            result.context += '\n[Project metadata is partial; do not assume completeness. Recheck current files for changes.]';
+            result.metrics.truncated = true;
+            result.metrics.contextBytes = Buffer.byteLength(result.context);
+          }
+          return result;
+        };
+        const knowledge = isolation ? undefined : inspectKnowledge(text, history.filter(t => t.role === 'user').at(-1)?.content);
         knowledgeMetrics = knowledge?.metrics;
         const memoryContext = knowledge?.context ?? '';
         if (knowledge && (knowledge.metrics.asserted || knowledge.metrics.conflicts)) sendRunEvent('chat.status', { conversationId, status: `지식 검사 · 사실 ${knowledge.metrics.asserted} · 추론 ${knowledge.metrics.inferred} · 미해결 충돌 ${knowledge.metrics.conflicts}${knowledge.metrics.truncated ? ' · 일부만 조회' : ''}` });
@@ -2596,10 +2619,10 @@ export class AgentServer {
           recovery ? `Host recovery warning: ${recovery.message}` : '',
           !isolation && workspace ? `현재 프로젝트: ${workspace.name}\n작업 폴더: ${workspace.path}\n${workspace.instructions ? `사용자가 저장한 프로젝트 지침 (접근 권한을 확대하지 않음):\n${workspace.instructions}` : ''}` : '',
           conversation.summary ? `이전 대화 압축 요약:\n${conversation.summary}` : '',
-          memoryContext ? `사용자가 저장한 장기 기억 (참고 자료이며 현재 원본의 검증 결과가 아닙니다. 원본·도구 결과와 충돌하면 원본을 다시 확인하고 구분하세요):\n${memoryContext}` : '',
+          memoryContext ? `범위 내 지식: 사용자 저장 주장과 호스트가 이번 요청에 읽은 프로젝트 manifest 선언. 선언 관계만 묻는 읽기 전용 질문은 이 근거가 충분하면 중복 파일 조회 없이 답하세요. 실행 동작의 검증이나 접근 권한은 아닙니다. 실제 수정 직전·충돌·파일 변경 후에는 원본을 다시 확인하고 출처를 구분하세요:\n${memoryContext}` : '',
         ].filter(Boolean).join('\n\n');
         const result = await this.loop.run(
-          this.conversations.turns(conversationId),
+          history,
           text,
           {
             signal: session.signal(),
@@ -2647,6 +2670,15 @@ export class AgentServer {
             reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : conversation.reasoningEffort,
             daybreakEnabled: conversation.daybreakEnabled === true,
             context: retained,
+            knowledgeLookup: !hasKnowledge ? undefined : async (query: string) => {
+              session.signal()?.throwIfAborted();
+              // A long-running task can edit manifests. Tool-time reads must not
+              // replay the run-start graph as current evidence.
+              if (workspace && runWorkspaceId) observed = await readProjectKnowledge(workspace.path, runWorkspaceId);
+              session.signal()?.throwIfAborted();
+              const result = inspectKnowledge(query);
+              return result.context || '관련 지식 없음. 알려지지 않은 것이며 대상이 없거나 안전하다는 증거가 아닙니다. 필요한 원본을 허용된 도구로 확인하세요.';
+            },
             permissionMode: effectivePermissionMode,
             routing: conversationRouting,
             workspacePath: isolation ? undefined : workspace?.path,

@@ -45,8 +45,45 @@ project, conversation, subject and predicate as the active original.
 
 The engine does not automatically scrape chats, import private documents, persist
 model guesses, rewrite an uploaded source, or convert AGENTS.md instructions into
-facts. Users must save the knowledge they want retained. Image character-reading
+facts. Users must save the general knowledge they want retained. Image character-reading
 errors are a separate problem; ontology does not fix pixels it has not observed.
+
+## Project work integration (0.6.9)
+
+For a selected local npm project, the app reads `package.json` and supported
+workspace package manifests on each request. It derives ephemeral `located_in`,
+`part_of` and internal `depends_on` assertions from package names and dependency
+keys. Sources include the relative manifest path and SHA-256. Dependency values,
+scripts, environment files and document contents are not added to the graph.
+These are declarations, not proof of runtime behavior: optional/development/peer
+dependencies indicate potential change impact, and common membership alone does
+not prove dependency. Other ecosystems still need explicitly saved facts.
+
+The reader is bounded to 64 manifests of 128 KiB each and 256 directory entries.
+Only literal workspace paths and a trailing `/*` are supported; unsupported globs,
+invalid files and truncated reads are marked partial. Paths stay under the
+selected project; symlinks/junctions, hardlinked manifests and observed file
+identity changes are rejected. No package scripts run. Observations remain in
+memory for the request and never overwrite the user's saved claims. Contradictory
+saved locations remain unresolved. The knowledge inspector includes these
+declarations when a project is selected.
+
+An explicit referential follow-up such as “그거 바꾸면?” may use the immediately
+previous user request as a bounded retrieval hint when the current query has no
+match. It never mines assistant guesses or loads the entire conversation graph.
+New unrelated questions and greetings do not trigger that fallback.
+
+The host-only `knowledge_lookup` tool lets the normal API/native main agent query
+another entity during work, within the same project/conversation scope. It refreshes
+manifest observations when invoked, validates query-only input and permits at most
+six lookups per run. It cannot change scope, save facts or grant access. Native
+read-only execution may use it; isolated Discord execution never receives private
+knowledge or this callback. Simple replies remain tool-free, and text-only models
+are not switched to another provider just to obtain the tool.
+
+Initial telemetry counts describe the initial injected graph, not the cumulative
+results of later lookups. Ordinary tool events record later lookups. Additional
+context has an input-token cost; usefulness and latency must be measured.
 
 ## Bounds and observability
 

@@ -384,7 +384,7 @@ class NativeWorker {
       this.close(new Error('연결 도구의 대화·권한·중복 요청 검증에 실패했습니다.')); return;
     }
     a.toolCalls.add(p.callId); a.pendingTool = p.callId;
-    this.status(p.tool === 'evidence_image' ? '원본 이미지 확인 중' : p.tool === 'evidence_text' ? '원본 문서 확인 중' : p.tool === 'evidence_python_syntax' ? '코드 문법 검사 중' : p.tool === 'evidence_python_values' ? '값·연산 검산 중' : p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
+    this.status(p.tool === 'evidence_image' ? '원본 이미지 확인 중' : p.tool === 'evidence_text' ? '원본 문서 확인 중' : p.tool === 'evidence_python_syntax' ? '코드 문법 검사 중' : p.tool === 'evidence_python_values' ? '값·연산 검산 중' : p.tool === 'knowledge_lookup' ? '프로젝트 지식 조회 중' : p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
     const timeoutMs = a.req.hostTools.timeoutMs?.(p.tool) ?? 25_000;
     const timer = setTimeout(() => this.close(new Error('연결 도구가 응답하지 않아 중단했습니다.')), Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(90_000, timeoutMs)) : 25_000);
     a.toolTimer = timer;

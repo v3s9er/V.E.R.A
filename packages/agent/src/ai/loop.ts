@@ -1,5 +1,6 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
 import { AdaptiveExecution } from './adaptive-execution.js';
+import { KNOWLEDGE_TOOL, KNOWLEDGE_GUIDANCE, knowledgeQuery } from './knowledge-tool.js';
 import { Council, councilLimits, untilAborted, type CouncilLimits, type CouncilOutcome } from './council.js';
 import { projectGuidance } from './project-guidance.js';
 import { createEvidenceTools, EVIDENCE_GUIDANCE, namedPngSources, needsSourceEvidence } from './evidence.js';
@@ -173,6 +174,8 @@ export interface RunOptions {
   providerModel?: string;
   reasoningEffort?: ReasoningEffort;
   context?: string;
+  /** Server-owned read-only lookup, already scoped to the current project/ticket. */
+  knowledgeLookup?: (query: string) => string | Promise<string>;
   permissionMode?: PermissionMode;
   /** Server-only Discord grant; ordinary RPC input cannot set this. */
   trustedPermissionOverride?: boolean;
@@ -353,6 +356,16 @@ export class AgentLoop {
     const semanticDesktop = !options.isolation && extraTools.some(tool => tool.name === 'orca.computer.observe');
     const rawDesktopTools = new Set(['screenshot', 'get_screen_size', 'mouse_move', 'mouse_click', 'mouse_scroll', 'type_text', 'key_press']);
     const tools = options.isolation?.tools ?? [...toolsFor(userMessage).filter(tool => !semanticDesktop || !rawDesktopTools.has(tool.name)).map(neutralTool), ...extraTools];
+    const knowledgeEnabled = !options.isolation && !!options.knowledgeLookup;
+    let knowledgeCalls = 0;
+    const lookupKnowledge = async (input: unknown): Promise<string> => {
+      runSignal.throwIfAborted();
+      if (!knowledgeEnabled) throw new Error('현재 실행에서는 개인 지식을 조회할 수 없습니다.');
+      const query = knowledgeQuery(input);
+      if (++knowledgeCalls > 6) throw new Error('이 작업의 지식 조회 6회를 사용했습니다. 확보한 근거로 답하거나 확인이 필요한 부분을 안내하세요.');
+      return options.knowledgeLookup!(query);
+    };
+    if (knowledgeEnabled && adaptive.depth !== 'direct' && provider?.supportsTools) tools.push(KNOWLEDGE_TOOL);
     const repeatedCalls = new Map<string, number>();
     let previousToolRound = '';
     let consecutiveNoProgressRounds = 0;
@@ -796,6 +809,7 @@ export class AgentLoop {
             let toolContent: string;
             try {
               if (!allowedTools.some((tool) => tool.name === call.name)) toolContent = JSON.stringify({ error: `${call.name} is not available inside this solver sandbox` });
+              else if (call.name === KNOWLEDGE_TOOL.name && knowledgeEnabled) toolContent = await lookupKnowledge(input);
               else toolContent = await this.executor.execute(call.name, input, cb.confirm, permissionMode, runSignal, {
                 scopeKey: options.cacheKey ? `${options.cacheKey}:agent:${node.id}` : undefined,
                 trustedPermissionOverride: options.trustedPermissionOverride,
@@ -913,14 +927,15 @@ export class AgentLoop {
         // remains full-access-only here; helpers never inherit this capability.
         const mcpTools = nativePermission === 'full' && actualProvider.type === 'codex-cli'
           ? extraTools.filter(t => t.name === 'mcp.discover' || t.name === 'mcp.call' || t.name === 'mcp.result').map(t => ({ ...t, name: t.name.replace('.', '_') })) : [];
-        const availableHostTools = [...desktopTools?.tools ?? [], ...helperTools, ...mcpTools, ...evidence?.tools ?? []];
+        const availableHostTools = [...desktopTools?.tools ?? [], ...helperTools, ...mcpTools, ...evidence?.tools ?? [], ...(knowledgeEnabled ? [KNOWLEDGE_TOOL] : [])];
         const hostTools: NativeHostTools | undefined = availableHostTools.length ? {
           tools: availableHostTools,
-          authorize: (name, mode) => evidence?.tools.some(t => t.name === name) || helpersEnabled && isCoordinationTool(name) ? mode !== 'ask' : mode === 'full',
+          authorize: (name, mode) => name === KNOWLEDGE_TOOL.name && knowledgeEnabled || evidence?.tools.some(t => t.name === name) || helpersEnabled && isCoordinationTool(name) ? mode !== 'ask' : mode === 'full',
           timeoutMs: name => name.startsWith('mcp_') ? 75000 : 25000,
           execute: async (name, input, signal) => {
             runSignal.throwIfAborted(); signal.throwIfAborted();
             cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
+            if (name === KNOWLEDGE_TOOL.name && knowledgeEnabled) return { success: true, contentItems: [{ type: 'inputText', text: await lookupKnowledge(input) }] };
             if (evidence?.tools.some(t => t.name === name)) return evidence.execute(name, input, signal);
             if (helpersEnabled && isCoordinationTool(name)) return { success: true, contentItems: [{ type: 'inputText', text: await executeCoordination(coordinatorFor(actualProvider), name, input, signal) }] };
             if (mcpTools.some(t => t.name === name)) {
@@ -937,11 +952,11 @@ export class AgentLoop {
         } : undefined;
         let result: ProviderResult;
         try { result = await budgetedNativeAgent(actualProvider, {
-          prompt: identifiedSystem(prompt + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
+          prompt: identifiedSystem(prompt + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : '') + (knowledgeEnabled ? KNOWLEDGE_GUIDANCE : ''), actualProvider),
           ...(options.cacheKey && options.nativeSessionDirectory ? { session: {
             key: options.cacheKey, directory: options.nativeSessionDirectory,
             history: sessionHistory, input, context: retainedContext,
-            instructions: identifiedSystem(NATIVE_AGENT_PROMPT + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (desktopEnabled ? DESKTOP_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : ''), actualProvider),
+            instructions: identifiedSystem(NATIVE_AGENT_PROMPT + (evidence ? '\n' + EVIDENCE_GUIDANCE : '') + (desktopEnabled ? DESKTOP_GUIDANCE : '') + (helpersEnabled ? COORDINATION_GUIDANCE : '') + (knowledgeEnabled ? KNOWLEDGE_GUIDANCE : ''), actualProvider),
           } } : {}),
           cwd: options.workspacePath!,
           permissionMode: nativePermission,
@@ -1353,7 +1368,7 @@ export class AgentLoop {
             blockedRepeats++;
             content = JSON.stringify({ error: 'same tool call repeated; change the approach or finish with the available evidence' });
           } else {
-            content = helpersEnabled && isCoordinationTool(call.name) ? await executeCoordination(coordinatorFor(actualProvider), call.name, input, runSignal) : options.isolation ? await options.isolation.execute(call.name, input, runSignal) : await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, runSignal, {
+            content = helpersEnabled && isCoordinationTool(call.name) ? await executeCoordination(coordinatorFor(actualProvider), call.name, input, runSignal) : options.isolation ? await options.isolation.execute(call.name, input, runSignal) : call.name === KNOWLEDGE_TOOL.name && knowledgeEnabled ? await lookupKnowledge(input) : await this.executor.execute(call.name, input, cb.confirm, options.permissionMode, runSignal, {
               trustedPermissionOverride: options.trustedPermissionOverride,
               workspaceRoot: options.workspacePath,
               scopeKey: options.cacheKey,
