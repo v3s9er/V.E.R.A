@@ -29,11 +29,11 @@ export async function readProjectKnowledge(workspacePath: string, workspaceId: s
     const path = join(directory, 'package.json');
     try {
       if (!await safePath(path)) { output.partial = true; return; }
-      const before = await lstat(path);
-      if (!before.isFile() || before.nlink !== 1 || before.size > MAX_BYTES) { output.partial = true; return; }
+      const before = await lstat(path, { bigint: true });
+      if (!before.isFile() || before.nlink !== 1n || before.size > MAX_BYTES) { output.partial = true; return; }
       const file = await open(path, 'r');
       try {
-        const stat = await file.stat();
+        const stat = await file.stat({ bigint: true });
         if (!stat.isFile() || stat.size > MAX_BYTES || stat.ino !== before.ino || stat.dev !== before.dev) { output.partial = true; return; }
         // Fixed-size read remains bounded even if another process grows the file.
         const bytes = Buffer.alloc(MAX_BYTES + 1);
@@ -44,13 +44,13 @@ export async function readProjectKnowledge(workspacePath: string, workspaceId: s
           count += next.bytesRead;
         }
         if (count > MAX_BYTES) { output.partial = true; return; }
-        const after = await lstat(path);
-        if (!await safePath(path) || !after.isFile() || after.nlink !== 1 || after.ino !== stat.ino || after.dev !== stat.dev
-          || after.mtimeMs !== stat.mtimeMs || after.size !== count) { output.partial = true; return; }
+        const after = await lstat(path, { bigint: true });
+        if (!await safePath(path) || !after.isFile() || after.nlink !== 1n || after.ino !== stat.ino || after.dev !== stat.dev
+          || after.mtimeNs !== stat.mtimeNs || after.size !== BigInt(count)) { output.partial = true; return; }
         const body = bytes.subarray(0, count);
         const data: unknown = JSON.parse(body.toString('utf8'));
         if (!data || typeof data !== 'object' || Array.isArray(data) || !packageName((data as any).name)) { output.partial = true; return; }
-        return { name: (data as any).name, path: relative(root, path).split(sep).join('/'), digest: createHash('sha256').update(body).digest('hex'), at: stat.mtimeMs, data: data as Record<string, any> };
+        return { name: (data as any).name, path: relative(root, path).split(sep).join('/'), digest: createHash('sha256').update(body).digest('hex'), at: Number(stat.mtimeMs), data: data as Record<string, any> };
       } finally { await file.close(); }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') output.partial = true; return; }
   };

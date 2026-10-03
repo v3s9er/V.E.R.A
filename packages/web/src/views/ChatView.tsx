@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
-import { resolveProjectWorkspace, supportsDaybreak } from '@mr-robot/shared';
+import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
@@ -205,6 +205,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const busyRef = useRef(false);
   const executionConfigSavingRef = useRef(false);
   const runningConversationRef = useRef<string | null>(null);
+  const requestOwnership = useRef(new ChatRequestOwnership());
+  const cancellationWatches = useRef(new Map<string, AbortController>());
   const toolCounter = useRef(0);
   const dragDepth = useRef(0);
   const deltaBuffer = useRef<{ conversationId: string; text: string } | null>(null);
@@ -251,6 +253,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       deltaBuffer.current = null;
       for (const timer of ownedTimers.current) window.clearTimeout(timer);
       ownedTimers.current.clear();
+      requestOwnership.current.clear();
+      for (const controller of cancellationWatches.current.values()) controller.abort();
+      cancellationWatches.current.clear();
       const recognition = recognitionRef.current;
       recognitionRef.current = null;
       if (recognition) {
@@ -304,6 +309,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     }
 
     busyRef.current = true;
+    const requestToken = requestOwnership.current.begin(conversation.id);
+    cancellationWatches.current.get(conversation.id)?.abort();
+    cancellationWatches.current.delete(conversation.id);
+    let stillRunning = false;
     runningConversationRef.current = conversation.id;
     setBusy(true);
     setActivity([]);
@@ -324,7 +333,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         permissionMode: conversation.permissionMode,
         tokenPolicy: client.canUseAuditOnly ? conversation.tokenPolicy ?? 'adaptive' : 'adaptive',
       }, 10 * 60_000) as { ok?: boolean; error?: string; text?: string; route?: RouteInfo };
-      if (selectedId.current !== conversation.id) return;
+      if (selectedId.current !== conversation.id || !requestOwnership.current.owns(conversation.id, requestToken)) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
       setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
       if (result.route) setRoute(result.route);
@@ -337,7 +346,16 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         });
       }
     } catch (error) {
-      if (selectedId.current !== conversation.id) return;
+      if (selectedId.current !== conversation.id || !requestOwnership.current.owns(conversation.id, requestToken)) return;
+      const snapshot = await client.call('chat.runs', {}, 5000).catch(() => null) as ChatRunState[] | null;
+      if (selectedId.current !== conversation.id || !requestOwnership.current.owns(conversation.id, requestToken)) return;
+      const active = snapshot?.find(run => run.conversationId === conversation.id && run.running);
+      if (active || snapshot === null) {
+        stillRunning = true;
+        if (active) setRunProgress(active);
+        setComposerError(active ? '응답 연결이 끊겼지만 PC 작업은 계속 실행 중입니다. 중복 전송하지 말고 완료를 기다리거나 중지하세요.' : 'PC 실행 상태를 확인할 수 없습니다. 연결 복구 후 확인하세요. 작업을 자동으로 다시 보내지 않았습니다.');
+        return;
+      }
       setRunProgress(value => value.phase === 'cancelled' ? value : { ...value, phase: 'failed' });
       setMessages((items) => {
         const copy = [...items];
@@ -346,11 +364,14 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         return copy;
       });
     } finally {
-      if (runningConversationRef.current === conversation.id) runningConversationRef.current = null;
-      if (selectedId.current === conversation.id) {
-        busyRef.current = false;
-        setBusy(false);
-        setStatus('');
+      if (requestOwnership.current.owns(conversation.id, requestToken) && !stillRunning) {
+        requestOwnership.current.finish(conversation.id);
+        if (runningConversationRef.current === conversation.id) runningConversationRef.current = null;
+        if (selectedId.current === conversation.id) {
+          busyRef.current = false;
+          setBusy(false);
+          setStatus('');
+        }
       }
     }
   }, [client]);
@@ -520,6 +541,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const offDone = client.on('chat.done', (data) => {
       flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
+      if (eventConversationId) {
+        requestOwnership.current.finish(eventConversationId);
+        cancellationWatches.current.get(eventConversationId)?.abort();
+        cancellationWatches.current.delete(eventConversationId);
+      }
       setRunningIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
@@ -529,6 +555,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }
       if (!isCurrent(data)) return;
       const done = data as { text: string; route?: RouteInfo; conversation?: ConversationDetail };
+      setConfirm(null);
       setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
       setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { if (done.text) last.content = done.text; last.done = true; } return copy; });
       if (done.conversation) { selectedRef.current = done.conversation; setSelected(done.conversation); }
@@ -537,6 +564,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const offError = client.on('chat.error', (data) => {
       flushDelta();
       const eventConversationId = (data as { conversationId?: string }).conversationId ?? null;
+      if (eventConversationId) {
+        requestOwnership.current.finish(eventConversationId);
+        cancellationWatches.current.get(eventConversationId)?.abort();
+        cancellationWatches.current.delete(eventConversationId);
+      }
       setRunningIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
@@ -545,6 +577,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         setStatus('');
       }
       if (!isCurrent(data)) return;
+      setConfirm(null);
+      setRunProgress(value => value.phase === 'cancelled' ? value : { ...value, phase: 'failed' });
       setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { last.done = true; last.error = (data as { message: string }).message; } return copy; });
     });
     const offConfirm = client.on('chat.confirm', (data) => { if (isCurrent(data)) setConfirm(data as ChatConfirmRequest); });
@@ -911,25 +945,44 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   };
   const cancelRun = async (): Promise<void> => {
     const conversationId = runningConversationRef.current ?? selected?.id;
-    if (!conversationId) return;
+    if (!conversationId || cancellationWatches.current.has(conversationId)) return;
+    const controller = new AbortController();
+    cancellationWatches.current.set(conversationId, controller);
+    setRunProgress(value => ({ ...value, phase: 'cancelling' }));
     setStatus('중지 요청을 전달하는 중…');
     try {
-      await client.call('chat.cancel', { conversationId });
-      setStatus('중지됨');
-      later(() => {
-        if (runningConversationRef.current !== conversationId) return;
-        runningConversationRef.current = null;
-        busyRef.current = false;
-        setBusy(false);
-        setStatus('');
-        setMessages((items) => {
-          const copy = [...items]; const last = copy[copy.length - 1];
-          if (last?.role === 'assistant' && !last.done) { last.done = true; last.error = '사용자가 작업을 중지했습니다.'; }
-          return copy;
-        });
-      }, 2500);
+      await client.call('chat.cancel', { conversationId }, 8000);
+      if (controller.signal.aborted) return;
+      if (selectedId.current === conversationId) setStatus('실제 작업 종료를 확인하는 중…');
+      await watchChatSettlement({ conversationId, runId: runProgress.runId, signal: controller.signal,
+        wait: () => new Promise(resolve => setTimeout(resolve, 2500)),
+        loadRuns: () => client.call('chat.runs', {}, 5000),
+        onRunning: () => { if (selectedId.current === conversationId) setStatus('작업을 안전하게 중지하는 중…'); },
+        onUnavailable: () => { if (selectedId.current === conversationId) setStatus('연결 확인 중 · 작업 종료 여부를 아직 확인하지 못했습니다.'); },
+        onSettled: () => {
+          requestOwnership.current.finish(conversationId);
+          setRunningIds(ids => ids.filter(id => id !== conversationId));
+          if (selectedId.current !== conversationId) return;
+          runningConversationRef.current = null;
+          busyRef.current = false;
+          setBusy(false);
+          setConfirm(null);
+          setRunProgress(value => ({ ...value, phase: 'cancelled' }));
+          setStatus('');
+          setMessages((items) => {
+            const copy = [...items]; const last = copy[copy.length - 1];
+            if (last?.role === 'assistant' && !last.done) { last.done = true; last.error = '사용자가 작업을 중지했습니다.'; }
+            return copy;
+          });
+        },
+      });
     } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
+      if (!controller.signal.aborted && selectedId.current === conversationId) {
+        setRunProgress(value => ({ ...value, phase: 'working' }));
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (cancellationWatches.current.get(conversationId) === controller) cancellationWatches.current.delete(conversationId);
     }
   };
   const respondConfirm = async (approve: boolean): Promise<void> => { if (!confirm) return; const { requestId, conversationId } = confirm; setConfirm(null); await client.call('chat.confirmResponse', { requestId, conversationId, approve }).catch(() => undefined); };
@@ -1125,7 +1178,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             <Button className="composer-icon-button" aria-label={uploading ? '업로드 취소' : '파일 첨부'} title="파일 첨부" variant={uploading ? 'danger' : 'ghost'} onClick={() => uploading ? cancelAttachment() : uploadRef.current?.click()} disabled={!uploading && !selectedWorkspace}>{uploading ? '×' : '＋'}</Button>
             <Button className="composer-icon-button" aria-label={listening ? '음성 듣기 중지' : '음성 입력'} title="음성 입력" variant={listening ? 'accent' : 'ghost'} onClick={toggleVoice}>{listening ? '■' : '🎙'}</Button>
             {busy && <Button onClick={() => void send()} disabled={!input.trim() || executionConfigSaving}>명령 끼워넣기</Button>}
-            {busy ? <Button variant="danger" className="composer-icon-button" aria-label="실행 중인 작업 중지" title="작업 중지" onClick={() => void cancelRun()}>■</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
+            {busy ? <Button variant="danger" className="composer-icon-button" aria-label="실행 중인 작업 중지" aria-busy={runProgress.phase === 'cancelling'} disabled={runProgress.phase === 'cancelling'} title={runProgress.phase === 'cancelling' ? '실제 작업 종료 확인 중' : '작업 중지'} onClick={() => void cancelRun()}>{runProgress.phase === 'cancelling' ? '…' : '■'}</Button> : <Button onClick={() => void send()} disabled={!input.trim() || !selected || executionConfigSaving}>{executionConfigSaving ? '설정 저장 중…' : '보내기'}</Button>}
             </div>
           </div>
         </div>

@@ -135,4 +135,9 @@ check('calendar keeps complete week rows inside an unclipped bounded scroll area
   && schedules.includes("calendarWeek: { flexDirection: 'row', flexShrink: 0 }")
   && schedules.includes('dayCell: { flex: 1, minWidth: 0, minHeight: 64,'));
 
+check('confirmed cancellation releases the mobile dispatch guard even without terminal events',
+  /onSettled: \(\) => \{\s*requestOwnership.current.finish\(conversationId\);\s*if \(startingConversationRef.current === conversationId\) startingConversationRef.current = null;/.test(chat)
+  && chat.includes('await watchChatSettlement(')
+  && !chat.includes('cancelTimers'));
+
 console.log('MOBILE UI CONTRACT PASSED');

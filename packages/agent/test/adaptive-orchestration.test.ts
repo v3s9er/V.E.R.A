@@ -35,6 +35,22 @@ test('adaptive starts the exact final model without calling planners, solvers or
   assert.deepEqual(f.calls, ['native:master']); assert.equal(r.route.model, 'master'); assert.equal(r.usage.promptTokens, 3);
 }));
 
+test('adaptive API greeting stays on its selected model without helpers, plugins or unnecessary high effort', () => fixture(async f => {
+  delete f.providers.master.runAgent;
+  f.providers.master.type = 'openai-compatible'; f.providers.master.supportsTools = true;
+  f.providers.master.chat = async (r: ChatRequest) => {
+    assert.deepEqual(r.tools, []); assert.equal(r.reasoningEffort, 'low'); return response('안녕!');
+  };
+  const result = await f.loop.run([], '안녕', {}, [{ name: 'fixture.plugin', description: 'irrelevant', parameters: { type: 'object' } }], f.options);
+  assert.equal(result.route.model, 'master'); assert.equal(result.route.effort, 'low'); assert.deepEqual(f.calls, []);
+}));
+
+test('adaptive inline transformation avoids PC startup but preserves requested reasoning effort', () => fixture(async f => {
+  const result = await f.loop.run([], '다음 텍스트를 요약해: 제공된 문장만 요약하는 검사입니다.', {}, [], f.options);
+  assert.deepEqual(f.calls, ['chat:master']); assert.equal(result.route.model, 'master');
+  assert.equal(f.requests[0].reasoningEffort, 'high'); assert.deepEqual(f.requests[0].tools, []);
+}));
+
 test('adaptive native master can choose only a configured isolated helper and account its usage', () => fixture(async f => {
   f.providers.master.runAgent = async (r: NativeAgentRequest) => {
     assert.equal(r.permissionMode, 'read-only');
@@ -89,6 +105,61 @@ test('adaptive helpers honor the paid-call limit without substituting a cheaper 
   };
   await f.loop.run([], 'Analyze supplied material.', {}, [], { ...f.options, routing: { ...f.options.routing, maxPremiumCalls: 1 } });
   assert.deepEqual(f.calls, []);
+}));
+
+test('adaptive master never substitutes a free model when its call budget is exhausted', () => fixture(async f => {
+  f.registry.costTier = () => 1;
+  f.registry.freeProvider = () => { throw Error('Unrequested substitution'); };
+  await assert.rejects(f.loop.run([], 'Analyze supplied material.', {}, [], {
+    ...f.options, routing: { ...f.options.routing, maxPremiumCalls: 0 },
+  }), /선택한 모델을 다른 모델로 바꾸지 않고 중단/);
+  assert.deepEqual(f.calls, []);
+}));
+
+test('adaptive unsupported tool capability fails before a speculative advisor or replacement executor', () => fixture(async f => {
+  delete f.providers.master.runAgent;
+  await assert.rejects(f.loop.run([], 'Read the project file.', {}, [], f.options), /도구 실행을 지원하지 않습니다/);
+  assert.deepEqual(f.calls, []);
+}));
+
+test('optional API helpers cannot spend the final master response call', () => fixture(async f => {
+  delete f.providers.master.runAgent;
+  f.providers.master.type = 'openai-compatible'; f.providers.master.supportsTools = true;
+  f.registry.costTier = () => 1;
+  let calls = 0;
+  f.providers.master.chat = async (r: ChatRequest) => {
+    calls++;
+    if (calls === 1) return { ...response(''), toolCalls: [{ id: 'spawn', name: 'agent_spawn', args: JSON.stringify({ task: 'bounded subproblem', workerId: 'solve' }) }] };
+    assert.ok(r.turns.at(-1)?.toolResults?.length);
+    return response('FINAL');
+  };
+  const result = await f.loop.run([], 'Investigate supplied constraints.', {}, [], { ...f.options, routing: { ...f.options.routing, maxPremiumCalls: 2 } });
+  assert.equal(result.text, 'FINAL'); assert.equal(calls, 2); assert.deepEqual(f.calls, []);
+}));
+
+for (const executionMode of ['vote', 'hybrid'] as const) test(`${executionMode} keeps original evidence and project instructions through all handoffs`, () => fixture(async f => {
+  const original = 'ORIGINAL_BEGIN' + ' supplied evidence '.repeat(3500) + 'ORIGINAL_END';
+  const context = 'PROJECT_BEGIN' + ' constraint '.repeat(4500) + 'PROJECT_END';
+  const routing = structuredClone(f.options.routing);
+  routing.executionMode = executionMode; routing.meetingRounds = 2; routing.crossGroupRounds = 1;
+  routing.graph.nodes[0].role = executionMode === 'hybrid' ? 'router' : 'reasoning';
+  routing.graph.nodes[1].groupId = 'one'; routing.graph.nodes[2].groupId = 'two';
+  for (const model of ['plan', 'solve', 'critique']) f.providers[model].chat = async (r: ChatRequest) => {
+    f.requests.push(r); return response('PROPOSAL ' + '한😀'.repeat(12000));
+  };
+  f.providers.master.runAgent = async (r: NativeAgentRequest) => {
+    assert.ok(r.prompt.includes(original)); assert.ok(r.prompt.includes(context));
+    assert.ok(Buffer.byteLength(r.prompt) < Buffer.byteLength(original + context) + 30000);
+    return response('FINAL');
+  };
+  await f.loop.run([], original, {}, [], { ...f.options, context, routing });
+  assert.ok(f.requests.length >= 3);
+  for (const r of f.requests) {
+    const content = r.turns[0].content as string;
+    assert.ok(content.includes(original)); assert.ok(content.includes(context));
+    assert.ok(Buffer.byteLength(content) < Buffer.byteLength(original + context) + 25000);
+    assert.ok(!content.includes('\uFFFD'));
+  }
 }));
 
 test('pipeline sends the original exactly once, preserves its start and end, and bounds only proposals', () => fixture(async f => {

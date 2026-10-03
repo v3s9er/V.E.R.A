@@ -144,23 +144,23 @@ export function createEvidenceTools(workspace: string, assignedSources?: string[
       if (typeof args.path !== 'string' || args.source !== undefined) throw new Error('Evidence path required');
       const path = resolveWorkspacePath(workspace, args.path);
       if (allowed && !allowed.has(pathKey(path))) throw new Error('This original is assigned to another reader; report only your assigned sources');
-      const before = statSync(path);
+      const before = statSync(path, { bigint: true });
       const limit = name === 'evidence_image' ? 8 * 1024 * 1024 : 32768;
       if (!before.isFile() || before.size > limit) throw new Error('Evidence file too large or not a regular file');
       const fd = openSync(path, 'r');
       let bytes: Buffer;
       try {
-        const opened = fstatSync(fd);
+        const opened = fstatSync(fd, { bigint: true });
         resolveWorkspacePath(workspace, args.path);
         if (!opened.isFile() || opened.ino !== before.ino || opened.dev !== before.dev || opened.size !== before.size) throw new Error('Evidence file changed');
-        const buffer = Buffer.alloc(before.size + 1);
+        const buffer = Buffer.alloc(Number(before.size) + 1);
         let size = 0, n = 0;
         do { n = readSync(fd, buffer, size, buffer.length - size, size); size += n; } while (n && size < buffer.length);
-        if (size !== before.size) throw new Error('Evidence size changed');
+        if (BigInt(size) !== before.size) throw new Error('Evidence size changed');
         bytes = buffer.subarray(0, size);
       } finally { closeSync(fd); }
-      const after = statSync(resolveWorkspacePath(workspace, args.path));
-      if (before.ino !== after.ino || before.size !== bytes.length || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('Evidence changed while reading; retry');
+      const after = statSync(resolveWorkspacePath(workspace, args.path), { bigint: true });
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== BigInt(bytes.length) || before.size !== after.size || before.mtimeNs !== after.mtimeNs) throw new Error('Evidence changed while reading; retry');
       signal.throwIfAborted();
       const identity = { source: relative(resolve(workspace), path), sha256: hash(bytes), bytes: bytes.length };
       if (args.expectedSha256 !== undefined && args.expectedSha256 !== identity.sha256) throw new Error('Source hash changed; re-inspect the original');

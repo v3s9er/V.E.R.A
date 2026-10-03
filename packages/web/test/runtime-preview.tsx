@@ -8,6 +8,9 @@ import { MrRobotContext } from '../src/state';
 import type { MrRobotClient } from '../src/rpc';
 import type { ConversationDetail, WorkspaceInfo } from '@mr-robot/shared';
 const listeners = new Map<string, Set<(data: unknown) => void>>();
+const fixtureParams = new URLSearchParams(location.search);
+const rpcDelayMs = Math.min(10000, Math.max(0, Number(fixtureParams.get('rpcDelayMs')) || 0));
+const cancelDelayMs = Math.min(10000, Math.max(0, Number(fixtureParams.get('cancelDelayMs')) || 0));
 const emit = (event: string, data: unknown) => listeners.get(event)?.forEach(fn => fn(data));
 const projects: WorkspaceInfo[] = [{ id: 'design', name: '앱 리뉴얼', path: 'C:\\Fixture\\Design', isDefault: true, createdAt: 1 }, { id: 'docs', name: '사용 가이드', path: 'C:\\Fixture\\Docs', isDefault: false, createdAt: 2 }];
 const makeChat = (id: string, workspaceId?: string): ConversationDetail => ({ id, workspaceId, title: '프로젝트 흐름 정리', status: 'active', pinned: false, createdAt: 1, updatedAt: Date.now(), messageCount: 2, reasoningEffort: 'medium', providerId: 'demo', permissionMode: 'ask', tokenPolicy: 'adaptive', compactedMessages: 0, usage: { promptTokens: 0, completionTokens: 0 }, messages: [ { role: 'user', content: '프로젝트별로 대화를 나누고 작업 진행 상황을 확인하고 싶어.' }, { role: 'assistant', content: '프로젝트에 작업 폴더를 연결하고 대화를 이어가세요.\n\n각 대화는 별도 세션을 유지합니다. 실행 기록은 입력창 위에서 펼쳐볼 수 있고, 작업 중에는 지시를 추가하거나 정지할 수 있어요.\n\n### 이번 작업\n\n- 프로젝트와 작업 폴더 연결\n- 대화별 실행 상태 복원\n- 도구 결과와 오류를 구분해서 표시' } ] });
@@ -28,7 +31,9 @@ const done = (cancelled = false) => {
   const conversation = chats.find(c => c.id === run.id)!;
   conversation.messages.push({ role: 'user', content: run.text }, { role: 'assistant', content: text }); conversation.messageCount = conversation.messages.length;
   emit('chat.progress', { conversationId: run.id, phase: cancelled ? 'cancelled' : 'completed', activity: [], steeringQueued: steering, agents: helperStates.map(a => ({ ...a, state: cancelled ? 'cancelled' : 'completed' })) });
-  emit('chat.done', { conversationId: run.id, text, conversation }); run.finish({ ok: true, text }); emit('conversations.changed', chats);
+  emit('chat.done', { conversationId: run.id, text, conversation });
+  setTimeout(() => run.finish(fixtureParams.has('lateFailure') ? { ok: false, error: 'LATE_OLD_REPLY' } : { ok: true, text }), rpcDelayMs);
+  emit('conversations.changed', chats);
 };
 const mock = {
   isAdmin: true, permissionCap: 'full', canUseAuditOnly: true,
@@ -55,7 +60,7 @@ const mock = {
     if (method === 'chat.pendingConfirm') return null;
     if (method === 'chat.start') return new Promise(resolve => { pending = { id: params.conversationId, text: params.text, finish: resolve }; steering = 0; setTimeout(() => { if (!pending) return; emit('chat.progress', { conversationId: pending.id, runId: 'fixture', phase: 'working', startedAt: Date.now(), agents: helperStates, activity: [{ id: 'read', label: 'read_file', state: 'done', startedAt: Date.now()-200, finishedAt: Date.now() }] }); emit('chat.tool', { conversationId: pending.id, callId: 'a', name: 'read_file', status: 'start' }); emit('chat.tool', { conversationId: pending.id, callId: 'a', name: 'read_file', status: 'done' }); }, 60); });
     if (method === 'chat.steer') { steering++; return { ok: true }; }
-    if (method === 'chat.cancel') { done(true); return { ok: true }; }
+    if (method === 'chat.cancel') { const run = pending; setTimeout(() => { if (pending === run) done(true); }, cancelDelayMs); return { ok: true }; }
     throw Error(`Unmocked method: ${method}`);
   },
 };

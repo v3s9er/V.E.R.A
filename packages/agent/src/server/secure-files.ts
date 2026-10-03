@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, statfsSync, openSync, closeSync, readSync, writeFileSync, appendFileSync, unlinkSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, statfsSync, fstatSync, openSync, closeSync, readSync, writeFileSync, appendFileSync, unlinkSync, renameSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
 import { SecretVault } from '../secrets.js';
 import { atomicWriteUtf8 } from '../config.js';
@@ -97,16 +97,24 @@ export class SecureFiles {
       if (body.op === 'list') {
         return { items: readdirSync(file, { withFileTypes: true }).filter(d => !d.isSymbolicLink()).slice(0, 1500).map(d => { const path = this.confined(root, join(String(body.path || ''), d.name)); const stat = statSync(path); return { name: d.name, path: relative(root, path).replaceAll('\\', '/'), size: stat.size, isDirectory: stat.isDirectory(), modifiedAt: stat.mtimeMs }; }) };
       }
-      const stat = statSync(file);
+      const stat = statSync(file, { bigint: true });
       if (!stat.isFile() || stat.size > MAX_FILE) throw new Error('보안 전송은 일반 파일 하나당 최대 96MB입니다.');
       const offset = Number(body.offset);
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > stat.size) throw new Error('파일 위치 오류');
-      const version = `${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+      const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.birthtimeNs}`;
       if (body.version && body.version !== version) throw new Error('전송 중 파일이 변경됐습니다. 다시 받으세요.');
-      const fd = openSync(file, 'r'), bytes = Buffer.alloc(Math.min(CHUNK, stat.size - offset));
+      const total = Number(stat.size);
+      const fd = openSync(file, 'r'), bytes = Buffer.alloc(Math.min(CHUNK, total - offset));
       let size: number;
-      try { size = readSync(fd, bytes, 0, bytes.length, offset); } finally { closeSync(fd); }
-      return { size: stat.size, version, offset, data: bytes.subarray(0, size).toString('hex'), done: offset + size === stat.size };
+      try {
+        const opened = fstatSync(fd, { bigint: true });
+        if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size || opened.mtimeNs !== stat.mtimeNs) throw new Error('전송 중 파일이 변경됐습니다. 다시 받으세요.');
+        this.confined(root, chatRoot ? relative(chatRoot, body.path) : body.path || '');
+        size = readSync(fd, bytes, 0, bytes.length, offset);
+        const after = fstatSync(fd, { bigint: true });
+        if (after.size !== opened.size || after.mtimeNs !== opened.mtimeNs) throw new Error('전송 중 파일이 변경됐습니다. 다시 받으세요.');
+      } finally { closeSync(fd); }
+      return { size: total, version, offset, data: bytes.subarray(0, size).toString('hex'), done: offset + size === total };
     }
     // Phone attachments go only into a unique shared inbox, not arbitrary project writes.
     if (!this.host.sharedFileAccess(body.secret, true)) throw new Error('현재 읽기 전용입니다. PC에서 파일 전송 쓰기 권한을 허용하세요.');

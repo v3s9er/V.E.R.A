@@ -444,7 +444,7 @@ function parseAccessApplicationAssertion(value: unknown, expectedClientId: strin
 function executableFileIdentity(candidate: string): string {
   try {
     const executable = realpathSync.native(candidate);
-    const stats = statSync(executable);
+    const stats = statSync(executable, { bigint: true });
     if (!stats.isFile()) return `not-file\0${executable}`;
     const normalizedPath = process.platform === 'win32' ? executable.toLowerCase() : executable;
     return [
@@ -452,9 +452,9 @@ function executableFileIdentity(candidate: string): string {
       stats.dev,
       stats.ino,
       stats.size,
-      stats.mtimeMs,
-      stats.ctimeMs,
-      stats.birthtimeMs,
+      stats.mtimeNs,
+      stats.ctimeNs,
+      stats.birthtimeNs,
     ].join('\0');
   } catch {
     // Runtime-injected test candidates and a file racing with discovery still

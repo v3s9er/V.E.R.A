@@ -1,5 +1,5 @@
 import { getEventListeners } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -85,6 +85,18 @@ console.log('2. Docker mounts remain under the trusted workspace realpath');
   writeFileSync(join(challenge, 'flag.bin'), 'challenge');
 
   const confined = confineDockerWorkspacePaths(workspace, 'challenge');
+  const outputStat = statSync(confined.outputPath, { bigint: true });
+  check('file identity preserves the exact 64-bit ID and creation timestamp',
+    confined.outputIdentity.ino === outputStat.ino.toString()
+    && confined.outputIdentity.dev === outputStat.dev.toString()
+    && confined.outputIdentity.birthtimeNs === outputStat.birthtimeNs.toString());
+  let unchangedAccepted = true;
+  try { revalidateDockerWorkspacePaths(confined); } catch { unchangedAccepted = false; }
+  check('unchanged file identity remains usable', unchangedAccepted);
+  const forged = { ...confined, outputIdentity: { ...confined.outputIdentity, ino: (outputStat.ino + 1n).toString() } };
+  let nearbyIdentityRejected = false;
+  try { revalidateDockerWorkspacePaths(forged); } catch { nearbyIdentityRejected = true; }
+  check('adjacent file IDs never compare equal through floating-point rounding', nearbyIdentityRejected);
   check('relative challenge and default output resolve inside workspace', relative(workspace, confined.challengePath) === 'challenge' && !relative(workspace, confined.outputPath).startsWith('..'));
 
   let outsideChallengeRejected = false;
@@ -113,7 +125,7 @@ console.log('2. Docker mounts remain under the trusted workspace realpath');
   let replacementRejected = false;
   try { revalidateDockerWorkspacePaths(confined); } catch { replacementRejected = true; }
   check('same-path replacement is caught by pre-run inode revalidation', replacementRejected);
-  check('Docker plugin release line is 0.3.6', createDockerPlugin().manifest.version === '0.3.6');
+  check('Docker plugin release line is 0.3.7', createDockerPlugin().manifest.version === '0.3.7');
 }
 
 console.log('3. Orca cancellation reaps its subprocess tree');

@@ -4,6 +4,7 @@ import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
 import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
 import { supportsDaybreak, visibleModelChoices } from '../../../../packages/shared/src/daybreak';
+import { watchChatSettlement, ChatRequestOwnership } from '../../../../packages/shared/src/chat-lifecycle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -112,6 +113,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [commandMode, setCommandMode] = useState<'pc' | 'scenario'>('pc');
   const [input, setInput] = useState('');
+  const inputRef = useRef(input); inputRef.current = input;
+  const drafts = useRef(new Map<string, string>());
   const [runs, setRuns] = useState<Record<string, ChatRunState & { cancelling?: boolean }>>({});
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [showModels, setShowModels] = useState(false);
@@ -150,7 +153,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const loadGeneration = useRef(0);
   const pendingDelta = useRef('');
   const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const cancellationWatches = useRef(new Map<string, AbortController>());
+  const requestOwnership = useRef(new ChatRequestOwnership());
   const startingConversationRef = useRef<string | null>(null);
   const stickToBottom = useRef(true);
   const draggingMessages = useRef(false);
@@ -306,6 +310,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     historyLoad.current = null;
     setLoadingHistory(false);
     setHistoryError('');
+    if (activeId.current !== id) {
+      if (activeId.current) {
+        drafts.current.delete(activeId.current); drafts.current.set(activeId.current, inputRef.current);
+        if (drafts.current.size > 30) drafts.current.delete(drafts.current.keys().next().value!);
+      }
+      const draft = drafts.current.get(id) ?? '';
+      inputRef.current = draft; setInput(draft);
+    }
     activeId.current = id;
     setReasoningSaveFailed(false);
     setConfigurationSaveFailed(false);
@@ -442,9 +454,10 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       scrollIfFollowing();
     };
     const setRunFinished = (conversationId: string): void => {
-      const cancelTimer = cancelTimers.current.get(conversationId);
-      if (cancelTimer) clearTimeout(cancelTimer);
-      cancelTimers.current.delete(conversationId);
+      requestOwnership.current.finish(conversationId);
+      cancellationWatches.current.get(conversationId)?.abort();
+      cancellationWatches.current.delete(conversationId);
+      setConfirm(current => current?.conversationId === conversationId ? null : current);
       setRuns((current) => ({
         ...current,
         [conversationId]: { ...(current[conversationId] ?? { conversationId, steeringQueued: 0 }), running: false, cancelling: false, status: '' },
@@ -542,8 +555,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       if (deltaTimer.current) clearTimeout(deltaTimer.current);
       deltaTimer.current = null;
       pendingDelta.current = '';
-      for (const timer of cancelTimers.current.values()) clearTimeout(timer);
-      cancelTimers.current.clear();
+      for (const controller of cancellationWatches.current.values()) controller.abort();
+      cancellationWatches.current.clear();
+      requestOwnership.current.clear();
     };
   }, [client, refreshConversations, refreshProviders]);
 
@@ -556,13 +570,15 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       try {
         const result = await client.call('chat.steer', { conversationId: currentConversation.id, text }) as { queued?: number };
         setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: true, steeringQueued: result.queued ?? current[currentConversation.id]?.steeringQueued ?? 0, status: '추가 명령 전달됨' } }));
-        setInput('');
+        if (activeId.current === currentConversation.id && inputRef.current.trim() === text) setInput('');
       } catch (error) {
+        if (activeId.current !== currentConversation.id) return;
         setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: error instanceof Error ? error.message : String(error) }]);
       }
       return;
     }
     startingConversationRef.current = currentConversation.id;
+    const requestToken = requestOwnership.current.begin(currentConversation.id);
     setActivity([]);
     setInput('');
     setRuns((current) => ({ ...current, [currentConversation.id]: { conversationId: currentConversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
@@ -570,19 +586,39 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setUnseenMessages(false);
     setMessages((items) => appendPendingAttempt(items, text));
     try {
-      await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode, tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive' }, 10 * 60_000);
+      const result = await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode, tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive' }, 10 * 60_000) as { ok?: boolean; text?: string; error?: string };
+      if (!requestOwnership.current.owns(currentConversation.id, requestToken)) return;
+      if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
+      setConfirm(current => current?.conversationId === currentConversation.id ? null : current);
+      setRuns(current => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, phase: 'completed', steeringQueued: 0 } }));
+      if (activeId.current === currentConversation.id) setMessages(items => {
+        const last = items.at(-1);
+        return last?.role === 'assistant' ? [...items.slice(0, -1), { ...last, content: result.text || last.content, done: true }] : items;
+      });
     } catch (err) {
-      setMessages((msgs) => {
+      if (!requestOwnership.current.owns(currentConversation.id, requestToken)) return;
+      const snapshot = await client.call('chat.runs', {}, 5000).catch(() => null) as ChatRunState[] | null;
+      if (!requestOwnership.current.owns(currentConversation.id, requestToken)) return;
+      const active = snapshot?.find(run => run.conversationId === currentConversation.id && run.running);
+      if (active || snapshot === null) {
+        if (active) setRuns(current => ({ ...current, [currentConversation.id]: active }));
+        if (activeId.current === currentConversation.id) setHistoryError(active ? '응답 연결이 끊겼지만 PC 작업은 계속 실행 중입니다. 중복 전송하지 말고 완료를 기다리거나 중지하세요.' : 'PC 실행 상태를 확인할 수 없습니다. 연결 복구 후 확인하세요. 작업을 자동으로 다시 보내지 않았습니다.');
+        return;
+      }
+      setConfirm(current => current?.conversationId === currentConversation.id ? null : current);
+      if (activeId.current === currentConversation.id) setMessages((msgs) => {
         const last = msgs[msgs.length - 1];
         if (last && last.role === 'assistant') {
           return [...msgs.slice(0, -1), { ...last, done: true, error: err instanceof Error ? err.message : String(err) }];
         }
         return msgs;
       });
-      setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, cancelling: false, steeringQueued: 0, status: '' } }));
+      setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, phase: 'failed', cancelling: false, steeringQueued: 0, status: '' } }));
     } finally {
-      if (startingConversationRef.current === currentConversation.id) startingConversationRef.current = null;
-      void refreshRuns();
+      if (requestOwnership.current.owns(currentConversation.id, requestToken)) {
+        requestOwnership.current.finish(currentConversation.id);
+        if (startingConversationRef.current === currentConversation.id) startingConversationRef.current = null;
+      }
     }
   };
 
@@ -864,32 +900,41 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const cancelRun = async (): Promise<void> => {
     if (!conversation || !busy || activeRun?.cancelling) return;
     const conversationId = conversation.id;
+    if (cancellationWatches.current.has(conversationId)) return;
+    const controller = new AbortController();
+    cancellationWatches.current.set(conversationId, controller);
     setRuns((current) => ({ ...current, [conversationId]: { ...current[conversationId], conversationId, running: true, cancelling: true, steeringQueued: current[conversationId]?.steeringQueued ?? 0, status: '중지 요청 중…' } }));
     try {
       await client.call('chat.cancel', { conversationId }, 8000);
-      const previous = cancelTimers.current.get(conversationId);
-      if (previous) clearTimeout(previous);
-      cancelTimers.current.set(conversationId, setTimeout(() => {
-        cancelTimers.current.delete(conversationId);
-        void client.call('chat.runs', {}, 5000).then((value) => {
-          const currentRuns = value as ChatRunState[];
-          const stillRunning = currentRuns.find((run) => run.conversationId === conversationId);
+      if (controller.signal.aborted) return;
+      await watchChatSettlement({ conversationId, runId: activeRun?.runId, signal: controller.signal,
+        wait: () => new Promise(resolve => setTimeout(resolve, 2500)),
+        loadRuns: () => client.call('chat.runs', {}, 5000),
+        onRunning: () => setRuns(current => ({ ...current, [conversationId]: { ...current[conversationId], cancelling: true, status: '작업을 안전하게 중지하는 중…' } })),
+        onUnavailable: () => setRuns(current => ({ ...current, [conversationId]: { ...current[conversationId], status: '연결 확인 중 · 종료 여부 확인 중' } })),
+        onSettled: () => {
+          requestOwnership.current.finish(conversationId);
+          if (startingConversationRef.current === conversationId) startingConversationRef.current = null;
           setRuns((current) => ({
-            ...Object.fromEntries(currentRuns.map((run) => [run.conversationId, run])),
-            ...(!stillRunning ? { [conversationId]: { ...current[conversationId], conversationId, running: false, cancelling: false, steeringQueued: 0, status: '중지됨' } } : {}),
+            ...current,
+            [conversationId]: { ...current[conversationId], conversationId, running: false, phase: 'cancelled', cancelling: false, steeringQueued: 0, status: '중지됨' },
           }));
-          if (!stillRunning && activeId.current === conversationId) {
+          setConfirm(current => current?.conversationId === conversationId ? null : current);
+          if (activeId.current === conversationId) {
             setMessages((items) => {
               const last = items[items.length - 1];
               if (!last || last.role !== 'assistant' || last.done) return items;
               return [...items.slice(0, -1), { ...last, done: true, error: '사용자가 작업을 중지했습니다.' }];
             });
           }
-        }).catch(() => refreshRuns());
-      }, 2500));
+        },
+      });
     } catch (error) {
+      if (controller.signal.aborted) return;
       setRuns((current) => ({ ...current, [conversationId]: { ...current[conversationId], conversationId, running: true, cancelling: false, steeringQueued: current[conversationId]?.steeringQueued ?? 0, status: '중지 요청 실패' } }));
-      setMessages((items) => [...items, { id: nextId(), role: 'assistant', content: '', tools: [], done: true, error: error instanceof Error ? error.message : String(error) }]);
+      if (activeId.current === conversationId) setHistoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (cancellationWatches.current.get(conversationId) === controller) cancellationWatches.current.delete(conversationId);
     }
   };
 

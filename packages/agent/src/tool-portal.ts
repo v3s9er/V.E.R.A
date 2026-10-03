@@ -528,8 +528,8 @@ export class ToolPortalArtifactStore {
     let fd: number | undefined;
     try {
       fd = openSync(file.path, 'r');
-      const opened = fstatSync(fd);
-      const current = statSync(file.path);
+      const opened = fstatSync(fd, { bigint: true });
+      const current = statSync(file.path, { bigint: true });
       const finalPath = realpathSync(file.path);
       const signature = Buffer.allocUnsafe(4);
       const signatureBytes = readSync(fd, signature, 0, signature.length, 0);
@@ -537,13 +537,13 @@ export class ToolPortalArtifactStore {
         && ((signature[2] === 0x03 && signature[3] === 0x04)
           || (signature[2] === 0x05 && signature[3] === 0x06)
           || (signature[2] === 0x07 && signature[3] === 0x08));
-      if (!opened.isFile() || opened.size !== file.size || current.size !== opened.size
+      if (!opened.isFile() || opened.size !== BigInt(file.size) || current.size !== opened.size
         || opened.dev !== current.dev || opened.ino !== current.ino
         || canonicalPath(finalPath) !== canonicalPath(file.path)
         || !isInside(canonicalPath(file.workspaceRoot), canonicalPath(finalPath)) || !zipSignature) {
         throw new ToolPortalError('다운로드 직전에 아카이브 결과가 변경되었습니다.', 409, 'ARTIFACT_CHANGED');
       }
-      return { path: finalPath, name: file.name, size: opened.size, fd };
+      return { path: finalPath, name: file.name, size: Number(opened.size), fd };
     } catch (error) {
       if (fd !== undefined) {
         try { closeSync(fd); } catch { /* best effort */ }

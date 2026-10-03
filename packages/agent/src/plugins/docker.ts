@@ -40,8 +40,9 @@ interface DockerResult {
 }
 
 interface PathIdentity {
-  dev: number;
-  ino: number;
+  dev: string;
+  ino: string;
+  birthtimeNs: string;
 }
 
 export interface ConfinedDockerPaths {
@@ -211,8 +212,10 @@ function existingConfinedPath(root: string, candidate: string, label: string): s
 }
 
 function identity(path: string): PathIdentity {
-  const value = statSync(path);
-  return { dev: value.dev, ino: value.ino };
+  // Windows file IDs can exceed Number.MAX_SAFE_INTEGER. Converting through
+  // Number before comparison can make different directories look identical.
+  const value = statSync(path, { bigint: true });
+  return { dev: value.dev.toString(), ino: value.ino.toString(), birthtimeNs: value.birthtimeNs.toString() };
 }
 
 function samePath(left: string, right: string): boolean {
@@ -261,11 +264,13 @@ export function revalidateDockerWorkspacePaths(paths: ConfinedDockerPaths): void
   const challengeIdentity = identity(challenge);
   const outputIdentity = identity(output);
   if (!samePath(challenge, paths.challengePath)
-    || challengeIdentity.dev !== paths.challengeIdentity.dev || challengeIdentity.ino !== paths.challengeIdentity.ino) {
+    || challengeIdentity.dev !== paths.challengeIdentity.dev || challengeIdentity.ino !== paths.challengeIdentity.ino
+    || challengeIdentity.birthtimeNs !== paths.challengeIdentity.birthtimeNs) {
     throw new Error('Docker 실행 전에 challengePath 대상이 변경되었습니다.');
   }
   if (!samePath(output, paths.outputPath)
-    || outputIdentity.dev !== paths.outputIdentity.dev || outputIdentity.ino !== paths.outputIdentity.ino) {
+    || outputIdentity.dev !== paths.outputIdentity.dev || outputIdentity.ino !== paths.outputIdentity.ino
+    || outputIdentity.birthtimeNs !== paths.outputIdentity.birthtimeNs) {
     throw new Error('Docker 실행 전에 outputPath 대상이 변경되었습니다.');
   }
   assertOutputDoesNotExposeChallenge(challenge, output);
@@ -282,7 +287,7 @@ function imageDir(): string {
 export function createDockerPlugin(): MrRobotPlugin {
   return {
     manifest: {
-      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.6', kind: 'tool', enabledByDefault: true,
+      id: 'docker-sandbox', name: 'Docker Sandbox', version: '0.3.7', kind: 'tool', enabledByDefault: true,
       description: 'CTF와 위험한 분석 명령을 호스트와 격리된 제한 컨테이너에서 실행합니다.',
       capabilities: ['container.health', 'container.image.build', 'container.ctf.exec'],
       permissions: ['container.execute', 'process.execute', 'filesystem.read', 'filesystem.write'],

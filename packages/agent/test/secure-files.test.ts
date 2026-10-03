@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { renameSync, statSync } from 'node:fs';
+import { readDiscordFile } from '../src/server/discord-files.js';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,13 +52,20 @@ try {
  const part = call({ op: 'read', path: '한국어.pdf', workspaceId: 'workspace', offset: 0 });
  assert.equal(Buffer.from(part.data, 'hex').toString(), 'fixture pdf contents');
  assert.equal(part.done, true);
+ const exact = statSync(join(dir, 'workspace', '한국어.pdf'), { bigint: true });
+ assert.equal(part.version, `${exact.dev}:${exact.ino}:${exact.size}:${exact.mtimeNs}:${exact.birthtimeNs}`);
+ const discordPart = readDiscordFile(join(dir, 'workspace'), join(dir, 'workspace', '한국어.pdf'), 0, 1024);
+ assert.equal(discordPart.version, part.version);
+ assert.equal(typeof discordPart.size, 'number'); assert.doesNotThrow(() => JSON.stringify(discordPart));
  const chatPart = call({ op: 'read', conversationId: 'conversation', path: join(dir, 'workspace', '한국어.pdf'), offset: 0 });
  assert.equal(Buffer.from(chatPart.data, 'hex').toString(), 'fixture pdf contents');
  assert.ok(call({ op: 'read', conversationId: 'other', path: join(dir, 'workspace', '한국어.pdf'), offset: 0 }).error);
  assert.ok(call({ op: 'read', conversationId: 'conversation', path: join(dir, 'workspace', 'unmentioned.pdf'), offset: 0 }).error);
  assert.ok(call({ op: 'list', conversationId: 'conversation', path: join(dir, 'workspace', '한국어.pdf') }).error);
- writeFileSync(join(dir, 'workspace', '한국어.pdf'), 'changed');
+ renameSync(join(dir, 'workspace', '한국어.pdf'), join(dir, 'workspace', 'previous.pdf'));
+ writeFileSync(join(dir, 'workspace', '한국어.pdf'), 'fixture pdf contents');
  assert.ok(call({ op: 'read', path: '한국어.pdf', workspaceId: 'workspace', offset: 0, version: part.version }).error);
+ assert.throws(() => readDiscordFile(join(dir, 'workspace'), join(dir, 'workspace', '한국어.pdf'), 0, 1024, discordPart.version), /변경/);
  const upload = call({ op: 'upload.begin', size: 3, name: 'phone.txt' });
  assert.ok(call({ op: 'upload.chunk', uploadId: upload.id, offset: 1, data: '616263' }).error);
  assert.ok(call({ op: 'upload.end', uploadId: upload.id }).error);
