@@ -135,11 +135,11 @@ export interface ProviderAddInput {
 
 export type ModelRole = 'router' | 'fast' | 'general' | 'reasoning' | 'coding' | 'vision' | 'critic' | 'summarizer';
 export type RoutingMode = 'economy' | 'balanced' | 'quality' | 'manual';
-export type RoutingExecutionMode = 'single' | 'pipeline' | 'vote' | 'hybrid' | 'swarm';
+export type RoutingExecutionMode = 'single' | 'adaptive' | 'pipeline' | 'vote' | 'hybrid' | 'swarm';
 
 export interface RoutingPresetSettings {
   mode: RoutingMode;
-  /** single chooses one node, pipeline passes work through nodes, vote gathers independent proposals. */
+  /** adaptive starts with the final node; other configured models are optional read-only helpers. */
   executionMode?: RoutingExecutionMode;
   /** Number of opinion rounds in vote mode. Round 1 is independent; later rounds exchange views and cast ballots. */
   meetingRounds?: number;

@@ -106,7 +106,7 @@ interface TelemetrySummary { turns: number; promptTokens: number; completionToke
 
 interface RepairOffer { target: ProviderInfo; error: string; helpers: ProviderInfo[] }
 interface DangerConfirm { title: string; message: string; confirmLabel: string; action: () => Promise<void> }
-const EXECUTION_LABEL = { single: '단일 선택', pipeline: '순차 검증', vote: '그룹 투표', hybrid: '혼합형', swarm: '경쟁 스웜' } as const;
+const EXECUTION_LABEL = { single: '단일 선택', adaptive: '적응형 협업', pipeline: '순차 검증', vote: '그룹 투표', hybrid: '혼합형', swarm: '경쟁 스웜' } as const;
 const ACCESS_QR_REVEAL_MS = 60_000;
 
 export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
@@ -1046,8 +1046,9 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         {routing?.graph && <RoutingGraphEditor graph={routing.graph} providers={providers} providerModels={modelOptions} onSave={canManage ? (graph) => void saveRouting({ graph }) : undefined} readOnly={!canManage} />}
         {routing && <fieldset className="form-grid routing-options permission-fieldset" disabled={!canManage}>
           <Field label="시나리오 실행 방식" hint="순차·투표는 노드 수만큼 모델 호출이 늘어납니다"><Select value={routing.executionMode ?? 'single'} onChange={(e) => void saveRouting({ executionMode: e.target.value as RoutingSettings['executionMode'] })}>
-            <option value="single">단일 선택 · 한 모델만 호출</option><option value="pipeline">순차 파이프라인 · 노드별 전달</option><option value="vote">회의·투표 · 그룹별 상호 토론</option><option value="hybrid">혼합 · 분류＋그룹 회의＋검증</option><option value="swarm">경쟁 스웜 · 병렬 풀이＋공유＋성공 검증까지 재시도</option>
+            <option value="single">단일 선택 · 한 모델만 호출</option><option value="adaptive">적응형 협업 · 마지막 모델 우선, 필요할 때만 보조</option><option value="pipeline">순차 파이프라인 · 노드별 전달</option><option value="vote">회의·투표 · 그룹별 상호 토론</option><option value="hybrid">혼합 · 분류＋그룹 회의＋검증</option><option value="swarm">경쟁 스웜 · 병렬 풀이＋공유＋성공 검증까지 재시도</option>
           </Select></Field>
+          {routing.executionMode === 'adaptive' && <p className="muted">마지막 모델이 먼저 실행합니다. 앞 모델은 등록된 읽기 전용 보조 모델이며 자동으로 전부 호출하지 않습니다. Codex 네이티브의 보조 실행은 감사 전용 토큰 정책과 세션 연결이 필요합니다. 권한과 예산은 그대로 유지됩니다.</p>}
           {(routing.executionMode === 'vote' || routing.executionMode === 'hybrid' || routing.executionMode === 'swarm') && <Field label="그룹 내부 회의 라운드" hint="2라운드부터 같은 그룹의 의견·증거·실패 기록을 공유합니다"><Select value={String(routing.meetingRounds ?? 2)} onChange={(e) => void saveRouting({ meetingRounds: Number(e.target.value) })}>
             <option value="1">1라운드 · 독립 의견만</option><option value="2">2라운드 · 의견 교환 + 투표 (권장)</option><option value="3">3라운드 · 재토론 + 최종 투표</option>
           </Select></Field>}
@@ -1369,7 +1370,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
             {routingPresets.map((item) => <button key={item.id} className={item.id === selectedRoutingPresetId ? 'active' : ''} onClick={() => {
               setSelectedRoutingPresetId(item.id);
               setRoutingPresetName(item.builtin ? '' : item.name);
-            }}><span>{item.builtin ? '기본' : '사용자'}</span><b>{item.name}</b><small>{item.executionMode === 'pipeline' ? '순차 검증' : item.executionMode === 'vote' ? '그룹 투표' : item.executionMode === 'hybrid' ? '혼합형' : item.executionMode === 'swarm' ? '경쟁 스웜' : '단일 선택'}</small></button>)}
+            }}><span>{item.builtin ? '기본' : '사용자'}</span><b>{item.name}</b><small>{item.executionMode === 'adaptive' ? '적응형 협업' : item.executionMode === 'pipeline' ? '순차 검증' : item.executionMode === 'vote' ? '그룹 투표' : item.executionMode === 'hybrid' ? '혼합형' : item.executionMode === 'swarm' ? '경쟁 스웜' : '단일 선택'}</small></button>)}
           </aside>
           <section className="preset-browser-preview">
             {selectedRoutingPreset ? <>

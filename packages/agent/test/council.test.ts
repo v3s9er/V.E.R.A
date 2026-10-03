@@ -89,6 +89,19 @@ function meter() {
   return { cb, counts: () => ({ live, calls, settled }) };
 }
 
+test('identical per-member revisions stop a third debate round but still run the judge', async () => {
+  let stages = 0, finals = 0;
+  const statuses: string[] = [];
+  const loop = mock(async req => {
+    if (isStage(req, 'a') || isStage(req, 'b')) { stages++; return answer('Unchanged proposal, not a verified fact.'); }
+    finals++; assert.match(req.context!, /Independently check/); return answer('FINAL');
+  });
+  const options = scenario(); options.routing!.meetingRounds = 3;
+  const r = await loop.run([], 'Solve the supplied question', { onStatus: s => statuses.push(s) }, [], options);
+  assert.equal(stages, 4); assert.equal(finals, 1); assert.equal(r.text, 'FINAL');
+  assert.ok(statuses.some(s => /답안 변경 없음/.test(s)));
+});
+
 test('council defaults bound deliberation independently of final verification', () => {
   assert.deepEqual(councilLimits('quality'), { deliberationMs: 90000, nodeMs: 75000, graceMs: 15000 });
   assert.ok(councilLimits('economy').deliberationMs < councilLimits('balanced').deliberationMs);

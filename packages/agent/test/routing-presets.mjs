@@ -10,7 +10,10 @@ const home = mkdtempSync(join(tmpdir(), 'mr-robot-routing-'));
 const config = new ConfigStore(home);
 
 const builtins = config.routingPresets.filter((preset) => preset.builtin);
-if (builtins.length !== 11) throw new Error(`expected 11 built-in routing presets, got ${builtins.length}`);
+if (builtins.length !== 12) throw new Error(`expected 12 built-in routing presets, got ${builtins.length}`);
+config.applyRoutingPreset('builtin:adaptive-master');
+if (config.routing.executionMode !== 'adaptive') throw new Error('adaptive preset did not preserve its execution policy');
+if (new ConfigStore(home).routing.executionMode !== 'adaptive') throw new Error('adaptive policy did not survive configuration reload');
 if (builtins.some((preset) => preset.graph?.nodes.some((node) => node.kind !== 'model' || !node.role))) throw new Error('built-in routing graph contains a non-model or role-less node');
 for (const preset of builtins) {
   const nodes = preset.graph?.nodes ?? [];

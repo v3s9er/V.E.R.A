@@ -119,7 +119,7 @@ function normalizeDeviceCapabilities(value: unknown, permissionCap: PermissionMo
 }
 
 const routingModes = new Set(['economy', 'balanced', 'quality', 'manual']);
-const executionModes = new Set(['single', 'pipeline', 'vote', 'hybrid', 'swarm']);
+const executionModes = new Set(['single', 'adaptive', 'pipeline', 'vote', 'hybrid', 'swarm']);
 const modelRoles = new Set(['router', 'fast', 'general', 'reasoning', 'coding', 'vision', 'critic', 'summarizer']);
 // The current execution engine treats every visual node as a model role.
 // Legacy decorative node kinds are normalized by the editor, but must not be
@@ -402,6 +402,20 @@ export function builtInRoutingPresets(): RoutingPreset[] {
           { id: 'e1', from: 'router', to: 'general' }, { id: 'e2', from: 'router', to: 'reasoning' }, { id: 'e3', from: 'router', to: 'coding' },
           { id: 'e4', from: 'general', to: 'judge' }, { id: 'e5', from: 'reasoning', to: 'judge' }, { id: 'e6', from: 'coding', to: 'judge' },
         ],
+      },
+    },
+    {
+      id: 'builtin:adaptive-master', name: '적응형 협업 · 필요할 때만 보조',
+      description: '마지막 모델이 먼저 실행하고, 필요한 독립 조사나 반례 검토만 앞의 읽기 전용 모델에 맡깁니다. 고정 계획·토론 라운드는 없습니다. 노드별 모델은 직접 지정할 수 있으며 기본 설정은 자동 변경하지 않습니다.',
+      builtin: true, createdAt: 0, updatedAt: 0, mode: 'quality', executionMode: 'adaptive',
+      roles: {}, maxPremiumCalls: 6, escalationEnabled: false,
+      graph: {
+        nodes: [
+          { id: 'research', kind: 'model', label: '독립 조사 보조', role: 'reasoning', x: 30, y: 80 },
+          { id: 'review', kind: 'model', label: '반례 검토 보조', role: 'critic', x: 30, y: 240 },
+          { id: 'master', kind: 'model', label: '실행과 검증 담당', role: 'general', x: 360, y: 160 },
+        ],
+        edges: [{ id: 'e1', from: 'research', to: 'master' }, { id: 'e2', from: 'review', to: 'master' }],
       },
     },
     {

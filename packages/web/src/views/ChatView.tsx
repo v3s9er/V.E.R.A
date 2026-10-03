@@ -1156,7 +1156,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 });
               }} disabled={executionControlsDisabled}>
                 <option value="">단일 모델</option>
-                {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
+                {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'adaptive' ? ' · 적응형 협업' : preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
               </Select>
 <small>선택하지 않으면 입력창에서 고른 단일 모델로 실행합니다.</small></label>
                         <label className="composer-select-control" title={selectedTokenPolicy.detail}>

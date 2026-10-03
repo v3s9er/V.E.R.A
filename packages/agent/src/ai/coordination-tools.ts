@@ -14,6 +14,24 @@ export const COORDINATION_TOOLS: NeutralTool[] = [
   { name: 'agent_cancel', description: 'Cancel one helper owned by this run, including queued work.', parameters: object({ agentId: { type: 'string' } }, ['agentId']) },
 ];
 
+/** The model can select a configured worker, never invent a provider/model. */
+export function coordinationTools(workers: readonly { id: string; label: string; model: string }[]): NeutralTool[] {
+  if (!workers.length) return COORDINATION_TOOLS;
+  return COORDINATION_TOOLS.map(tool => tool.name !== 'agent_spawn' ? tool : {
+    ...tool,
+    description: 'Start a bounded read-only helper. Omit workerId to use your model, or select a host-configured worker. No shell, writes, desktop, plugins, or delegation. Max 2 concurrent / 6 total.',
+    parameters: object({ task: { type: 'string', maxLength: 8192 }, context: { type: 'string', maxLength: 16384 }, label: { type: 'string', maxLength: 80 },
+      workerId: { type: 'string', enum: workers.map(w => w.id), description: workers.map(w => `${w.id}: ${w.label.slice(0, 80)} (${w.model})`).join('; ') } }, ['task']),
+  });
+}
+
+export const ADAPTIVE_COORDINATION_GUIDANCE = `
+You are the adaptive master, not a mandatory chain of planners and reviewers. Start solving the user's actual request yourself. Do not call helpers just because the task is long or difficult.
+First seek objective evidence: use allowed tools to run a relevant test, calculation, schema/shape check or reproduction when needed. A format check is NOT proof of semantic correctness. Never claim a check ran when it did not.
+Delegate only an independent subproblem or a specific unresolved uncertainty where new evidence could change the result. agent_spawn may select workerId ONLY from the configured allowlist; omitted means your own model. Keep the assignment self-contained, include source evidence and constraints, and avoid giving an independent solver your preferred answer. Helpers are read-only and cannot run shell commands or inherit your other capabilities.
+Use a concise evidence/answer/counterexample handoff, not copied prompts or full transcripts. No confidence-score voting or automatic repeated debate. Incorporate only findings supported by evidence; a failed helper is missing evidence, not agreement. If it adds no new evidence, stop delegating and finish with the available evidence and honest limitations.
+For simple requests, answer directly with no helpers. For complex work, run independent branches concurrently only when useful, while you handle dependent work and verification. Cancel unnecessary helpers. You remain the sole owner of writes, final verification and the user-facing answer.`;
+
 export function isCoordinationTool(name: string): boolean { return COORDINATION_TOOLS.some(t => t.name === name); }
 const deliveredTurns = new WeakMap<SubagentManager, Map<string, number>>();
 export async function executeCoordination(manager: SubagentManager, name: string, input: unknown, signal: AbortSignal): Promise<string> {
@@ -21,7 +39,7 @@ export async function executeCoordination(manager: SubagentManager, name: string
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid helper arguments.');
   const p = input as Record<string, any>;
   switch (name) {
-    case 'agent_spawn': return JSON.stringify(manager.spawn({ task: p.task, context: p.context, label: p.label }));
+    case 'agent_spawn': return JSON.stringify(manager.spawn({ task: p.task, context: p.context, label: p.label, workerId: p.workerId }));
     case 'agent_list': return JSON.stringify(manager.list().map(({ result: _r, error: _e, ...status }) => status));
     case 'agent_wait': {
       const startedAt = performance.now();

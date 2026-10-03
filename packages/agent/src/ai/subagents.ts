@@ -18,6 +18,8 @@ export interface SubagentSnapshot {
 export interface SubagentHistoryTurn { role: 'user' | 'assistant'; content: string }
 export interface SubagentExecutionInput {
   agentId: string;
+  /** Resolved from the host-owned allowlist, never arbitrary model input. */
+  workerId?: string;
   task: string;
   context: string;
   /** New follow-ups only. The first invocation always has an empty array. */
@@ -33,6 +35,7 @@ export interface SubagentManagerOptions {
   signal?: AbortSignal;
   /** Host-owned tuning may reduce, never exceed the existing two-worker cap. */
   maxParallel?: 1 | 2;
+  workers?: readonly { id: string; label: string; providerId: string; model: string }[];
   /** Must honor cancellation; admission remains held until this promise settles. */
   execute(input: SubagentExecutionInput): Promise<{
     text: string;
@@ -106,6 +109,7 @@ type Worker = {
   messages: string[];
   acceptedMessages: number;
   history: SubagentHistoryTurn[];
+  workerId?: string;
 };
 
 function boundedInput(value: unknown, label: string, maximum: number, optional = false): string {
@@ -135,16 +139,18 @@ export class SubagentManager {
     else options.signal?.addEventListener('abort', this.abortParent, { once: true });
   }
 
-  spawn(input: { task: string; context?: string; label?: string }): { agentId: string } {
+  spawn(input: { task: string; context?: string; label?: string; workerId?: string }): { agentId: string } {
     this.assertOpen();
+    const profile = input.workerId === undefined ? undefined : this.options.workers?.find(w => w.id === input.workerId);
+    if (input.workerId !== undefined && !profile) throw new Error('허용된 보조 모델이 아닙니다.');
     if (this.workers.size >= MAX_CHILDREN) throw new Error('한 작업에서 하위 에이전트는 최대 6개까지 만들 수 있습니다.');
     const task = boundedInput(input.task, '작업', TASK_BYTES);
     const context = boundedInput(input.context, '문맥', CONTEXT_BYTES, true);
     const label = boundedInput(input.label, '이름', 160, true) || `작업자 ${this.workers.size + 1}`;
     const agentId = randomUUID();
     const worker: Worker = {
-      task, context, controller: new AbortController(), messages: [], acceptedMessages: 0, history: [],
-      snapshot: { agentId, label, providerId: this.options.providerId, model: this.options.model,
+      task, context, controller: new AbortController(), messages: [], acceptedMessages: 0, history: [], workerId: profile?.id,
+      snapshot: { agentId, label, providerId: profile?.providerId ?? this.options.providerId, model: profile?.model ?? this.options.model,
         state: 'queued', sequence: 0, turns: 0, status: '실행 대기 중', usage: { promptTokens: 0, completionTokens: 0 } },
     };
     this.workers.set(agentId, worker);
@@ -286,7 +292,7 @@ export class SubagentManager {
         this.publish(worker);
       }, INVOCATION_MS);
       const result = await this.options.execute({
-        agentId: worker.snapshot.agentId, task: worker.task, context: worker.context,
+        agentId: worker.snapshot.agentId, workerId: worker.workerId, task: worker.task, context: worker.context,
         messages, history: worker.history.map(turn => ({ ...turn })), signal: controller.signal,
         onStatus: status => {
           if (controller.signal.aborted || typeof status !== 'string') return;

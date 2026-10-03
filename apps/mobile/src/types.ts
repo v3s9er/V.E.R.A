@@ -214,7 +214,7 @@ export interface RoutingPreset {
   name: string;
   description: string;
   builtin: boolean;
-  executionMode?: 'single' | 'pipeline' | 'vote' | 'hybrid';
+  executionMode?: 'single' | 'adaptive' | 'pipeline' | 'vote' | 'hybrid' | 'swarm';
   meetingRounds?: number;
   graph?: { nodes: Array<{ id: string; label: string; role?: string; groupId?: string }> };
 }

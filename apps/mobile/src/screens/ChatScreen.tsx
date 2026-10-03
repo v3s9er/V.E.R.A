@@ -1187,7 +1187,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
                 <Text style={styles.modelSectionTitle}>복합 트리</Text>
                 {routingPresets.map((preset) => <TouchableOpacity key={preset.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectScenario(preset.id)}>
                   <Text style={styles.modelProvider}>{preset.name}</Text>
-                  <Text style={styles.modelName}>{preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
+                  <Text style={styles.modelName}>{preset.executionMode === 'adaptive' ? '적응형 협업' : preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
                   <Text style={styles.faintChoice}>{preset.description}</Text>
                 </TouchableOpacity>)}
               </ScrollView>
