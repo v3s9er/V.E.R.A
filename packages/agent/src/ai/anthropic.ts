@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from '@mr-robot/shared';
+import { contextualTurns } from './request-context.js';
 import {
   MAX_PROVIDER_RECORDED_TOKENS,
   normalizeProviderUsageReport,
@@ -157,7 +158,7 @@ export class AnthropicProvider implements AiProvider {
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: req.maxTokens ?? 4096,
-      messages: toAnthropicMessages(req.turns),
+      messages: toAnthropicMessages(contextualTurns(req)),
       stream: true,
       ...(req.promptCacheKey ? { cache_control: { type: 'ephemeral' } } : {}),
       ...(req.system ? { system: req.system } : {}),

@@ -19,6 +19,9 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(m.method!=='turn/start')return;
  if(m.params.outputSchema||m.params.environments.length||m.params.runtimeWorkspaceRoots.length)throw Error('plain boundary');
  const mode=m.params.input[0].text;const turnId=`turn-${++count}`;const itemId=`message-${count}`;
+ if(mode.includes('EXPECT_CONTEXT_NEW') && (!mode.includes('CONTEXT_NEW') || mode.includes('CONTEXT_OLD')))throw Error('stale context');
+ if(mode.includes('EXPECT_CONTEXT_UNCHANGED') && mode.includes('Current retained context'))throw Error('unchanged context duplicated');
+ if(mode.includes('EXPECT_CONTEXT_CLEAR') && !mode.includes('"(none)"'))throw Error('removed context not cleared');
  const p={threadId,turnId};
  send({id:m.id,result:{turn:{id:turnId}}});
  if(mode.includes('PARTIAL')){

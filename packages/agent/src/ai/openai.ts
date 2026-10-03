@@ -14,6 +14,7 @@ import {
 import { toOpenAiTools } from './tools.js';
 import { createProviderRequestDeadline, readErrorBody, readSse } from './sse.js';
 import { validateSamplingTemperature } from './model-tuning.js';
+import { contextualTurns } from './request-context.js';
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '');
@@ -193,7 +194,7 @@ export class OpenAICompatibleProvider implements AiProvider {
   async chat(req: ChatRequest): Promise<ProviderResult> {
     validateSamplingTemperature(this, req.temperature, req.reasoningEffort);
     const deadline = createProviderRequestDeadline(req.signal);
-    const boundedRequest: ChatRequest = { ...req, signal: deadline.signal };
+    const boundedRequest: ChatRequest = { ...req, turns: contextualTurns(req), context: undefined, signal: deadline.signal };
     try {
       return this.usesResponsesApi()
         ? await this.chatResponses(boundedRequest)

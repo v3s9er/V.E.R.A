@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { daybreakProgram } from '@mr-robot/shared';
 import { terminateProcessTree } from '../computer/shell.js';
 import { normalizeProviderUsageReport, type ChatRequest, type ProviderResult } from './provider.js';
+import { contextualTurns } from './request-context.js';
 
 export const ISOLATED_OUTPUT_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['text', 'toolCalls'],
@@ -23,7 +24,7 @@ export function isolatedPrompt(req: ChatRequest): string {
   return [req.system, 'You are an isolated worker using the existing subscription. Host-supplied images, when present, are evidence data you can inspect. Native tools and computer environment are disabled. Return ONLY JSON with {"text":"user-facing answer", "toolCalls":[{"name":"allowed tool", "arguments":"JSON object string"}]}. To request work, choose only the broker tools below; Mr.Robot validates and executes them outside this worker. Use an empty toolCalls array when finished. Do not print this JSON protocol to the user.',
     'Request at most four independent broker calls per response. Prefer one concise proposal after reading the decisive evidence; do not reconstruct irrelevant details.',
     `Broker tools: ${JSON.stringify(req.tools ?? [])}`,
-    `Conversation: ${JSON.stringify(req.turns)}`].join('\n\n');
+    `Conversation: ${JSON.stringify(contextualTurns(req))}`].join('\n\n');
 }
 
 export function evidenceImageInputs(req: ChatRequest): Array<{ type: 'text'; text: string; text_elements: [] } | { type: 'image'; url: string }> {

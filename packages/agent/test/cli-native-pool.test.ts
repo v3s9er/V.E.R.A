@@ -26,6 +26,11 @@ try {
   const c = await call(next(second, b.text));
   assert.equal(c.text, 'answer 3', 'resume exact persisted thread after worker shutdown');
   assert.equal(c.usage.promptTokens, 100, 'old token totals not charged again after resume');
+  const interlude = next(next(second, b.text), c.text, 'EXPECT_INTERLUDE');
+  interlude.session!.history.push({ role: 'user', content: 'INTERLUDE_DATA' }, { role: 'assistant', content: 'a separate text turn' });
+  assert.equal((await call(interlude)).text, 'answer 4', 'verified appended host turns do not discard a native session');
+  const rewritten = { ...interlude, session: { ...interlude.session!, input: 'different', history: interlude.session!.history.map((t, i) => i === 1 ? { ...t, content: 'changed earlier answer' } : t) } };
+  assert.equal((await call(rewritten)).text, 'answer 1', 'same-length or appended histories never hide an earlier rewrite');
   assert.ok(!readFileSync(join(dir, 'native-sessions.json'), 'utf8').includes('FIRST_PRIVATE_INPUT'));
   assert.equal((await call({ ...base, session: { ...base.session!, key: 'other-user' } })).text, 'answer 1');
   const tools: unknown[] = [];

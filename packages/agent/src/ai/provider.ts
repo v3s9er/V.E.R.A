@@ -106,6 +106,8 @@ export interface ChatRequest {
   evidenceImages?: Array<{ label: string; dataUrl: string }>;
   daybreakEnabled?: boolean;
   system?: string;
+  /** Host-provided changing evidence, separate from stable instructions/history. */
+  context?: string;
   turns: Turn[];
   tools?: NeutralTool[];
   temperature?: number;

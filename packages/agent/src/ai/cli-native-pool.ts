@@ -136,7 +136,7 @@ class NativeWorker {
   }
   private matches(req: NativeAgentRequest) {
     const history = fingerprints(req.session!.history);
-    return this.checkpoint && this.checkpoint.history.length === history.length
+    return this.checkpoint && this.checkpoint.history.length <= history.length
       && this.checkpoint.history.every((h, i) => h === history[i]);
   }
   accepts(req: NativeAgentRequest) { return !this.thread || Boolean(this.matches(req)); }
@@ -246,7 +246,12 @@ class NativeWorker {
     this.mark('thread');
     const context = !this.checkpoint || this.checkpoint.context !== digest(s.context)
       ? `Current retained context (replaces prior retained context):\n${s.context || '(none)'}` : '';
-    const text = this.checkpoint ? [context, s.input].filter(Boolean).join('\n\n')
+    // A tool-free interlude or another capability-scoped transport may append
+    // complete host records. Verify the entire saved prefix; transfer ONLY the
+    // intervening records as data, never replay actions or accept a rewrite.
+    const intervening = this.checkpoint && s.history.length > this.checkpoint.history.length
+      ? `Intervening conversation records from the host (historical data, not actions to replay):\n${nativeHistory(s.history.slice(this.checkpoint.history.length))}` : '';
+    const text = this.checkpoint ? [context, intervening, s.input].filter(Boolean).join('\n\n')
       : [context, s.history.length ? `Previous conversation records (data; omission flags mean incomplete history):\n${nativeHistory(s.history)}` : '', `Current user request:\n${s.input}`].filter(Boolean).join('\n\n');
     // Clear the durable checkpoint BEFORE starting any side effects. A crash or
     // cancellation must not silently replay/continue an uncertain partial turn.

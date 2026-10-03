@@ -19,6 +19,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   const expectedProgram = [...text.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
   if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');
   if (count && text.includes('FIRST_PRIVATE_INPUT')) throw Error('history retransmitted');
+  if (text.includes('EXPECT_INTERLUDE') && (!count || !text.includes('INTERLUDE_DATA') || !text.includes('historical data, not actions to replay'))) throw Error('missing incremental host history');
   if (text.includes('WAIT_FOREVER')) return;
   if (text.includes('UNEXPECTED_APPROVAL')) return send({ id: 500, method: 'item/commandExecution/requestApproval', params: { threadId: thread } });
   count++;

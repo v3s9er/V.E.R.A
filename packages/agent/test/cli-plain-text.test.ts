@@ -38,3 +38,14 @@ test('plain isolated text streams immediately, completes the suffix once, and re
   assert.equal(initialized,2,'bounded thread recycling eventually retires the process');
  }finally{closeTextWorkers();await waitForCliRetirements(process.env);}
 });
+
+test('changing retained evidence preserves one text session and explicitly clears removed context', async () => {
+ try {
+  const req: ChatRequest = { system: 'stable instructions', promptCacheKey: 'context-update', context: 'CONTEXT_OLD', turns: [{ role: 'user', content: 'first' }] };
+  let answer = await call(req);
+  for (const [input, context, count] of [['EXPECT_CONTEXT_NEW', 'CONTEXT_NEW', 2], ['EXPECT_CONTEXT_UNCHANGED', 'CONTEXT_NEW', 3], ['EXPECT_CONTEXT_CLEAR', undefined, 4]] as const) {
+   req.turns.push({ role: 'assistant', content: answer.text }, { role: 'user', content: input }); req.context = context;
+   answer = await call(req); assert.equal(answer.text, `답변 ${count}: 안녕 👋`);
+  }
+ } finally { closeTextWorkers(); await waitForCliRetirements(process.env); }
+});

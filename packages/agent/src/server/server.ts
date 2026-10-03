@@ -2,6 +2,8 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { networkInterfaces, hostname as osHostname, platform, homedir } from 'node:os';
 import { join as joinFilePath } from 'node:path';
 import { chatFileRoot } from './chat-file-access.js';
+import { AdaptiveExecution } from '../ai/adaptive-execution.js';
+import { isTextOnlyTask } from '../ai/request-shape.js';
 import { readDiscordFile } from './discord-files.js';
 import { createDiscordIsolation, readIsolatedArtifact } from './discord-isolation.js';
 import type { AddressInfo } from 'node:net';
@@ -92,7 +94,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.10';
+export const VERSION = '0.6.11';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -2596,7 +2598,9 @@ export class AgentServer {
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const extraTools = isolation ? [] : this.plugins.aiTools(text);
         const history = this.conversations.turns(conversationId);
-        let observed = !isolation && workspace && runWorkspaceId
+        const selfContained = !conversationRouting && !isolation
+          && (new AdaptiveExecution(text, history).depth === 'direct' || isTextOnlyTask(text, history));
+        let observed = !isolation && !selfContained && workspace && runWorkspaceId
           ? await readProjectKnowledge(workspace.path, runWorkspaceId) : { facts: [], partial: false };
         session.signal()?.throwIfAborted();
         const knowledgeScope = { workspaceId: runWorkspaceId, conversationId };
@@ -2611,7 +2615,7 @@ export class AgentServer {
           }
           return result;
         };
-        const knowledge = isolation ? undefined : inspectKnowledge(text, history.filter(t => t.role === 'user').at(-1)?.content);
+        const knowledge = isolation || selfContained ? undefined : inspectKnowledge(text, history.filter(t => t.role === 'user').at(-1)?.content);
         knowledgeMetrics = knowledge?.metrics;
         const memoryContext = knowledge?.context ?? '';
         if (knowledge && (knowledge.metrics.asserted || knowledge.metrics.conflicts)) sendRunEvent('chat.status', { conversationId, status: `지식 검사 · 사실 ${knowledge.metrics.asserted} · 추론 ${knowledge.metrics.inferred} · 미해결 충돌 ${knowledge.metrics.conflicts}${knowledge.metrics.truncated ? ' · 일부만 조회' : ''}` });

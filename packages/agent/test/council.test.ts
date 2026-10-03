@@ -118,8 +118,9 @@ test('one completed proposal unblocks a stuck sibling; late results cannot mutat
     if (isStage(req, 'b')) { slowSignal = req.signal; return new Promise(resolve => { late = resolve; }); }
     final++;
     assert.ok(slowSignal?.aborted);
-    assert.match(req.system!, /CANDIDATE_EVIDENCE/);
-    assert.match(req.system!, /Never infer consensus/);
+    assert.match(req.context!, /CANDIDATE_EVIDENCE/);
+    assert.match(req.context!, /Never infer consensus/);
+    assert.doesNotMatch(req.system!, /CANDIDATE_EVIDENCE/);
     assert.equal(accounting.counts().live, 1, 'only the judge lease is live');
     return answer('FINAL_VERIFIED');
   });
@@ -143,8 +144,8 @@ test('all stuck nodes time out and the judge independently solves without invent
   const loop = mock(async req => {
     if (req.promptCacheKey?.includes(':stage:')) { signals.push(req.signal!); return never(); }
     assert.ok(signals.every(signal => signal.aborted));
-    assert.match(req.system!, /2 stages failed/);
-    assert.match(req.system!, /If no valid proposal is available/);
+    assert.match(req.context!, /2 stages failed/);
+    assert.match(req.context!, /If no valid proposal is available/);
     return answer();
   });
   const output = await loop.run([], 'A mathematical question', { ...accounting.cb, onStatus: s => statuses.push(s) }, [], scenario());
@@ -159,7 +160,7 @@ test('failed and empty proposals are not votes and provider errors never enter e
     if (isStage(req, 'a')) throw new Error('SECRET_PRIVATE_PROVIDER_RESPONSE');
     if (isStage(req, 'b')) return answer('   ');
     assert.ok(!JSON.stringify(req).includes('SECRET_PRIVATE_PROVIDER_RESPONSE'));
-    assert.match(req.system!, /2 stages failed/);
+    assert.match(req.context!, /2 stages failed/);
     return answer();
   });
   await loop.run([], 'Question', { onStatus: s => progress.push(s), onAgentUpdate: s => progress.push(s) }, [], scenario());
@@ -196,8 +197,8 @@ test('completed evidence is passed once; fast peers all finish without waiting f
     calls++;
     if (isStage(req, 'a')) return answer('UNIQUE_A');
     if (isStage(req, 'b')) return answer('UNIQUE_B');
-    assert.equal(req.system!.split('UNIQUE_A').length, 2);
-    assert.equal(req.system!.split('UNIQUE_B').length, 2);
+    assert.equal(req.context!.split('UNIQUE_A').length, 2);
+    assert.equal(req.context!.split('UNIQUE_B').length, 2);
     return answer();
   });
   const start = performance.now();
@@ -267,7 +268,7 @@ test('independent groups start concurrently and retain earlier evidence when exc
       return answer(isStage(req, 'a') ? 'GROUP_ONE' : 'GROUP_TWO');
     }
     if (req.system?.includes('You represent AI group')) throw new Error('exchange failed');
-    assert.match(req.system!, /GROUP_ONE/); assert.match(req.system!, /GROUP_TWO/);
+    assert.match(req.context!, /GROUP_ONE/); assert.match(req.context!, /GROUP_TWO/);
     return answer();
   });
   await loop.run([], 'Question', {}, [], opts);
@@ -289,8 +290,8 @@ test('a failed later round preserves earlier evidence for the missing participan
   const loop = mock(async req => {
     if (isStage(req, 'a')) return answer(++a === 1 ? 'OLD_A' : 'LATEST_A');
     if (isStage(req, 'b')) { if (++b === 2) throw new Error('failed revision'); return answer('VALID_B'); }
-    assert.match(req.system!, /LATEST_A/); assert.match(req.system!, /VALID_B/);
-    assert.ok(!req.system!.includes('OLD_A'));
+    assert.match(req.context!, /LATEST_A/); assert.match(req.context!, /VALID_B/);
+    assert.ok(!req.context!.includes('OLD_A'));
     return answer();
   });
   await loop.run([], 'Question', {}, [], options);

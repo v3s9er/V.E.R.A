@@ -8,6 +8,7 @@ import { pooledCodexText } from './cli-text-pool.js';
 import { pooledNativeCodex } from './cli-native-pool.js';
 import { discoverCodexModels, discoverCodexVersion, ModelListCache } from './cli-models.js';
 import { normalizeProviderUsageReport } from './provider.js';
+import { contextualTurns } from './request-context.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, BrokerAgentRequest, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
@@ -398,7 +399,7 @@ export class CliProvider implements AiProvider {
       // Deliberately ignored. Local CLI adapters are reasoning workers, while
       // Mr.Robot executes computer tools under its own permission policy.
     }
-    const prompt = transcript(req.system, req.turns);
+    const prompt = transcript(req.system, contextualTurns(req));
     const effort = req.reasoningEffort && req.reasoningEffort !== 'auto' ? req.reasoningEffort : undefined;
     const extras = safeCliExtraArgs(this.type, this.extraArgs);
     const args = [

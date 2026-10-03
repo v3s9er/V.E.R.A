@@ -21,7 +21,7 @@ test('real loop applies inference tuning before budget reservation without touch
   }, [], { context: '보조 자료'.repeat(2000), workspacePath: 'fixture', permissionMode: 'read-only', tokenPolicy: 'standard' });
   assert.equal(configured, 'none'); assert.equal(received?.reasoningEffort, 'none');
   assert.equal(received?.maxTokens, 512); assert.equal(received?.temperature, .2);
-  assert.match(received?.system ?? '', /be concise/); assert.match(received?.system ?? '', /보조 문맥 일부 생략/);
+  assert.match(received?.system ?? '', /be concise/); assert.match(received?.context ?? '', /보조 문맥 일부 생략/);
   assert.ok(!received?.tools?.some(tool => tool.name === 'agent_spawn'));
   assert.deepEqual(output.turns.slice(0, 2), history); assert.ok(maximum > 512);
   assert.equal(selected.model, 'gpt-5.1');
