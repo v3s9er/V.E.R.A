@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.6.11",
+  "version": "0.6.12",
   "private": true,
   "license": "MIT",
   "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
@@ -37,7 +37,7 @@
     "test:discord-spaces": "tsx packages/agent/test/discord-conversation-spaces.test.ts",
     "test:discord-audio-installed": "tsx packages/agent/test/discord-audio-installed.test.ts",
     "test:codex-installed": "tsx packages/agent/test/cli-pool-installed.test.ts && tsx packages/agent/test/cli-plain-installed.test.ts && tsx packages/agent/test/cli-broker-installed.test.ts && tsx packages/agent/test/cli-native-installed.test.ts",
-    "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts && tsx --test packages/agent/test/native-orchestration.test.ts",
+    "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts && tsx --test packages/agent/test/native-orchestration.test.ts packages/agent/test/pipeline-native-route.test.ts",
     "test:desktop-native": "tsx --test packages/agent/test/desktop-runtime.test.ts packages/agent/test/native-desktop.test.ts packages/agent/test/desktop-browser.test.ts",
     "test:desktop-recovery": "node --test scripts/tests/desktop-window-recovery.test.mjs scripts/tests/desktop-window-bounds.test.mjs",
     "test:desktop-recovery-live": "node scripts/tests/desktop-window-recovery.smoke.mjs",

@@ -687,6 +687,7 @@ export class AgentLoop {
       if (!stageProvider) return { label: node.label, model: '연결 없음', text: '사용 가능한 모델이 없어 의견을 내지 못했습니다.' };
       observation?.provider(stageProvider);
       cb.onStatus?.(status ?? `${executionMode === 'pipeline' ? '순차 전달 중' : '회의 의견 수집 중'} · ${node.label}`);
+      cb.onStatus?.(`단계 모델 · ${node.label} · ${stageProvider.model}`);
       try {
         // Only host-brokered read-only evidence; no native environment, shell,
         // writes, plugins, or coordinator capabilities are lent to candidates.
@@ -1043,6 +1044,10 @@ export class AgentLoop {
       routeRole = finalNode.role ?? routeRole;
       routeReason = `순차 파이프라인 · ${nodes.length}단계`;
       retainedContext = [retainedContext, 'Sequential scenario handoff:', ...stageResults.map((item) => `[${item.label} · ${item.model}]\n${item.text}`)].filter(Boolean).join('\n\n').slice(-50_000);
+      // A selected native final model owns execution, just as in single/vote mode.
+      // Do not mistake its lack of API tool calls for missing native capabilities
+      // and silently replace it with another provider's tool executor.
+      if (canRunNative(provider)) return await runNativeMain(provider);
     } else if (executionMode === 'swarm' && nodes.length > 2) {
       const finalNode = [...nodes].reverse().find((node) => node.role === 'critic') ?? nodes[nodes.length - 1];
       const evidenceNodes = nodes.filter((node) => node.id !== finalNode.id && node.role === 'router');
