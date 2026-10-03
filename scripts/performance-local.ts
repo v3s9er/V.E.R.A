@@ -31,7 +31,7 @@ try {
     ['context.pack.24handoffs', () => { const v = broker.rolePack('reviewer', request, handoffs, 18_000); assert.ok(v.includes(request)); assert.ok(v.length <= 18_000); assert.equal((v.match(/HEAD-/g) ?? []).length, 24); return Buffer.byteLength(v); }],
     ['mcp.discovery.cold250', async () => { discovery.clear(); const before = listCalls; const v = await discovery.discover('synthetic', { limit: 12 }, list); assert.equal(listCalls, before + 1); assert.equal(v.tools?.length, 12); return Buffer.byteLength(JSON.stringify(v)); }],
     ['mcp.discovery.warm250', async () => { const before = listCalls; const v = await discovery.discover('synthetic', { limit: 12 }, list); assert.equal(listCalls, before); assert.equal(v.tools?.length, 12); return Buffer.byteLength(JSON.stringify(v)); }],
-    ['mcp.schema.oneOf250', async () => { const before = listCalls; const v = await discovery.discover('synthetic', { tool: 'synthetic_tool_42' }, list); assert.equal(listCalls, before); assert.equal(v.tool?.name, 'synthetic_tool_42'); return Buffer.byteLength(JSON.stringify(v)); }],
+    ['mcp.schema.oneOf250', async () => { const before = listCalls; const v = await discovery.discover('synthetic', { tool: 'synthetic_tool_42' }, list); assert.equal(listCalls, before); assert.ok('tool' in v); assert.equal(v.tool?.name, 'synthetic_tool_42'); return Buffer.byteLength(JSON.stringify(v)); }],
     ['scheduler.fifo32', async () => {
       const scheduler = new NativeRunScheduler(1, 32), release = await scheduler.acquire('head');
       const order: number[] = [];

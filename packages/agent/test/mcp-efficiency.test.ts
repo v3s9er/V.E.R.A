@@ -72,6 +72,78 @@ test('tool output bounds include JSON escaping and preserve the server error fla
   for (const invalid of [0, 999, 32_001, 1_000.5, '12000', NaN]) assert.throws(() => mcpResultLimit(invalid));
 });
 
+test('keyword search ranks across upstream pages and returns an exact schema cursor, not every schema', async () => {
+  const discovery = new McpDiscovery();
+  const requested: (string | undefined)[] = [];
+  const list = async (cursor?: string) => {
+    requested.push(cursor);
+    return cursor === 'second' ? { tools: [tool('findSymbol'), tool('symbolReferences')] }
+      : { tools: [...Array.from({ length: 100 }, (_, i) => tool(`unrelated_${i}`)), { ...tool('unrelated'), description: 'Find symbol help' }], nextCursor: 'second' };
+  };
+  const search = await discovery.discover('code', { query: 'find symbol', limit: 2 }, list);
+  assert.ok('searchComplete' in search && search.searchComplete);
+  assert.equal(search.tools?.[0].name, 'findSymbol');
+  assert.equal(search.tools?.length, 2);
+  assert.equal(search.tools?.some(item => 'inputSchema' in item), false);
+  assert.ok(JSON.stringify(search).length < 1800);
+  const first = search.tools![0];
+  assert.ok('cursor' in first);
+  const schema = await discovery.discover('code', { tool: first.name, cursor: first.cursor }, list);
+  assert.equal(schema.tool?.name, 'findSymbol');
+  assert.ok(schema.tool?.inputSchema);
+  assert.deepEqual(requested, [undefined, 'second']);
+});
+
+test('search bounds upstream work and binds continuation to the same server and query', async () => {
+  const discovery = new McpDiscovery(); let calls = 0;
+  const list = async (cursor?: string) => { calls++; const n = Number(cursor ?? 0); return { tools: [tool(`needle_${n}`)], ...(n < 5 ? { nextCursor: String(n + 1) } : {}) }; };
+  const first = await discovery.discover('many', { query: 'needle', limit: 2 }, list);
+  assert.ok('searchComplete' in first && !first.searchComplete);
+  assert.equal(calls, 4); assert.equal(first.tools?.length, 2);
+  await assert.rejects(discovery.discover('other', { query: 'needle', cursor: first.nextCursor }, list), /cursor/);
+  await assert.rejects(discovery.discover('many', { query: 'changed', cursor: first.nextCursor }, list), /cursor/);
+  await assert.rejects(discovery.discover('many', { cursor: first.nextCursor }, list), /cursor/);
+  const next = await discovery.discover('many', { query: 'needle', cursor: first.nextCursor }, list);
+  assert.ok('searchComplete' in next && next.searchComplete);
+  assert.equal(calls, 6);
+});
+
+test('search rejects invalid input before I/O, treats regex-like text literally and detects cyclic pages', async () => {
+  const discovery = new McpDiscovery(); let calls = 0;
+  const list = async () => { calls++; return { tools: [tool('find_symbol')] }; };
+  for (const query of ['', ' ', 'x'.repeat(257), 123, '.*']) {
+    await assert.rejects(discovery.discover('code', { query: query as string }, list), /검색어/);
+  }
+  await assert.rejects(discovery.discover('code', { query: 'find', tool: 'find_symbol' }, list), /함께/);
+  assert.equal(calls, 0);
+  const result = await discovery.discover('code', { query: '(find)+' }, list);
+  assert.equal(result.tools?.[0].name, 'find_symbol');
+  await assert.rejects(discovery.discover('cycle', { query: 'find' }, async cursor => ({ tools: [], nextCursor: cursor === 'a' ? 'b' : 'a' })), /순환/);
+});
+
+test('list invalidation during a fetch cannot resurrect obsolete schemas', async () => {
+  for (const all of [false, true]) {
+    const discovery = new McpDiscovery(); let finish!: () => void;
+    const pending = discovery.discover('code', { tool: 'old' }, async () => {
+      await new Promise<void>(resolve => { finish = resolve; }); return { tools: [tool('old')] };
+    });
+    discovery.clear(all ? undefined : 'code'); finish();
+    await assert.rejects(pending, /목록이 변경/);
+    const fresh = await discovery.discover('code', { tool: 'new' }, async () => ({ tools: [tool('new')] }));
+    assert.equal(fresh.tool?.name, 'new');
+  }
+});
+
+test('invalidation between cached search pages prevents mixed-generation results', async () => {
+  const discovery = new McpDiscovery(); let finish!: () => void;
+  const pending = discovery.discover('code', { query: 'find' }, async cursor => {
+    if (!cursor) return { tools: [tool('old_find')], nextCursor: 'next' };
+    await new Promise<void>(resolve => { finish = resolve; }); return { tools: [tool('new_find')] };
+  });
+  while (!finish) await new Promise<void>(resolve => setImmediate(resolve));
+  discovery.clear('code'); finish(); await assert.rejects(pending, /목록이 변경/);
+});
+
 test('presets create disabled local previews with no installation commands or credential values', () => {
   const context7 = previewMcpPreset({ preset: 'context7', executablePath: 'C:\\MCP\\context7\\dist\\index.js' });
   assert.equal(context7.enabled, false);
@@ -149,12 +221,19 @@ test('plugin discovers lazily, forwards cancellation, preserves secret storage a
   assert.deepEqual(await h.call('mcp.discover'), { servers: [] });
   await assert.rejects(h.call('mcp.discover', { serverId: 'context7' }), /활성 MCP/);
   assert.equal(connections, 0);
+  await assert.rejects(h.call('mcp.discover', { query: 'query docs' }), /serverId/);
+  assert.equal(connections, 0);
   await h.call('mcp.servers.add', { id: 'context7', command: 'node', env: { CONTEXT7_API_KEY: 'test-secret' }, enabled: true });
   assert.deepEqual(await h.call('mcp.discover'), { servers: [{ id: 'context7', name: 'context7' }] });
   const controller = new AbortController();
   const execution: PluginExecutionContext = { signal: controller.signal, permissionMode: 'full', destructiveApproved: true, approvalSource: 'prompt' };
   await h.call('mcp.discover', { serverId: 'context7' }, execution);
   assert.equal(listSignal, controller.signal);
+  const search = await h.call('mcp.discover', { serverId: 'context7', query: 'query docs' }, execution);
+  assert.equal(search.tools[0].name, 'query-docs');
+  const selected = await h.call('mcp.discover', { serverId: 'context7', tool: search.tools[0].name, cursor: search.tools[0].cursor }, execution);
+  assert.equal(selected.tool.name, 'query-docs');
+  assert.match(JSON.stringify(h.commands.get('mcp.discover')!.options.parameters), /"query"/);
   const result = await h.call('mcp.call', { serverId: 'context7', tool: 'query-docs' }, execution);
   assert.equal(callSignal, controller.signal);
   assert.equal(result._mrRobot.truncated, true);

@@ -319,3 +319,57 @@ describe('provider adapters cannot make malformed metering look free', () => {
     }
   });
 });
+
+describe('Anthropic tool arguments follow content indexes, not tool ordinals', () => {
+  const event = (type: string, fields: Record<string, unknown> = {}) => `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n`;
+  const start = (index: number, id: string, input: unknown = {}) => event('content_block_start', { index, content_block: { type: 'tool_use', id, name: 'read_file', input } });
+  const delta = (index: number, partial_json: string) => event('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json } });
+  const stop = (index: number) => event('content_block_stop', { index });
+  const end = event('message_stop');
+  async function withStream(lines: string[], check: (p: AnthropicProvider) => Promise<void>) {
+    const previous = globalThis.fetch;
+    globalThis.fetch = (async () => sseResponse(lines)) as typeof fetch;
+    try { await check(new AnthropicProvider('fixture', 'fixture', 'anthropic', 'https://example.invalid', 'fixture', '')); }
+    finally { globalThis.fetch = previous; }
+  }
+  test('text/thinking before tools and interleaved argument chunks retain the correct call IDs', async () => {
+    await withStream([
+      event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+      event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'checking' } }), stop(0),
+      event('content_block_start', { index: 1, content_block: { type: 'thinking' } }), stop(1),
+      start(2, 'a'), start(3, 'b'), delta(3, '{"path":"b"}'), delta(2, '{"path":'), delta(2, '"a"}'), stop(3), stop(2), end,
+    ], async p => {
+      const emitted: string[] = [];
+      const result = await p.chat({ turns: [], onEvent: e => { if (e.type === 'tool') emitted.push(e.call.id); } });
+      assert.equal(result.text, 'checking');
+      assert.deepEqual(result.toolCalls.map(c => [c.id, JSON.parse(c.args)]), [['a', { path: 'a' }], ['b', { path: 'b' }]]);
+      assert.deepEqual(emitted, ['a', 'b']);
+    });
+  });
+  test('initial object input is retained when the complete block has no deltas', async () => {
+    await withStream([start(1, 'a', { path: 'ready' }), stop(1), end], async p => {
+      const result = await p.chat({ turns: [] }); assert.deepEqual(JSON.parse(result.toolCalls[0].args), { path: 'ready' });
+    });
+  });
+  test('truncated, duplicate, late and invalid blocks never emit executable tools', async () => {
+    const streams = [
+      [start(0, 'a'), delta(0, '{'), stop(0), end],
+      [start(0, 'a'), end],
+      [start(0, 'a'), stop(0), delta(0, '{}'), end],
+      [start(0, 'a'), start(1, 'a'), end],
+      [start(0, 'a'), start(0, 'b'), end],
+      [delta(0, '{}'), end],
+      [start(0, 'a'), delta(0, '[]'), stop(0), end],
+      [start(0, 'a'), stop(0), event('error', { error: { type: 'overloaded_error' } }), end],
+      [start(0, 'a'), stop(0)],
+      [start(0, 'a', null), stop(0), end],
+      [start(0, 'a'), event('content_block_delta', { delta: { type: 'input_json_delta', partial_json: '{}' } }), stop(0), end],
+      [start(0, 'a'), 'event: content_block_delta\ndata: {broken\n', stop(0), end],
+    ];
+    for (const lines of streams) await withStream(lines, async p => {
+      const emitted: string[] = [];
+      await assert.rejects(p.chat({ turns: [], onEvent: e => { if (e.type === 'tool') emitted.push(e.call.id); } }));
+      assert.deepEqual(emitted, []);
+    });
+  });
+});

@@ -44,8 +44,8 @@ Serena 프리셋은 `--context ide`로 기본 코드 도구와의 중복을 줄�
 ## 모델이 사용하는 흐름
 
 1. `mcp.discover {}`: 활성 서버의 ID와 이름을 최대 12개 반환합니다. 실행 명령, 인자, 환경 변수는 모델에 보내지 않습니다.
-2. `mcp.discover {"serverId":"serena"}`: 도구 이름과 최대 240자의 설명만 반환합니다. `limit`은 1~20이며 `nextCursor`가 있으면 이어서 조회합니다.
-3. `mcp.discover {"serverId":"serena","tool":"find_symbol"}`: 선택한 도구의 실제 `inputSchema`만 반환합니다. 후속 페이지에서 찾은 도구에는 **그 페이지를 읽을 때 사용한 cursor**를 함께 전달하세요. schema를 추측하지 마세요.
+2. `mcp.discover {"serverId":"serena","query":"find symbol"}`: 선택한 서버의 이름·설명에서 키워드로 검색해 기본 상위 5개의 짧은 요약을 반환합니다. 모델 추가 호출 없이 최대 4개 상류 페이지를 조회합니다. `searchComplete: false`이면 같은 query와 최상위 `nextCursor`로 이어서 검색하세요. 의미 검색이나 전체 서버 자동 스캔이 아닙니다. query를 생략하면 기존 목록 조회(기본 12개)입니다. `limit`은 1~20입니다.
+3. `mcp.discover {"serverId":"serena","tool":"find_symbol","cursor":"검색 결과 항목의 cursor"}`: 선택한 도구의 실제 `inputSchema`만 반환합니다. query는 생략하고 **선택한 검색 결과 항목 자체의 cursor**를 사용하세요. 목록 조회를 썼다면 그 페이지를 읽을 때 사용한 cursor를 전달합니다. 검색 계속용 최상위 nextCursor와 schema 조회용 항목 cursor는 다릅니다. schema를 추측하지 마세요.
 4. `mcp.call {"serverId":"serena","tool":"find_symbol","arguments":{...}}`: 확인한 schema에 맞춰 호출합니다.
 
 탐색과 호출 도구는 MCP·Context7·Serena 또는 코드·라이브러리·문서 관련 요청일 때만 모델에 노출됩니다. 탐색은 서버 프로세스를 시작할 수 있으므로 호출과 마찬가지로 기존 승인 경계를 적용합니다. 외부 서버의 설명, schema, 결과는 지시가 아닌 신뢰되지 않은 데이터로 취급합니다. 서버가 주장하는 read-only 표시는 승인 규칙을 변경하지 않습니다.

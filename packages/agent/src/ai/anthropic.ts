@@ -182,6 +182,9 @@ export class AnthropicProvider implements AiProvider {
     let text = '';
     const toolCalls: ProviderToolCall[] = [];
     const byIndex = new Map<number, ProviderToolCall>();
+    const initialInputs = new Map<number, unknown>();
+    const closedTools = new Set<number>();
+    const toolIds = new Set<string>();
     const usageState: AnthropicUsageState = { raw: {}, invalid: false };
     let completed = false;
 
@@ -190,7 +193,7 @@ export class AnthropicProvider implements AiProvider {
       try {
         json = JSON.parse(data);
       } catch {
-        continue;
+        throw new Error(`[${this.label}] Invalid Messages event JSON`);
       }
       switch (event) {
         case 'message_start':
@@ -199,23 +202,50 @@ export class AnthropicProvider implements AiProvider {
         case 'content_block_start': {
           const block = json.content_block;
           if (block?.type === 'tool_use') {
-            const cur: ProviderToolCall = { id: block.id ?? '', name: block.name ?? '', args: '' };
+            // The event's content index includes text/thinking blocks. It is
+            // not the ordinal of a tool call and is not inside content_block.
+            const index = json.index;
+            if (!Number.isSafeInteger(index) || index < 0 || byIndex.has(index)
+              || typeof block.id !== 'string' || !block.id || toolIds.has(block.id)
+              || typeof block.name !== 'string' || !block.name) {
+              throw new Error(`[${this.label}] Invalid tool block identity`);
+            }
+            const cur: ProviderToolCall = { id: block.id, name: block.name, args: '' };
             toolCalls.push(cur);
-            byIndex.set(block.index ?? toolCalls.length - 1, cur);
+            byIndex.set(index, cur);
+            initialInputs.set(index, block.input === undefined ? {} : block.input);
+            toolIds.add(block.id);
           }
           break;
         }
         case 'content_block_delta': {
           const delta = json.delta;
-          const idx = json.index ?? 0;
+          const idx = json.index;
           if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
             text += delta.text;
             req.onEvent?.({ type: 'text', text: delta.text });
           } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
             const cur = byIndex.get(idx);
-            if (cur) cur.args += delta.partial_json;
+            if (!cur || closedTools.has(idx)) throw new Error(`[${this.label}] Tool arguments arrived outside an open block`);
+            cur.args += delta.partial_json;
           }
           break;
+        }
+        case 'content_block_stop': {
+          const cur = byIndex.get(json.index);
+          if (!cur) break;
+          if (closedTools.has(json.index)) throw new Error(`[${this.label}] Duplicate tool block completion`);
+          let input: unknown;
+          try { input = cur.args ? JSON.parse(cur.args) : initialInputs.get(json.index); }
+          catch { throw new Error(`[${this.label}] Invalid tool arguments JSON`); }
+          if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error(`[${this.label}] Tool arguments must be an object`);
+          cur.args = JSON.stringify(input);
+          closedTools.add(json.index);
+          break;
+        }
+        case 'error': {
+          const kind = json.error?.type;
+          throw new Error(`[${this.label}] Messages stream error: ${typeof kind === 'string' && /^[a-z_]{1,64}$/.test(kind) ? kind : 'unknown'}`);
         }
         case 'message_delta':
           if (json.usage !== undefined) updateAnthropicCompletionUsage(usageState, json.usage);
@@ -230,6 +260,7 @@ export class AnthropicProvider implements AiProvider {
     }
 
     if (!completed) throw new Error(`[${this.label}] Messages stream ended before message_stop`);
+    if (closedTools.size !== toolCalls.length) throw new Error(`[${this.label}] Messages stream ended with an unfinished tool block`);
 
     for (const c of toolCalls) {
       if (c.name) req.onEvent?.({ type: 'tool', call: c });
