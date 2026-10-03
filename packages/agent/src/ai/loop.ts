@@ -119,6 +119,7 @@ export class ModelBudgetExceededError extends Error {
 }
 
 export interface LoopCallbacks {
+  onProviderTiming?(timing: import('./provider.js').ProviderTiming): void;
   /** Trusted host policy, checked before every actual provider invocation. */
   beforeModelCall?(source: { providerId: string; model: string }): void;
   onText?(delta: string): void;
@@ -378,6 +379,7 @@ export class AgentLoop {
       cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });
       const boundedRequest: ChatRequest = applyModelTuning({
         ...request,
+        onTiming: cb.onProviderTiming,
         daybreakEnabled: options.daybreakEnabled === true,
         maxTokens: Math.max(1, Math.min(
           MAX_PROVIDER_OUTPUT_TOKENS,

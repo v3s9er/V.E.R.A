@@ -98,6 +98,10 @@ export type ProviderEvent =
   | { type: 'tool'; call: ProviderToolCall };
 
 export interface ChatRequest {
+  /** Host-only plain response mode; valid only without broker/native tools. */
+  textOnly?: boolean;
+  /** Numeric lifecycle metadata, never prompts, credentials or model reasoning. */
+  onTiming?: (timing: ProviderTiming) => void;
   /** Host-validated visual evidence for isolated Codex workers, never URLs from model input. */
   evidenceImages?: Array<{ label: string; dataUrl: string }>;
   daybreakEnabled?: boolean;
@@ -112,6 +116,15 @@ export interface ChatRequest {
   signal?: AbortSignal;
   /** Stream deltas (text and finalized tool calls) as they arrive. */
   onEvent?: (e: ProviderEvent) => void;
+}
+
+export const PROVIDER_TIMING_STAGES = ['queue', 'retirement', 'worker', 'initialized', 'skills', 'thread', 'submitted', 'accepted', 'firstDelta', 'firstText', 'completed', 'failed'] as const;
+export interface ProviderTiming {
+  transport: 'codex-text' | 'codex-structured' | 'codex-broker';
+  stage: typeof PROVIDER_TIMING_STAGES[number];
+  /** Monotonic milliseconds since entry into this provider call, including queue. */
+  elapsedMs: number;
+  reused: boolean;
 }
 
 /** Host-owned queue: inputs are removed only after the CLI acknowledges them. */

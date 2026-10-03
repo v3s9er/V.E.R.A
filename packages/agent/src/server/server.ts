@@ -91,7 +91,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.6';
+export const VERSION = '0.6.7';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -2548,6 +2548,7 @@ export class AgentServer {
       let pendingToolCount = 0;
       let observedToolCalls = 0;
       let observedToolElapsedMs = 0;
+      const transport: NonNullable<import('../telemetry.js').RoutingTrace['transport']> = [];
       let knowledgeMetrics: import('@mr-robot/shared').KnowledgeMetrics | undefined;
       const observedModelSources = new Map<string, { providerId: string; providerLabel?: string; model: string }>();
       const noteModelSource = (source: { providerId: string; providerLabel?: string; model: string }): void => {
@@ -2559,6 +2560,7 @@ export class AgentServer {
         return observedModelSources.values().next().value ?? {};
       };
       const recordTelemetry = (trace: Parameters<TelemetryStore['record']>[0]): void => {
+        if (transport.length) trace.transport = transport;
         if (knowledgeMetrics) trace.knowledge = knowledgeMetrics;
         try { this.telemetry.record(trace); }
         catch (error) { this.logger.error(`failed to persist chat telemetry: ${error instanceof Error ? error.message : String(error)}`); }
@@ -2607,6 +2609,7 @@ export class AgentServer {
               if (client.state.auth?.trustedDiscord) assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), source.model);
               noteModelSource(source);
             },
+            onProviderTiming: timing => { if (transport.length < 128) transport.push({ ...timing, atMs: Date.now() - runStartedAt }); },
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
             onTool: (info) => {
               if (info.status === 'start') { observedToolCalls++; pendingToolCount++; }

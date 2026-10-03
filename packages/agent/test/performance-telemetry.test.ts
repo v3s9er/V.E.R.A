@@ -58,3 +58,15 @@ test('one malformed row and external appends do not erase valid measurements', (
     assert.equal(store.summary().performance.firstTextMs.samples, 1);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+test('transport milestones are bounded and never persist arbitrary payloads', () => {
+  const home = mkdtempSync(join(tmpdir(), 'mrrobot-telemetry-test-'));
+  try {
+    const store = new TelemetryStore(home);
+    const timing = { transport: 'codex-text', stage: 'firstDelta', elapsedMs: 42, atMs: 55, reused: false, prompt: 'PRIVATE', token: 'PRIVATE' };
+    store.record({ ...trace(1), transport: [timing, { ...timing, stage: 'PRIVATE' }, { ...timing, elapsedMs: -1 }] as any });
+    assert.deepEqual(store.list(1)[0].transport, [{ transport: 'codex-text', stage: 'firstDelta', elapsedMs: 42, atMs: 55, reused: false }]);
+    store.record({ ...trace(2), ok: false, transport: Array(200).fill(timing) });
+    assert.equal(new TelemetryStore(home).list(1)[0].transport?.length, 128);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});

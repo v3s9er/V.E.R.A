@@ -1,6 +1,7 @@
 import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { atomicWriteUtf8 } from './config.js';
+import { PROVIDER_TIMING_STAGES, type ProviderTiming } from './ai/provider.js';
 
 export interface RoutingTrace {
   id: string;
@@ -24,6 +25,8 @@ export interface RoutingTrace {
   latencyMs: number;
   /** First visible answer delta. Undefined means unobserved, never zero. */
   firstTextMs?: number;
+  /** Allowlisted numeric transport milestones only, including failed runs. */
+  transport?: Array<ProviderTiming & { atMs: number }>;
   cancelled?: boolean;
   estimatedCost: number;
   ok: boolean;
@@ -140,6 +143,11 @@ function normalizeTrace(input: unknown): RoutingTrace | undefined {
   for (const key of ['conversationId', 'providerId', 'providerLabel', 'model', 'role', 'effort', 'error'] as const) if (typeof row[key] === 'string') trace[key] = row[key].slice(0, key === 'error' ? 500 : 256);
   for (const key of ['accountedTokens', 'cachedPromptTokens', 'cacheWritePromptTokens', 'reasoningTokens', 'firstTextMs', 'toolElapsedMs'] as const) if (validNumber(row[key])) trace[key] = row[key];
   if (row.cancelled === true) trace.cancelled = true;
+  if (Array.isArray(row.transport)) trace.transport = row.transport.slice(0, 128).flatMap(t => {
+    if (!t || !['codex-text', 'codex-structured', 'codex-broker'].includes(t.transport)
+      || !PROVIDER_TIMING_STAGES.includes(t.stage) || !validNumber(t.elapsedMs) || !validNumber(t.atMs) || typeof t.reused !== 'boolean') return [];
+    return [{ transport: t.transport, stage: t.stage, elapsedMs: t.elapsedMs, atMs: t.atMs, reused: t.reused }];
+  });
   if (row.knowledge && typeof row.knowledge === 'object') {
     const k = row.knowledge as Record<string, unknown>;
     if (['asserted','inferred','conflicts','contextBytes','retrievalMs'].every(key => validNumber(k[key])) && typeof k.truncated === 'boolean')

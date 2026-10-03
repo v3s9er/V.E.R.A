@@ -392,7 +392,7 @@ export class CliProvider implements AiProvider {
       // No selected workspace/native run: keep a conversation-scoped text
       // worker, not a fresh CLI launched in the desktop process's ambient cwd.
       return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
-        model: this.model, providerId: this.id, req: { ...req, tools: [] } });
+        model: this.model, providerId: this.id, req: { ...req, tools: [], textOnly: true } });
     }
     if (req.tools?.length) {
       // Deliberately ignored. Local CLI adapters are reasoning workers, while
@@ -426,7 +426,7 @@ export class CliProvider implements AiProvider {
 
   async chatIsolated(req: ChatRequest): Promise<ProviderResult> {
     req.signal?.throwIfAborted();
-    if (this.type === 'codex-cli') return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type), model: this.model, providerId: this.id, req });
+    if (this.type === 'codex-cli') return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type), model: this.model, providerId: this.id, req: { ...req, textOnly: !req.tools?.length } });
     if (this.type === 'claude-cli' && Date.now() >= this.isolatedHealthUntil) {
       const health = await this.ping();
       if (!health.ok) throw new Error('PC 소유자의 Claude 구독 로그인이 필요합니다. PC에서 claude auth login으로 연결한 뒤 다시 요청하세요. API 키로 자동 전환하지 않습니다.');
