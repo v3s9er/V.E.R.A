@@ -60,7 +60,7 @@ export interface ConversationRecoveryState {
 const emptyUsage = (): ChatUsage => ({ promptTokens: 0, completionTokens: 0 });
 
 const conversationStatuses = new Set<ConversationStatus>(['active', 'archived']);
-const reasoningEfforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']);
+const reasoningEfforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const permissionModes: PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
 const tokenPolicies = new Set<ConversationTokenPolicy>(['adaptive', 'economy', 'standard', 'quality', 'audit-only']);
 const turnRoles = new Set<Turn['role']>(['system', 'user', 'assistant', 'tool']);
@@ -645,6 +645,7 @@ export class ConversationStore {
   }
 
   create(input: ConversationCreateInput = {}): ConversationDetail {
+    if (input.reasoningEffort !== undefined && !reasoningEfforts.has(input.reasoningEffort)) throw new Error('대화 추론 단계가 올바르지 않습니다.');
     if (input.tokenPolicy !== undefined && !tokenPolicies.has(input.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     const now = Date.now();
     const item: StoredConversation = {
@@ -691,6 +692,7 @@ export class ConversationStore {
   update(id: string, patch: { daybreakEnabled?: boolean; origin?: 'discord' | null; title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
     const item = this.require(id);
     if (patch.tokenPolicy !== undefined && !tokenPolicies.has(patch.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
+    if (patch.reasoningEffort !== undefined && !reasoningEfforts.has(patch.reasoningEffort)) throw new Error('대화 추론 단계가 올바르지 않습니다.');
     // update() mutates the live object so existing server-side references keep
     // observing the same conversation. Preserve a complete detached copy first
     // because save() can fail after sync metadata and optional fields changed.

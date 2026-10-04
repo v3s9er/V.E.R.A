@@ -9,6 +9,8 @@ import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files'
 import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
 import { supportsDaybreak, visibleModelChoices } from '../../../../packages/shared/src/daybreak';
 import { watchChatSettlement, ChatRequestOwnership } from '../../../../packages/shared/src/chat-lifecycle';
+import { reasoningEffortsForModel } from '../../../../packages/shared/src/model-capabilities';
+import type { ProviderModelCatalog } from '../../../../packages/shared/src/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -69,8 +71,6 @@ const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
   ];
 };
 
-const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
-const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
 const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
 
 function permissionWithinCap(mode: PermissionMode, cap: PermissionMode): boolean {
@@ -81,12 +81,7 @@ function effectivePermissionMode(mode: PermissionMode, cap: PermissionMode): Per
   return PERMISSION_ORDER[Math.min(PERMISSION_ORDER.indexOf(mode), PERMISSION_ORDER.indexOf(cap))] ?? 'read-only';
 }
 
-function reasoningEffortsFor(provider?: ProviderInfo): ReasoningEffort[] {
-  const supported = provider?.supportedReasoning;
-  if (!supported?.length) return [...FALLBACK_REASONING_EFFORTS];
-  const supportedSet = new Set(supported);
-  return ORDERED_REASONING_EFFORTS.filter((effort) => effort === 'auto' || supportedSet.has(effort));
-}
+const reasoningEffortsFor = reasoningEffortsForModel;
 
 function describe(input: unknown): string {
   try {
@@ -262,6 +257,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 
   const activeRun = conversation ? runs[conversation.id] : undefined;
   const busy = Boolean(activeRun?.running);
+  const selectedPreset = routingPresets.find(preset => preset.id === conversation?.routingPresetId);
+  const selectedExecutionMode = selectedPreset ? selectedPreset.executionMode ?? 'single' : conversation?.routingPresetId ? undefined : 'single';
   useEffect(() => {
     if (busy) onExecutionBusyChange?.(true);
   }, [busy, onExecutionBusyChange]);
@@ -269,10 +266,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const reasoningProvider = conversation?.routingPresetId
     ? undefined
     : providers.find((provider) => provider.id === conversation?.providerId) ?? defaultProvider;
-  const reasoningEfforts = reasoningEffortsFor(reasoningProvider);
-  const selectedReasoningEffort = conversation && reasoningEfforts.includes(conversation.reasoningEffort)
-    ? conversation.reasoningEffort
-    : 'auto';
+  const reasoningEfforts = reasoningEffortsFor(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model);
+  const selectedReasoningEffort = conversation?.reasoningEffort ?? 'auto';
+  const reasoningSupportUnconfirmed = !reasoningEfforts.includes(selectedReasoningEffort);
   const requestedPermissionMode = conversation?.permissionMode ?? 'ask';
   const effectiveDevicePermissionMode = effectivePermissionMode(requestedPermissionMode, client.permissionCap);
   const permissionCappedByDevice = requestedPermissionMode !== effectiveDevicePermissionMode;
@@ -379,8 +375,18 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     let failed = false;
     const entries = await Promise.all(list.map(async (provider): Promise<[string, string[] | null]> => {
       try {
-        const discovered = await client.call('providers.models', { id: provider.id, refresh: force }) as string[];
-        return [provider.id, [...new Set([provider.model, ...discovered])]];
+        let catalog: ProviderModelCatalog;
+        try {
+          catalog = await client.call('providers.catalog', { id: provider.id, refresh: force }) as ProviderModelCatalog;
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== 'unknown method: providers.catalog') throw error;
+          catalog = { models: await client.call('providers.models', { id: provider.id, refresh: force }) as string[],
+            source: 'provider', state: 'stale', lastUpdatedAt: null, lastAttemptAt: null };
+        }
+        if (catalog.state !== 'fresh') failed = true;
+        setProviders(current => current.map(item => item.id === provider.id && item.model === provider.model
+          ? { ...item, modelCapabilities: catalog.modelCapabilities } : item));
+        return [provider.id, [...new Set([provider.model, ...catalog.models])]];
       } catch {
         failed = true;
         return [provider.id, null];
@@ -713,7 +719,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     if (!conversation || busy || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providerId ? providers.find((item) => item.id === providerId) : defaultProvider;
-    const supportedEfforts = reasoningEffortsFor(provider);
+    const supportedEfforts = reasoningEffortsFor(provider, providerModel ?? provider?.model);
     const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
       const updated = await client.call('conversations.update', {
@@ -748,7 +754,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     if (!beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
-    const reasoningEffort = reasoningEffortsFor(provider).includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
+    const reasoningEffort = reasoningEffortsFor(provider, conversation.providerModel ?? provider?.model).includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
       const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: null, reasoningEffort }) as ConversationDetail;
       applyConversationConfiguration(conversationId, {
@@ -768,7 +774,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     if (!conversation || busy || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
-    const supportedEfforts = reasoningEffortsFor(routingPresetId ? undefined : provider);
+    const supportedEfforts = reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model);
     const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
       const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: routingPresetId ?? null, reasoningEffort }) as ConversationDetail;
@@ -1091,7 +1097,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         renderItem={({ item: m }) => (
           <View key={m.id} style={[styles.row, m.role === 'user' && styles.rowUser]}>
             <View style={[styles.bubble, m.role === 'user' && styles.bubbleUser]}>
-              {m.content ? <Text style={styles.bubbleText}>{m.role === 'assistant' ? chatFileDisplayText(m.content) : m.content}</Text> : !m.done ? <RunTimeline run={activeRun ?? null} busy={busy} /> : null}
+              {m.content ? <Text style={styles.bubbleText}>{m.role === 'assistant' ? chatFileDisplayText(m.content) : m.content}</Text> : !m.done ? <RunTimeline run={activeRun ?? null} busy={busy} executionMode={selectedExecutionMode} /> : null}
               {m.role === 'assistant' && conversation && <ChatFiles text={m.content} pc={pc} conversationId={conversation.id} />}
               {m.error ? <Text style={styles.errorText}>⚠️ {m.error}</Text> : null}
             </View>
@@ -1101,7 +1107,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       />
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
-      {!shortKeyboardViewport && <RunActivity key={conversation?.id} run={activeRun ?? null} busy={busy} />}
+      {!shortKeyboardViewport && <RunActivity key={conversation?.id} run={activeRun ?? null} busy={busy} executionMode={selectedExecutionMode} />}
       <View
         ref={composerRef}
         onLayout={() => { if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 80]); }}
@@ -1151,7 +1157,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             </TouchableOpacity>
           </View>
           <View style={[styles.composerActionRow, shortKeyboardViewport && { flexShrink: 0 }]}>
-            {shortKeyboardViewport && <RunActivity run={activeRun ?? null} busy={busy} compact />}
+            {shortKeyboardViewport && <RunActivity run={activeRun ?? null} busy={busy} executionMode={selectedExecutionMode} compact />}
             <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
             <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
             {supportsDaybreak(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model) && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Daybreak" accessibilityState={{ selected: conversation?.daybreakEnabled === true, disabled: configurationLocked }} disabled={configurationLocked} onPress={() => void toggleDaybreak()} style={styles.composerSelectBtn}><Text style={[styles.composerSelectText, conversation?.daybreakEnabled && { color: colors.accent2 }]}>☀ {shortKeyboardViewport ? (conversation?.daybreakEnabled ? 'ON' : 'OFF') : `Daybreak ${conversation?.daybreakEnabled ? '켜짐' : '꺼짐'}`}</Text></TouchableOpacity>}
@@ -1279,6 +1285,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
           <View style={styles.dropdownModal}>
             <Text style={styles.modalTitle}>추론 강도</Text>
+            {reasoningSupportUnconfirmed && <Text style={styles.modalText}>저장된 {selectedReasoningEffort} 단계의 지원을 확인하지 못했습니다. 모델 목록을 새로고침하거나 자동을 선택하세요.</Text>}
             <Text style={styles.modalText}>작업용 강도로 저장됩니다. 단순 인사·계산은 같은 모델의 낮은 추론으로 처리하고, 그 외 작업에는 선택한 강도를 사용합니다.</Text>
             <ScrollView style={styles.dropdownList} keyboardShouldPersistTaps="handled">
               {reasoningEfforts.map((effort) => {
@@ -1312,7 +1319,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
                 ['economy', '절약 · 질문당 6.4만', '질문 하나당 64,000토큰. 새 질문마다 초기화합니다.'],
                 ['standard', '표준 · 질문당 25.6만', '질문 하나당 256,000토큰. 이전 질문 사용량은 차감하지 않습니다.'],
                 ['quality', '고품질 · 질문당 100만', '질문 하나당 1,000,000토큰. 복합 트리의 전체 사용량을 합산합니다.'],
-                ...(client.canUseAuditOnly ? [['audit-only', '무제한 · 감사만', 'Mr.Robot의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정합니다. 공급자 자체 한도와 요금은 계속 적용되며, 사용량은 대화 기록과 PC 설정의 텔레메트리에서 확인합니다.']] : []),
+                ...(client.canUseAuditOnly ? [['audit-only', '무제한 · 감사만', 'V.E.R.A의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정합니다. 공급자 자체 한도와 요금은 계속 적용되며, 사용량은 대화 기록과 PC 설정의 텔레메트리에서 확인합니다.']] : []),
               ] as Array<[ConversationTokenPolicy, string, string]>).map(([value, label, description]) => <TouchableOpacity key={value} style={[styles.modelChoice, (configurationLocked || !client.canUseAuditOnly) && styles.disabledBtn]} disabled={configurationLocked || !client.canUseAuditOnly} onPress={() => void selectTokenPolicy(value)}><Text style={styles.modelProvider}>{(client.canUseAuditOnly ? conversation?.tokenPolicy ?? 'adaptive' : 'adaptive') === value ? '✓ ' : ''}{label}</Text><Text style={styles.faintChoice}>{description}</Text></TouchableOpacity>)}
             </ScrollView>
             <TouchableOpacity style={styles.bigBtn} onPress={() => setShowTokenPolicy(false)} accessibilityRole="button"><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>

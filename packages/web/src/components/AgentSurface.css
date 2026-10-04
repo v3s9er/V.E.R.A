@@ -48,6 +48,8 @@ div.conversation-layout .run-panel { border-bottom-color: #ffffff09; }
 .run-timeline .error .timeline-dot { color: #f39797; }
 .run-timeline p { margin: 6px 0 0; color: #a5adc0; font-size: 12px; }
 .timeline-note { color: #8991a3; font-size: 10px; }
+.timeline-route { display: grid; gap: 3px; padding: 4px 0 8px; color: #a5adc0; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.timeline-route b { color: #c9c1de; font-weight: 500; }
 .run-timeline.compact { padding: 10px; }
 .msg-row.assistant .msg-body:has(.run-timeline) { flex: 1; }
 .run-timeline.compact .timeline-heading small { display: none; }

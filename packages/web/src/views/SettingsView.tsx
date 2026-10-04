@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import type { AppSettings, DependencyInstallResult, DependencyReport, DeviceCapability, MemoryItem, PluginInfo, ProviderInfo, ProviderModelCatalog, ProviderSource, ProviderType, RemoteLinkStatus, RoutingPreset, RoutingSettings } from '@mr-robot/shared';
+import { reasoningEffortsForModel } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Badge, Button, Card, Field, Input, Modal, Select, Spinner, Toggle } from '../components/ui';
 import { RoutingGraphEditor } from '../components/RoutingGraphEditor';
@@ -704,7 +705,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           providerId: helper.id,
           providerModel: helper.model,
           reasoningEffort: 'high',
-          text: `Mr.Robot의 '${target.label}' AI 연결을 자동으로 복구해 주세요. 대상 종류는 ${target.type}, 모델은 ${target.model}입니다. 현재 오류: ${repairOffer.error}\n\n가능한 진단과 안전한 자동 조치를 직접 수행하고 결과를 검증하세요. 비밀키를 출력하거나 새 키를 임의 생성하지 마세요. 브라우저 로그인이나 사용자 자격증명 입력처럼 본인 확인이 반드시 필요한 단계만 명확히 안내하세요.`,
+          text: `V.E.R.A의 '${target.label}' AI 연결을 자동으로 복구해 주세요. 대상 종류는 ${target.type}, 모델은 ${target.model}입니다. 현재 오류: ${repairOffer.error}\n\n가능한 진단과 안전한 자동 조치를 직접 수행하고 결과를 검증하세요. 비밀키를 출력하거나 새 키를 임의 생성하지 마세요. 브라우저 로그인이나 사용자 자격증명 입력처럼 본인 확인이 반드시 필요한 단계만 명확히 안내하세요.`,
         }, 10 * 60_000);
       }, 350);
     } finally {
@@ -910,9 +911,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                 <Button variant="ghost" disabled={!canManage || !(modelDrafts[p.id] ?? '').trim() || (modelDrafts[p.id] ?? p.model).trim() === p.model} onClick={() => void updateProviderModel(p)}>모델 적용</Button>
               </div>
               <div className="provider-url" title={p.baseUrl}>{p.baseUrl}</div>
-              <div className="provider-url">추론: {p.supportedReasoning.join(' · ')}</div>
+              <div className="provider-url">추론: {reasoningEffortsForModel(p, p.model, modelCatalogs[p.id]?.modelCapabilities ?? p.modelCapabilities).join(' · ')}</div>
               {modelCatalogs[p.id] && <div className="provider-test" role="status">
                 <div>{modelCatalogSummary(modelCatalogs[p.id])}</div>
+                {modelCatalogs[p.id].modelCapabilities?.[p.model]?.defaultReasoningEffort && <div>모델 기본 추론: {modelCatalogs[p.id].modelCapabilities![p.model].defaultReasoningEffort}</div>}
                 {modelCatalogs[p.id].lastUpdatedAt != null && <div>마지막 성공: {new Date(modelCatalogs[p.id].lastUpdatedAt!).toLocaleString()}</div>}
                 {modelCatalogs[p.id].warning && <div>{modelCatalogs[p.id].warning}</div>}
               </div>}
@@ -1066,7 +1068,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       <div className={section === 'voice' ? '' : 'settings-section-hidden'}>
       <Card className="panel voice-settings">
         <div className="panel-head">
-          <div><h3>음성 호출</h3><p className="panel-hint">Mr.Robot이 트레이에 있어도 호출어를 기다립니다. OFF하면 마이크 수신 프로세스가 즉시 종료됩니다.</p></div>
+          <div><h3>음성 호출</h3><p className="panel-hint">V.E.R.A가 트레이에 있어도 호출어를 기다립니다. OFF하면 마이크 수신 프로세스가 즉시 종료됩니다.</p></div>
           <div className="provider-top">
             <Badge tone={voiceStatus?.accurateKoreanModel ? 'ok' : 'warn'}>{voiceStatus?.accurateKoreanModel ? '한국어 듀얼 인식' : voiceStatus?.engineAvailable ? '경량 인식 엔진' : '한국어 엔진 없음'}</Badge>
             <Badge tone={voiceStatus?.listening ? 'ok' : voiceStatus?.starting ? 'warn' : undefined}>{voiceStatus?.listening ? '상시 듣는 중' : voiceStatus?.starting ? '시작 중' : '대기 꺼짐'}</Badge>
@@ -1248,7 +1250,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         </div>
         <div className="remote-status-board" aria-live="polite">
           <div className="remote-status-item"><span>대상 PC</span><b>{settings?.deviceName || '이 PC'}</b><small>다른 PC와 독립 등록</small></div>
-          <div className="remote-status-item"><span>지금 외부에서</span><b>{remoteExternalReady ? '연결 가능' : remoteStatus?.running ? '보안 검사 필요' : '연결 안 됨'}</b><small>{remoteStatus?.running ? (remoteStatus.temporary ? '임시 Quick Link' : '고정 Tunnel') : 'PC와 Mr.Robot이 켜져 있어야 함'}</small></div>
+          <div className="remote-status-item"><span>지금 외부에서</span><b>{remoteExternalReady ? '연결 가능' : remoteStatus?.running ? '보안 검사 필요' : '연결 안 됨'}</b><small>{remoteStatus?.running ? (remoteStatus.temporary ? '임시 Quick Link' : '고정 Tunnel') : 'PC와 V.E.R.A가 켜져 있어야 함'}</small></div>
           <div className="remote-status-item"><span>휴대폰에 넣을 주소</span><b className="remote-address-row">{remotePhoneAddress ?? '아직 없음'}</b><small>{remoteExternalReady ? 'HTTPS 주소 그대로 사용' : remoteConfiguredNamed ? '연결 복구 후 사용' : '아래에서 원격 연결 준비'}</small></div>
           <div className="remote-status-item"><span>외부 보호</span><b>{remoteStatus?.accessProtected ? 'Cloudflare Access 통과' : remoteStatus?.reachable ? 'Agent 응답 통과' : '확인 전'}</b><small>{remoteStatus?.verifiedAt ? new Date(remoteStatus.verifiedAt).toLocaleString() : '연결할 때 자동 검사'}</small></div>
         </div>
@@ -1294,10 +1296,10 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
                   ? remoteHandoff
                     ? remoteStatus?.provider === 'cloudflare-named'
                       ? <>{qrHasAutoEnrollment ? '지금 표시된 QR에는 5분 이하·서버 결합 자동 등록권만 있습니다. 스캔하면 안전 저장까지 자동 완료됩니다.' : '장기 Access 자격증명은 QR로 내보내지 않습니다.'}</>
-                      : <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. 공개 주소에서는 일반 6자리 PIN을 받지 않으며 이 12자리 코드만 한 기기에 한 번 허용합니다.</>
+                      : <>폰의 V.E.R.A 앱에서 이 QR을 스캔하세요. 공개 주소에서는 일반 6자리 PIN을 받지 않으며 이 12자리 코드만 한 기기에 한 번 허용합니다.</>
                     : <>기존 등록 기기는 지금 주소로 바로 연결됩니다. 새 기기는 아래에서 외출 코드를 명시적으로 만든 뒤 QR을 스캔하세요.</>
                   : pairing.host !== '127.0.0.1'
-                  ? <>폰의 Mr.Robot 앱에서 이 QR을 스캔하세요. PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다.</>
+                  ? <>폰의 V.E.R.A 앱에서 이 QR을 스캔하세요. PIN은 5분 만료·1회용이며 성공 즉시 새 PIN으로 회전합니다.</>
                   : <>휴대폰에서 사용할 수 있는 보안 주소가 아직 없습니다. 플러그인에서 Quick Link를 시작하면 QR과 원격 주소가 자동으로 나타납니다.</>}
               </p>
               {pairingLinkMessage && <p className="panel-hint">{pairingLinkMessage}</p>}

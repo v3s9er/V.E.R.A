@@ -15,7 +15,7 @@ try {
     page.setDefaultTimeout(6000);
     await page.route('**/*', server.route);
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto(server.origin + '/test/runtime-preview.html?embedded&longHistory');
+    await page.goto(server.origin + '/test/runtime-preview.html?embedded&longHistory&adaptiveRoute');
     await page.getByLabel('대화 이름').waitFor();
     if (width <= 900) await page.getByLabel('프로젝트와 대화 목록 열기').click();
     const list = page.locator('.conversation-items');
@@ -30,15 +30,29 @@ try {
     await page.getByRole('button', { name: '보내기', exact: true }).click();
     await page.getByRole('region', { name: '실시간 작업 로그' }).getByText('파일 읽기', { exact: true }).waitFor();
     const feed = page.locator('.run-timeline');
-    assert.equal(await feed.locator('li').count(), 1);
+    assert.equal(await feed.locator('li').count(), 3);
+    await feed.getByText('선택: 적응형 협업', { exact: true }).waitFor();
+    await feed.getByText('테스트 범위 확인', { exact: true }).waitFor();
     assert.doesNotMatch(await feed.innerText(), /undefined|\{\s*"|NaN/);
     const headerBackground = await page.locator('.chat-commandbar').evaluate(el => getComputedStyle(el).backgroundColor);
     assert.equal(headerBackground, 'rgba(0, 0, 0, 0)', 'header must blend into the workspace');
     await page.screenshot({ path: join(output, `${width}-working.png`) });
+    await page.evaluate(() => window.runtimeFixture.setHelperState('queued'));
+    await feed.getByText('보조 작업 실행 대기', { exact: true }).waitFor();
+    assert.equal(await feed.getByText('실행 대기', { exact: true }).count(), 2);
+    assert.doesNotMatch(await feed.innerText(), /병렬 실행|PRIVATE_|\{\s*"/);
+    await page.evaluate(() => window.runtimeFixture.setHelperState('running'));
+    await feed.getByText('보조 작업 병렬 실행 중', { exact: true }).waitFor();
+    assert.equal(await feed.getByText('실행 중', { exact: true }).count(), 2);
+    await page.evaluate(() => window.runtimeFixture.setHelperState('completed'));
+    await feed.getByText('최종 결과 검토 중', { exact: true }).waitFor();
+    assert.match(await feed.innerText(), /검증 완료 여부는 아직 확인되지 않았습니다/);
+    assert.doesNotMatch(await feed.innerText(), /FIXTURE_PRIVATE_NODE/);
+    await page.screenshot({ path: join(output, `${width}-verification.png`) });
     await page.getByRole('button', { name: '테스트 응답 완료' }).click();
     await page.getByRole('button', { name: '보내기', exact: true }).waitFor();
     assert.equal(await feed.count(), 0, 'reply replaces the waiting log, detailed history stays accessible');
-    console.log(`${width}x${height}: 62 history rows, inline tool log, response transition and unified header passed`);
+    console.log(`${width}x${height}: 62 history rows, route selection, queued/running helpers, verification and response transition passed`);
     await page.close();
   }
 } finally { await browser?.close(); await server.close(); }

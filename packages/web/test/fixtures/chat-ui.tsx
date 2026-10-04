@@ -18,7 +18,7 @@ const client: any = {
     if (method === 'conversations.create') return conversation = { ...conversation, id: `fixture-${Date.now()}`, title: '새 대화', messages: [] };
     if (method === 'providers.list') return [provider];
     if (method === 'providers.models') return [model, 'gpt-5.6-terra', 'gpt-6-astra'];
-    if (method === 'workspaces.list') return [{ id: 'w', name: 'Mr.Robot', path: 'fixture-workspace', isDefault: true }];
+    if (method === 'workspaces.list') return [{ id: 'w', name: 'V.E.R.A', path: 'fixture-workspace', isDefault: true }];
     if (method === 'routing.presets.list') return [{ id: 'preset', name: '순차 실행·검증', executionMode: 'pipeline' }];
     if (method === 'chat.start') return { ok: true, text: 'UI 테스트 응답입니다. 실제 AI는 호출하지 않았습니다.' };
     return [];

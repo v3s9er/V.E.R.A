@@ -2,7 +2,7 @@
 
 ## Scope
 
-Preserve provider accounts, conversation IDs, encrypted attachments and per-device/per-user access policies. Do not reset user data or weaken remote/Discord isolation. Desktop execution uses Mr.Robot's standalone native backend; see [Native desktop execution](COMPUTER_USE_NATIVE.md).
+Preserve provider accounts, conversation IDs, encrypted attachments and per-device/per-user access policies. Do not reset user data or weaken remote/Discord isolation. Desktop execution uses V.E.R.A's standalone native backend; see [Native desktop execution](COMPUTER_USE_NATIVE.md).
 
 ## Implementation checklist
 

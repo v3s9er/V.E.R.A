@@ -53,6 +53,8 @@ const MAX_MESSAGES = 4;
 const MAX_CHILDREN = 6;
 const MAX_PARALLEL = 2;
 const MAX_WAITERS = 32;
+export const SUBAGENT_WAIT_MAX_MS = 60_000;
+const DEFAULT_WAIT_MS = 30_000;
 
 type AdmissionWaiter = {
   signal: AbortSignal;
@@ -110,6 +112,7 @@ type Worker = {
   acceptedMessages: number;
   history: SubagentHistoryTurn[];
   workerId?: string;
+  assignmentKey?: string;
 };
 
 function boundedInput(value: unknown, label: string, maximum: number, optional = false): string {
@@ -139,17 +142,29 @@ export class SubagentManager {
     else options.signal?.addEventListener('abort', this.abortParent, { once: true });
   }
 
-  spawn(input: { task: string; context?: string; label?: string; workerId?: string }): { agentId: string } {
+  spawn(input: { task: string; context?: string; label?: string; workerId?: string; assignmentKey?: string }): { agentId: string; reused?: true } {
     this.assertOpen();
     const profile = input.workerId === undefined ? undefined : this.options.workers?.find(w => w.id === input.workerId);
     if (input.workerId !== undefined && !profile) throw new Error('허용된 보조 모델이 아닙니다.');
-    if (this.workers.size >= MAX_CHILDREN) throw new Error('한 작업에서 하위 에이전트는 최대 6개까지 만들 수 있습니다.');
     const task = boundedInput(input.task, '작업', TASK_BYTES);
     const context = boundedInput(input.context, '문맥', CONTEXT_BYTES, true);
     const label = boundedInput(input.label, '이름', 160, true) || `작업자 ${this.workers.size + 1}`;
+    const assignmentKey = input.assignmentKey === undefined ? undefined : boundedInput(input.assignmentKey, 'assignmentKey', 128);
+    // Claim synchronously before publishing or yielding. Exact text alone is not
+    // an identity: independent reviewers may intentionally receive the same task.
+    if (assignmentKey) {
+      const claimed = [...this.workers.values()].find(worker => worker.assignmentKey === assignmentKey && !terminal(worker.snapshot.state));
+      if (claimed) {
+        if (claimed.task !== task || claimed.context !== context || claimed.workerId !== profile?.id || claimed.acceptedMessages) {
+          throw new Error('진행 중인 assignmentKey는 동일한 작업·문맥·모델의 재시도에만 사용할 수 있습니다.');
+        }
+        return { agentId: claimed.snapshot.agentId, reused: true };
+      }
+    }
+    if (this.workers.size >= MAX_CHILDREN) throw new Error('한 작업에서 하위 에이전트는 최대 6개까지 만들 수 있습니다.');
     const agentId = randomUUID();
     const worker: Worker = {
-      task, context, controller: new AbortController(), messages: [], acceptedMessages: 0, history: [], workerId: profile?.id,
+      task, context, controller: new AbortController(), messages: [], acceptedMessages: 0, history: [], workerId: profile?.id, assignmentKey,
       snapshot: { agentId, label, providerId: profile?.providerId ?? this.options.providerId, model: profile?.model ?? this.options.model,
         state: 'queued', sequence: 0, turns: 0, status: '실행 대기 중', usage: { promptTokens: 0, completionTokens: 0 } },
     };
@@ -173,15 +188,21 @@ export class SubagentManager {
     this.publish(worker);
   }
 
-  async wait(input: { agentIds?: string[]; afterSequence?: number; timeoutMs?: number } = {}, signal?: AbortSignal): Promise<SubagentSnapshot[]> {
+  async wait(input: { agentIds?: string[]; afterSequence?: number; timeoutMs?: number } = {}, signal?: AbortSignal,
+    unread?: (snapshot: SubagentSnapshot) => boolean): Promise<SubagentSnapshot[]> {
     signal?.throwIfAborted();
     if (input.agentIds && (!Array.isArray(input.agentIds) || input.agentIds.length > MAX_CHILDREN)) throw new Error('대기할 하위 에이전트 목록이 올바르지 않습니다.');
     if (input.afterSequence !== undefined && (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0)) throw new Error('대기 순서가 올바르지 않습니다.');
     const selected = input.agentIds ? [...new Set(input.agentIds)].map(id => this.owned(id)) : [...this.workers.values()];
     const current = () => selected.map(worker => this.snapshot(worker));
-    const ready = () => this.disposed || !selected.length || selected.some(worker => input.afterSequence === undefined
-      ? terminal(worker.snapshot.state) : worker.snapshot.sequence > input.afterSequence!);
-    const timeout = input.timeoutMs === undefined ? 15_000 : Number.isFinite(input.timeoutMs) ? Math.max(0, Math.min(15_000, input.timeoutMs)) : 15_000;
+    // The host's delivery ledger may still need an older terminal result when a
+    // caller switches targets. A model-supplied cursor cannot acknowledge it.
+    const ready = () => this.disposed || !selected.length || selected.some(worker =>
+      terminal(worker.snapshot.state) && unread?.(this.snapshot(worker)) || (input.afterSequence === undefined
+        ? terminal(worker.snapshot.state) : worker.snapshot.sequence > input.afterSequence));
+    // Long polls release immediately on updates or cancellation. Do not wake the
+    // model every 15 seconds merely to ask again while a bounded helper runs.
+    const timeout = input.timeoutMs === undefined ? DEFAULT_WAIT_MS : Number.isFinite(input.timeoutMs) ? Math.max(0, Math.min(SUBAGENT_WAIT_MAX_MS, input.timeoutMs)) : DEFAULT_WAIT_MS;
     if (ready() || timeout === 0) return current();
     if (this.listeners.size >= MAX_WAITERS) throw new Error('하위 에이전트 결과 대기가 너무 많습니다.');
     return new Promise((resolve, reject) => {
@@ -206,6 +227,7 @@ export class SubagentManager {
     worker.acceptedMessages++;
     if (worker.snapshot.state === 'completed') {
       worker.snapshot.state = 'queued';
+      delete worker.snapshot.result;
       this.pending.push(worker);
     }
     worker.snapshot.status = '추가 지시 수신 · 다음 실행에 반영';
@@ -311,6 +333,7 @@ export class SubagentManager {
       if (worker.messages.length && worker.snapshot.turns < MAX_TURNS) {
         worker.snapshot.state = 'queued';
         worker.snapshot.status = '추가 지시 실행 대기 중';
+        delete worker.snapshot.result;
         this.pending.push(worker);
       } else {
         worker.snapshot.state = 'completed';

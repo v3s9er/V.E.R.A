@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ModelRole, ModelTuningProfile, ProviderAddInput, ProviderConfig, ProviderInfo, ProviderModelCatalog } from '@mr-robot/shared';
+import type { ModelRole, ModelTuningProfile, ProviderAddInput, ProviderConfig, ProviderInfo, ProviderModelCatalog, RoutingPresetSettings } from '@mr-robot/shared';
 import { ConfigStore, defaultProviderBaseUrl } from '../config.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAICompatibleProvider } from './openai.js';
@@ -59,6 +59,10 @@ function defaultModel(type: ProviderConfig['type']): string {
   }
 }
 
+const providerSource = (provider: ProviderConfig) => provider.source
+  ?? (provider.type === 'ollama' ? 'local' : provider.type.endsWith('-cli') ? 'subscription' : 'api');
+const providerCostTier = (provider: ProviderConfig) => ['free', 'local'].includes(providerSource(provider)) ? 0 : (provider.costTier ?? 1);
+
 /**
  * Holds every configured provider and keeps the on-disk config in sync.
  * Providers can be added/removed at runtime without restarting the server.
@@ -83,7 +87,9 @@ export class ProviderRegistry {
 
   list(): ProviderInfo[] {
     return this.config.providers.map((p) => {
-      const source = p.source ?? (p.type === 'ollama' ? 'local' : p.type.endsWith('-cli') ? 'subscription' : 'api');
+      const source = providerSource(p);
+      const provider = this.providers.get(p.id);
+      const modelCapabilities = provider?.modelCapabilities;
       return ({
       id: p.id,
       label: p.label,
@@ -93,8 +99,9 @@ export class ProviderRegistry {
       hasKey: Boolean(p.apiKey),
       isDefault: p.isDefault,
       source,
-      costTier: source === 'free' || source === 'local' ? 0 : (p.costTier ?? 1),
-      supportedReasoning: this.providers.get(p.id)?.supportedReasoning ?? ['auto'],
+      costTier: providerCostTier(p),
+      supportedReasoning: provider?.supportedReasoning ?? ['auto'],
+      ...(modelCapabilities ? { modelCapabilities } : {}),
       });
     });
   }
@@ -113,6 +120,8 @@ export class ProviderRegistry {
     const config = this.config.providers.find((provider) => provider.id === id);
     if (!config) return undefined;
     if (config.model === selectedModel) return this.get(id);
+    const provider = this.providers.get(id);
+    if (provider instanceof CliProvider) return provider.forModel(selectedModel);
     try {
       return instantiate({ ...config, baseUrl: normalizeBaseUrl(config.type, config.baseUrl), model: selectedModel });
     } catch {
@@ -146,15 +155,16 @@ export class ProviderRegistry {
   }
 
   costTier(id: string): number {
-    return this.list().find((provider) => provider.id === id)?.costTier ?? 1;
+    const provider = this.config.providers.find(provider => provider.id === id);
+    return provider ? providerCostTier(provider) : 1;
   }
 
   freeProvider(role: ModelRole, roleProviders: string[] = [], requireTools = false): AiProvider | undefined {
-    const freeIds = new Set(this.list().filter((provider) => provider.costTier === 0).map((provider) => provider.id));
+    const freeIds = new Set(this.config.providers.filter(provider => providerCostTier(provider) === 0).map(provider => provider.id));
     const ordered = [
       ...roleProviders,
       ...(this.config.routing.roles[role] ?? []),
-      ...this.list().map((provider) => provider.id),
+      ...this.config.providers.map(provider => provider.id),
     ];
     for (const id of ordered) {
       if (!freeIds.has(id)) continue;
@@ -217,6 +227,34 @@ export class ProviderRegistry {
     if (provider.modelCatalog) return provider.modelCatalog(force);
     const models = await provider.models(force);
     return { models, source: 'provider', state: 'fresh', lastUpdatedAt: Date.now(), lastAttemptAt: Date.now() };
+  }
+
+  /** Best-effort cached metadata only, limited to the current route's providers. */
+  async prepareModelCapabilities(preferredId?: string, routing?: Pick<RoutingPresetSettings, 'roles' | 'graph'> | null, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const settings = routing ?? this.config.routing;
+    // null explicitly disables routing. A simple default-provider request must
+    // not wait for unrelated global role/graph CLI discovery.
+    const ids = new Set(routing === null ? [preferredId ?? this.default()?.id] : preferredId && !routing ? [preferredId] : [
+      preferredId,
+      this.default()?.id,
+      ...Object.values(settings.roles).flat(),
+      ...(settings.graph?.nodes ?? []).map(node => node.providerId),
+    ]);
+    const loading = Promise.all([...ids].map(async id => {
+      const provider = id ? this.providers.get(id) : undefined;
+      if (provider?.type === 'codex-cli') await provider.models().catch(() => undefined);
+    })).then(() => undefined);
+    if (!signal) return loading;
+    // Discovery is shared across requests. Abort only this caller's wait, not
+    // the provider-owned probe/cache that another live request may be using.
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => signal.removeEventListener('abort', abort);
+      const abort = () => { cleanup(); reject(signal.reason); };
+      signal.addEventListener('abort', abort, { once: true });
+      loading.then(() => { cleanup(); resolve(); }, error => { cleanup(); reject(error); });
+      if (signal.aborted) abort();
+    });
   }
 
   async test(id: string): Promise<{ ok: boolean; error?: string }> {

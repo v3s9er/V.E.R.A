@@ -1,4 +1,4 @@
-"""Mr.Robot Discord plugin protocol. No secrets in this file.
+"""V.E.R.A Discord plugin protocol. No secrets in this file.
 
 Run only via the Discord Agent plugin. Standalone needs connection config only.
 The PC credential never leaves the Node host. Discord identity comes from Gateway.
@@ -149,11 +149,10 @@ class Bridge:
         self.threads.install()
         # Team apps have one explicit team owner; membership alone is not authority.
         self.owner = application.team.owner_id if application.team else application.owner.id
-        group = app_commands.Group(name='robot', description='Mr.Robot 개인 티켓 에이전트', guild_only=True)
+        group = app_commands.Group(name='robot', description='V.E.R.A 개인 티켓 에이전트', guild_only=True)
 
         @group.command(name='ask', description='개인 티켓에서 AI 작업 요청 (allow_ai 필요)')
-        @app_commands.describe(message='작업 내용', provider='models에서 확인한 공급자 ID', model='모델 ID', effort='추론 강도')
-        @app_commands.choices(effort=[app_commands.Choice(name=v, value=v) for v in ('auto', 'low', 'medium', 'high')])
+        @app_commands.describe(message='작업 내용', provider='models에서 확인한 공급자 ID', model='모델 ID', effort='추론 강도 · 모델별 지원 단계는 /robot model에서 확인')
         async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = '', file: discord.Attachment = None):
             await self.execute(interaction, 'ask', text=message, providerId=provider, model=model, effort=effort, _attachments=[file] if file else [])
 
@@ -426,7 +425,7 @@ class Bridge:
                 label = f'[{number+1}/{min(len(chunks), 4)}] ' if len(chunks) > 1 else ''
                 await sender(label + chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
             if len(chunks) > 4 or (action in ('ask', 'result') and len(text) > 6000):
-                file = discord.File(io.BytesIO(text.encode('utf-8')), filename='MrRobot-result.txt')
+                file = discord.File(io.BytesIO(text.encode('utf-8')), filename='V.E.R.A-result.txt')
                 try:
                     await sender('위에는 미리보기입니다. 생략 없는 전체 답변은 이 TXT 파일에서 확인하세요.', file=file, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
                 finally:

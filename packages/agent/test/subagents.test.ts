@@ -41,6 +41,63 @@ test('spawn is immediate, selected identity is retained, and each parent runs at
   assert.equal(active, 0);
 });
 
+test('explicit assignment retries claim one active worker without merging independent reviewers', async () => {
+  const calls: SubagentExecutionInput[] = [];
+  const pending: Array<ReturnType<typeof pendingWork>> = [];
+  const manager = new SubagentManager({ ...identity, execute: input => {
+    calls.push(input);
+    const work = pendingWork(input); pending.push(work); return work.promise;
+  } });
+  try {
+    const assignment = { task: 'Inspect alpha.txt', context: 'Check its recorded hash.', assignmentKey: 'alpha-hash' };
+    const first = manager.spawn(assignment);
+    const retries = await Promise.all(Array.from({ length: 20 }, async () => manager.spawn(assignment)));
+    assert.ok(retries.every(retry => retry.agentId === first.agentId && retry.reused === true));
+    await tick(); assert.equal(calls.length, 1, '21 submissions of one keyed assignment use one provider invocation');
+    assert.equal(manager.list().length, 1);
+    const independent = manager.spawn({ task: assignment.task, context: assignment.context });
+    assert.notEqual(independent.agentId, first.agentId, 'same text without a key requests an independent review');
+    await tick(); assert.equal(calls.length, 2);
+    for (const work of pending) work.resolve({ text: 'bounded evidence' });
+    await manager.drained();
+    const fresh = manager.spawn(assignment);
+    assert.notEqual(fresh.agentId, first.agentId, 'completed evidence is not a cache for a later read');
+    await tick(); assert.equal(calls.length, 3);
+  } finally { manager.dispose(); await manager.drained(); }
+});
+
+test('assignment claims stay scoped to their parent, exact payload, worker and active unsteered task', async () => {
+  const options = { ...identity, workers: [{ id: 'reviewer', label: 'Reviewer', ...identity }], execute: (input: SubagentExecutionInput) => pendingWork(input).promise };
+  const manager = new SubagentManager(options), other = new SubagentManager(options);
+  try {
+    const assignment = { task: 'Inspect alpha', context: 'Only alpha', assignmentKey: 'read-alpha' };
+    const first = manager.spawn(assignment);
+    assert.notEqual(other.spawn(assignment).agentId, first.agentId);
+    for (const change of [{ task: 'Inspect beta' }, { context: 'Only beta' }, { workerId: 'reviewer' }]) {
+      assert.throws(() => manager.spawn({ ...assignment, ...change }), /assignmentKey/);
+    }
+    assert.throws(() => manager.spawn({ ...assignment, assignmentKey: '' }), /assignmentKey/);
+    assert.throws(() => manager.spawn({ ...assignment, assignmentKey: 'x'.repeat(129) }), /assignmentKey/);
+    manager.message({ agentId: first.agentId, message: 'Now also inspect beta' });
+    assert.throws(() => manager.spawn(assignment), /assignmentKey/);
+    manager.cancel(first.agentId);
+    assert.notEqual(manager.spawn(assignment).agentId, first.agentId, 'cancelled claims can be retried');
+  } finally { manager.dispose(); other.dispose(); await Promise.all([manager.drained(), other.drained()]); }
+});
+
+test('keyed retries do not consume the child cap and queued assignment claims are atomic', async () => {
+  const manager = new SubagentManager({ ...identity, execute: input => pendingWork(input).promise });
+  try {
+    const assignments = Array.from({ length: 6 }, (_, index) => ({ task: `task ${index}`, assignmentKey: `key-${index}` }));
+    const ids = assignments.map(assignment => manager.spawn(assignment).agentId);
+    assert.equal(manager.spawn(assignments[5]).agentId, ids[5]);
+    await tick();
+    assert.equal(manager.list()[5].state, 'queued');
+    assert.equal(manager.spawn(assignments[5]).reused, true);
+    assert.throws(() => manager.spawn({ task: 'seventh', assignmentKey: 'new-key' }), /6개/);
+  } finally { manager.dispose(); await manager.drained(); }
+});
+
 test('independent parents share three global slots in FIFO order and queued cancellation releases ownership', async () => {
   const started: string[] = [];
   const pending = new Map<string, ReturnType<typeof pendingWork>>();
@@ -229,7 +286,8 @@ test('per-call usage survives failure and cancellation, validates reports atomic
   } finally { failingManager.dispose(); await failingManager.drained(); }
 });
 
-test('wait returns changed snapshots, cancels independently, and never waits over 15 seconds', async t => {
+test('wait returns changed snapshots, cancels independently, and never waits over 60 seconds', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const manager = new SubagentManager({ ...identity, execute: input => pendingWork(input).promise });
   try {
     const { agentId } = manager.spawn({ task: 'wait target' }); await tick();
@@ -242,13 +300,39 @@ test('wait returns changed snapshots, cancels independently, and never waits ove
     abort.abort(new Error('only stop waiting'));
     await assert.rejects(cancelledWait, /only stop waiting/);
     assert.equal(manager.list()[0].state, 'running');
-    t.mock.timers.enable({ apis: ['setTimeout'] });
     let settled = false;
     const boundedWait = manager.wait({ timeoutMs: 999_999 }).then(value => { settled = true; return value; });
-    t.mock.timers.tick(14_999); await Promise.resolve(); assert.equal(settled, false);
+    t.mock.timers.tick(59_999); await Promise.resolve(); assert.equal(settled, false);
     t.mock.timers.tick(1); assert.equal((await boundedWait)[0].state, 'running');
-    t.mock.timers.reset();
-  } finally { manager.dispose(); await manager.drained(); }
+  } finally { manager.dispose(); await manager.drained(); t.mock.timers.reset(); }
+});
+
+test('default long poll does not wake at 15 seconds and returns promptly on completion', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const work = deferred<{ text: string }>();
+  const manager = new SubagentManager({ ...identity, execute: () => work.promise });
+  try {
+    manager.spawn({ task: 'independent evidence' }); await tick();
+    let settled = false;
+    const pending = manager.wait().then(result => { settled = true; return result; });
+    t.mock.timers.tick(15_001); await Promise.resolve(); assert.equal(settled, false);
+    t.mock.timers.tick(4_999); work.resolve({ text: 'verified evidence' });
+    assert.equal((await pending)[0].result, 'verified evidence');
+  } finally { work.resolve({ text: 'cleanup' }); manager.dispose(); await manager.drained(); t.mock.timers.reset(); }
+});
+
+test('default wait is bounded at 30 seconds and non-finite input uses that default', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const manager = new SubagentManager({ ...identity, execute: input => pendingWork(input).promise });
+  try {
+    manager.spawn({ task: 'bounded default wait' }); await tick();
+    for (const timeoutMs of [undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+      let settled = false;
+      const pending = manager.wait({ timeoutMs }).then(result => { settled = true; return result; });
+      t.mock.timers.tick(29_999); await Promise.resolve(); assert.equal(settled, false);
+      t.mock.timers.tick(1); assert.equal((await pending)[0].state, 'running');
+    }
+  } finally { manager.dispose(); await manager.drained(); t.mock.timers.reset(); }
 });
 
 test('120 second invocation timeout aborts execution and leaves a bounded failure snapshot', async t => {

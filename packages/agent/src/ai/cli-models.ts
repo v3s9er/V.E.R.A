@@ -2,10 +2,10 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { terminateProcessTree } from '../computer/shell.js';
-import type { ProviderModelCatalog } from '@mr-robot/shared';
+import type { ModelReasoningCapabilities, ProviderModelCatalog, ReasoningEffort } from '@mr-robot/shared';
 
 const DISCOVERY_ERRORS = {
-  launch: 'Codex CLI를 실행하지 못했습니다. 설치 상태와 Mr.Robot의 CLI 경로를 확인하세요.',
+  launch: 'Codex CLI를 실행하지 못했습니다. 설치 상태와 V.E.R.A의 CLI 경로를 확인하세요.',
   unsupported: '설치된 Codex CLI가 모델 조회 기능이나 실행 옵션을 지원하지 않습니다. 해당 CLI를 업데이트한 뒤 모델 목록을 새로고침하세요.',
   timeout: 'Codex 모델 조회 시간이 초과되었습니다. 로그인과 네트워크를 확인한 뒤 다시 시도하세요.',
   empty: 'Codex가 표시 가능한 모델을 반환하지 않았습니다. 로그인 계정과 모델 사용 권한을 확인하세요.',
@@ -18,6 +18,28 @@ export class ModelDiscoveryError extends Error {
 }
 
 type DiscoveryOptions = { command: string; prefixArgs: string[]; env: NodeJS.ProcessEnv; timeoutMs?: number };
+
+export interface CodexModelDiscovery {
+  models: string[];
+  modelCapabilities: Record<string, ModelReasoningCapabilities>;
+}
+
+// This is a protocol allowlist, not a model-family capability table. A value
+// only becomes available when the selected model explicitly advertises it.
+const REASONING_EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+
+function modelCapabilities(entry: Record<string, unknown>): ModelReasoningCapabilities | undefined {
+  if (!Array.isArray(entry.supportedReasoningEfforts)) return undefined;
+  const supportedReasoningEfforts = [...new Set(entry.supportedReasoningEfforts.flatMap(option => {
+    const effort = option?.reasoningEffort;
+    return typeof effort === 'string' && REASONING_EFFORTS.has(effort) ? [effort as ReasoningEffort] : [];
+  }))];
+  const defaultReasoningEffort = entry.defaultReasoningEffort;
+  return { supportedReasoningEfforts,
+    ...(typeof defaultReasoningEffort === 'string' && supportedReasoningEfforts.includes(defaultReasoningEffort as ReasoningEffort)
+      ? { defaultReasoningEffort: defaultReasoningEffort as ReasoningEffort } : {}),
+  };
+}
 
 /** Same executable as model/list. Optional diagnostics must not block discovery. */
 export function discoverCodexVersion(options: DiscoveryOptions): Promise<string | undefined> {
@@ -42,7 +64,12 @@ export function discoverCodexVersion(options: DiscoveryOptions): Promise<string 
 }
 
 /** Discovery only: never opens a thread, runs inference, or approves tools. */
-export function discoverCodexModels(options: DiscoveryOptions): Promise<string[]> {
+export async function discoverCodexModels(options: DiscoveryOptions): Promise<string[]> {
+  return (await discoverCodexModelCatalog(options)).models;
+}
+
+/** Retains safe per-model capabilities without exposing descriptions or raw CLI output. */
+export function discoverCodexModelCatalog(options: DiscoveryOptions): Promise<CodexModelDiscovery> {
   return new Promise((resolve, reject) => {
     const config: Record<string, unknown> = {
       mcp_servers: {}, 'apps._default.enabled': false,
@@ -59,6 +86,7 @@ export function discoverCodexModels(options: DiscoveryOptions): Promise<string[]
     const stderrDecoder = new StringDecoder('utf8');
     let stderrTail = '', unsupported = false;
     const models = new Set<string>(), cursors = new Set<string>();
+    const capabilities = new Map<string, ModelReasoningCapabilities>();
     const failure = () => new ModelDiscoveryError(unsupported ? 'unsupported' : 'protocol');
     const finish = (error?: Error) => {
       if (done) return;
@@ -66,7 +94,7 @@ export function discoverCodexModels(options: DiscoveryOptions): Promise<string[]
       clearTimeout(timer);
       child.stdin.end();
       terminateProcessTree(child);
-      if (error) reject(error); else resolve([...models]);
+      if (error) reject(error); else resolve({ models: [...models], modelCapabilities: Object.fromEntries(capabilities) });
     };
     const timer = setTimeout(() => finish(new ModelDiscoveryError('timeout')), options.timeoutMs ?? 12_000);
     const send = (message: unknown) => { if (!done) child.stdin.write(JSON.stringify(message) + '\n'); };
@@ -106,7 +134,11 @@ export function discoverCodexModels(options: DiscoveryOptions): Promise<string[]
           for (const entry of message.result.data) {
             if (!entry || entry.hidden === true) continue;
             const id = entry.model ?? entry.id;
-            if (typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(id)) models.add(id);
+            if (typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(id)) {
+              models.add(id);
+              const value = modelCapabilities(entry);
+              if (value) capabilities.set(id, value);
+            }
           }
           if (models.size > 2000) { finish(failure()); continue; }
           const cursor = message.result.nextCursor;

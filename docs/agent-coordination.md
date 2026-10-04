@@ -1,11 +1,11 @@
-# Mr.Robot 0.5: host-managed coordination
+# V.E.R.A 0.5: host-managed coordination
 
 The main agent owns the user's conversation and final answer. On a complex task it can assign independent analysis/review to a helper, continue its own work, retrieve the result, and synthesize it. A simple question still needs only the main model. This is a host implementation, not a claim to reproduce private Codex internals or outperform every agent.
 
 ## Execution boundaries
 
 - `agent_spawn` returns a host-generated ID immediately. The task and explicitly supplied context are separate from the main conversation. Provider/model/effort are inherited from the selected main model; model-provided arguments cannot change identity, authority, workspace, or token policy.
-- `agent_message` queues a follow-up without restarting the current helper call. `agent_wait` waits at most 15 seconds; sequence cursors avoid returning old result bodies repeatedly. `agent_list` contains status, not a repeated transcript. `agent_cancel` only accepts a helper owned by this run.
+- `agent_message` queues a follow-up without restarting the current helper call. `agent_wait` waits 30 seconds by default (maximum 60), returning early on updates or cancellation. Its native transport deadline leaves five seconds of settlement margin. Sequence cursors and a delivery ledger avoid repeating result bodies without losing unread siblings. `agent_list` contains status, not a repeated transcript. `agent_cancel` only accepts a helper owned by this run.
 - Each parent can have two simultaneous and six total helpers. A separate global three-slot FIFO admits workers. Each helper has at most four turns and eight read-tool rounds per turn, with a 120-second invocation timeout. Parent completion/cancellation aborts and drains remaining calls before releasing run admission.
 - Helpers use isolated CLI text workers or the API tool loop, never the parent's native execution pool. Native parents cannot deadlock their children by occupying all native slots. Text-worker saturation now queues instead of failing immediately; queues are bounded and cancellable.
 - Helpers may read/list the selected workspace through the host's canonical-path checks. They cannot run shell commands, write files, control the screen, inherit MCP servers, or recursively create agents. The main agent is the single writer and desktop controller. Multi-writer worktrees and arbitrary worker-model overrides are **not implemented** in this version.

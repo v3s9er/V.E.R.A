@@ -1,5 +1,5 @@
 /**
- * Mr.Robot desktop shell (Electron).
+ * V.E.R.A desktop shell (Electron).
  *
  * Runs the agent server IN-PROCESS (the desktop app IS the agent), then shows
  * the web UI in a native window. Closing the window hides it to the tray —
@@ -17,7 +17,9 @@ import { WebSocket as NativeWebSocket } from 'ws';
 import { openTrustedNmapRouteWithHttpsFallback } from './nmap-route.mjs';
 import { normalizeRemotePairOrigin, postPinnedRemotePairJson } from './remote-pair-security.mjs';
 import { installWindowRecovery } from './window-recovery.mjs';
+import { configureDesktopBranding, DESKTOP_LOGIN_ITEM_NAME } from './branding.mjs';
 
+configureDesktopBranding(app);
 const here = dirname(fileURLToPath(import.meta.url));
 const bundledAgent = resolve(here, 'agent.mjs');
 let AgentServer;
@@ -104,7 +106,7 @@ function saveDesktopPreferences() {
   const file = preferencesFile();
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(desktopPreferences, null, 2), 'utf8');
-  if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: desktopPreferences.openAtLogin, path: process.execPath });
+  if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: desktopPreferences.openAtLogin, path: process.execPath, name: DESKTOP_LOGIN_ITEM_NAME });
 }
 
 function showMainWindow() {
@@ -118,12 +120,12 @@ function showMainWindow() {
 function rebuildTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Mr.Robot 열기', click: showMainWindow },
+    { label: 'V.E.R.A 열기', click: showMainWindow },
     { label: agentPort ? '로컬 에이전트 · ' + agentPort + ' 포트' : '로컬 에이전트 · 시작 중', enabled: false },
     { label: '원격 연결 설정', click: () => { showMainWindow(); win?.webContents.send('mr-robot:navigate', 'plugins'); } },
     { label: '실행 중 작업 모두 중지', click: () => {
       const count = server?.cancelAllRuns?.() ?? 0;
-      tray?.displayBalloon?.({ title: 'Mr.Robot', content: count ? count + '개 작업에 중지 요청을 보냈습니다.' : '실행 중인 작업이 없습니다.' });
+      tray?.displayBalloon?.({ title: 'V.E.R.A', content: count ? count + '개 작업에 중지 요청을 보냈습니다.' : '실행 중인 작업이 없습니다.' });
     } },
     { type: 'separator' },
     { label: 'Windows 시작 시 실행', type: 'checkbox', checked: desktopPreferences.openAtLogin, click: (item) => {
@@ -137,7 +139,7 @@ function rebuildTrayMenu() {
       rebuildTrayMenu();
     } },
     { type: 'separator' },
-    { label: 'Mr.Robot 완전히 종료', click: () => void quit() },
+    { label: 'V.E.R.A 완전히 종료', click: () => void quit() },
   ]));
 }
 
@@ -623,7 +625,7 @@ async function pairRemotePc(input) {
   const origin = normalizeRemotePairOrigin(String(input?.origin ?? ''));
   const pin = String(input?.pin ?? '').trim();
   if (!/^(?:\d{6}|\d{12})$/.test(pin)) throw new Error('연결 PIN 형식이 올바르지 않습니다.');
-  const deviceName = String(input?.deviceName ?? 'Mr.Robot 데스크톱').trim().slice(0, 160) || 'Mr.Robot 데스크톱';
+  const deviceName = String(input?.deviceName ?? 'V.E.R.A 데스크톱').trim().slice(0, 160) || 'V.E.R.A 데스크톱';
   const permissionCap = input?.permissionCap === 'read-only' ? 'read-only' : 'ask';
   const edgeCredentials = normalizeCloudflareAccessCredentials(input?.accessClientId, input?.accessClientSecret);
   const response = await postPinnedRemotePairJson(
@@ -656,7 +658,7 @@ async function pairRemotePc(input) {
 
 function icon() {
   const image = nativeImage.createFromPath(runtimeIconPath);
-  if (image.isEmpty()) throw new Error(`Mr.Robot icon could not be loaded: ${runtimeIconPath}`);
+  if (image.isEmpty()) throw new Error(`V.E.R.A icon could not be loaded: ${runtimeIconPath}`);
   return image;
 }
 
@@ -692,7 +694,7 @@ function createWindow(url) {
   const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
   win = new BrowserWindow({
     ...initialWindowBounds(area),
-    title: 'Mr.Robot',
+    title: 'V.E.R.A',
     backgroundColor: '#101216',
     // Keep native window controls (including Windows snap layouts) without a white frame.
     ...(process.platform === 'win32' ? { titleBarStyle: 'hidden', titleBarOverlay: { color: '#101216', symbolColor: '#d5d8e1', height: 32 } } : {}),
@@ -741,7 +743,7 @@ function createWindow(url) {
       // Chromium may carry custom headers into a redirected request. Remove
       // every renderer-supplied or previously injected credential first, then
       // re-add secrets only when the new request still matches the exact
-      // registered Mr.Robot API origin. This makes cross-origin redirects
+      // registered V.E.R.A API origin. This makes cross-origin redirects
       // fail closed instead of forwarding either credential layer.
       const sensitiveHeaders = new Set([
         'x-mr-robot-token',
@@ -812,7 +814,7 @@ function createWindow(url) {
     onUnavailable: async () => {
       const { response } = await dialog.showMessageBox(currentWindow, {
         type: 'error',
-        title: 'Mr.Robot 화면을 불러오지 못했습니다',
+        title: 'V.E.R.A 화면을 불러오지 못했습니다',
         message: '화면 연결을 복구하지 못했습니다.',
         detail: '화면만 다시 불러옵니다. 저장된 대화와 설정은 지우지 않으며, 백그라운드 에이전트 작업은 유지됩니다.',
         buttons: ['다시 불러오기', '나중에'], defaultId: 0, cancelId: 1,
@@ -825,7 +827,7 @@ function createWindow(url) {
 
 ipcMain.handle('mr-robot:choose-directory', async (event) => {
   assertTrustedRenderer(event);
-  const result = await dialog.showOpenDialog(win ?? undefined, { properties: ['openDirectory', 'createDirectory'], title: 'Mr.Robot 작업 폴더 선택' });
+  const result = await dialog.showOpenDialog(win ?? undefined, { properties: ['openDirectory', 'createDirectory'], title: 'V.E.R.A 작업 폴더 선택' });
   return result.canceled ? null : result.filePaths[0] ?? null;
 });
 
@@ -875,7 +877,7 @@ ipcMain.handle('mr-robot:download', async (event, input) => {
   const effectiveToken = resolveDesktopCredential(token, parsed.origin);
   if (!effectiveToken) throw new Error('등록된 PC 주소와 자격증명이 일치하지 않아 다운로드를 차단했습니다.');
   const edgeCredentials = resolveDesktopAccessCredentials(token, parsed.origin);
-  const picked = await dialog.showSaveDialog(win ?? undefined, { title: 'Mr.Robot 파일 저장', defaultPath: suggestedName });
+  const picked = await dialog.showSaveDialog(win ?? undefined, { title: 'V.E.R.A 파일 저장', defaultPath: suggestedName });
   if (picked.canceled || !picked.filePath) return { canceled: true };
   const destinationKey = resolve(picked.filePath).toLocaleLowerCase('en-US');
   if (activeDownloadPaths.has(destinationKey)) throw new Error('같은 위치로 다른 다운로드가 진행 중입니다. 완료하거나 중지한 뒤 다시 시도하세요.');
@@ -964,7 +966,7 @@ ipcMain.on('mr-robot:local-rpc.close', (event) => {
 async function quit() {
   quitting = true;
   windowRecovery?.dispose();
-  closeLocalRpc(false, 'Mr.Robot을 종료합니다.');
+  closeLocalRpc(false, 'V.E.R.A를 종료합니다.');
   for (const controller of activeDownloads.values()) controller.abort();
   activeDownloads.clear();
   try {
@@ -989,18 +991,18 @@ if (!gotLock) {
     .then(async () => {
       session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
       desktopPreferences = loadDesktopPreferences();
-      if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: desktopPreferences.openAtLogin, path: process.execPath });
+      if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: desktopPreferences.openAtLogin, path: process.execPath, name: DESKTOP_LOGIN_ITEM_NAME });
       const port = await startAgent();
       createWindow(`http://127.0.0.1:${port}`);
 
       tray = new Tray(icon());
-      tray.setToolTip('Mr.Robot — PC AI 에이전트 (실행 중)');
+      tray.setToolTip('V.E.R.A — PC AI 에이전트 (실행 중)');
       rebuildTrayMenu();
       tray.on('click', showMainWindow);
     })
     .catch((err) => {
       logStartup(err);
-      console.error('failed to start Mr.Robot:', err);
+      console.error('failed to start V.E.R.A:', err);
       app.quit();
     });
 

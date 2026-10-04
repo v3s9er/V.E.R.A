@@ -122,7 +122,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
     <Card className={`dependency-setup ${modal ? 'dependency-modal-card' : ''}`}>
       <div className="dependency-header">
         <div>
-          <h3>{modal ? 'Mr.Robot 첫 실행 준비' : '외부 도구 및 의존성'}</h3>
+          <h3>{modal ? 'V.E.R.A 첫 실행 준비' : '외부 도구 및 의존성'}</h3>
           <p className="panel-hint">설치 여부를 실제 실행 파일로 확인합니다. 선택한 누락 항목만 공식 패키지 경로로 설치합니다.</p>
         </div>
         <Button variant="ghost" disabled={busy !== null} onClick={() => void refresh()}>다시 검사</Button>
@@ -163,7 +163,7 @@ export function DependencySetup({ modal = false, onComplete }: Props) {
       </div>
 
       {message && <pre className="dependency-output">{message}</pre>}
-      <p className="panel-hint">Codex와 Claude는 설치 후 각 공식 로그인 화면에서 직접 인증해야 합니다. Mr.Robot은 로그인 토큰을 복사하거나 묶어서 배포하지 않습니다.</p>
+      <p className="panel-hint">Codex와 Claude는 설치 후 각 공식 로그인 화면에서 직접 인증해야 합니다. V.E.R.A는 로그인 토큰을 복사하거나 묶어서 배포하지 않습니다.</p>
       <div className="dependency-actions">
         <Button disabled={!canManage || busy !== null || selected.size === 0} onClick={() => void installSelected()}>
           {busy === 'all' ? '선택 항목 설치 중…' : '선택한 누락 항목 설치'}

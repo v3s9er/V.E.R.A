@@ -2,13 +2,13 @@
 
 ## License
 
-Original Mr.Robot Discord integration code is licensed under the [MIT License](LICENSE).
+Original V.E.R.A Discord integration code is licensed under the [MIT License](LICENSE).
 Copyright (c) 2026 v3s9er. Keep the copyright and permission notice in copies or
 substantial portions. Third-party components retain their own licenses.
 This software license does not grant access to AI subscriptions, accounts or
 APIs, and does not override Discord or model-provider terms of service.
 
-The optional first-party plugin connects Discord to the normal Mr.Robot agent.
+The optional first-party plugin connects Discord to the normal V.E.R.A agent.
 **Standalone mode** reads only `bot_token` and `server_name` from a local
 `config.json`. It does not import the security bot, execute its `main.py`, or need
 its GUI/news/KTX dependencies. Connection settings stay in their original file,
@@ -25,7 +25,7 @@ features. New configurations default to standalone; existing users can select it
 1. Install `python -m pip install -r integrations/discordbot/requirements.txt`.
    Only compatibility mode also needs the original bot's dependencies.
 2. Close the existing security bot before switching connection ownership.
-3. Enable **Discord Agent** in Mr.Robot Plugins; select **Standalone**, supply
+3. Enable **Discord Agent** in V.E.R.A Plugins; select **Standalone**, supply
    the directory containing `config.json` and the absolute Python executable
    path, then choose **Save & Connect**. A config-only folder is sufficient;
    the existing security bot folder can also be used without running its code.
@@ -86,7 +86,7 @@ policy update.
 
 Catalogs and saved/direct selections are checked by the Node host. Limited
 requests resolve their provider/default explicitly. Every actual provider call
-through Mr.Robot's loop is checked again, including API/native execution and
+through V.E.R.A's loop is checked again, including API/native execution and
 fallback providers. Discord runs do not inherit PC routing presets. Policy
 errors never silently upgrade or rewrite a user's chosen model.
 
@@ -142,7 +142,7 @@ Stopping cancels a run; it is not pause/resume.
 Use is subject to Discord and model-provider terms. Python and discord.py remain
 external dependencies. The Windows installer bundles all generic plugin modules
 and requirements, but no credentials or original security bot source. Existing
-admin checks, ticket ownership and Mr.Robot execution/approval controls apply in
+admin checks, ticket ownership and V.E.R.A execution/approval controls apply in
 both modes.
 
 ### Ticket issuance: allow_ai
@@ -247,7 +247,7 @@ idle, with native environments disabled on every turn and no copied credentials.
 ### Direct subscription execution and warm sandboxes
 
 Restricted, single-model Codex tickets using the `audit-only` token policy now
-use one app-server agent turn. Codex manages its own tool loop; Mr.Robot registers
+use one app-server agent turn. Codex manages its own tool loop; V.E.R.A registers
 only the ticket's public-web/artifact/Python capabilities and validates each call.
 There is no extra verifier model, JSON-answer wrapper, or host-driven model call
 after each tool. Selected model and reasoning effort are preserved. Whole-turn

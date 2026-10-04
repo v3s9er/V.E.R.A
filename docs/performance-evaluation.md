@@ -1,6 +1,6 @@
 # Performance evaluation and promotion rules
 
-Mr.Robot now measures three different things separately. They must not be collapsed into a claim that a model became faster or more intelligent:
+V.E.R.A now measures three different things separately. They must not be collapsed into a claim that a model became faster or more intelligent:
 
 | Suite | What actually executes | What it can establish |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Mr.Robot now measures three different things separately. They must not be collap
 
 [Princeton's HAL harness](https://github.com/princeton-pli/hal-harness) uses standardized agent evaluation and usage/cost tracking. Its repository is archived as of July 2026; it is a methodology reference, not an installed runtime dependency. No HAL source or benchmark dataset was copied into this project.
 
-The subscription transport uses the [official Codex app-server](https://learn.chatgpt.com/docs/app-server) through the existing Mr.Robot adapter. These experiments do not create paid API fallback credentials, start fine-tuning, upload private documents or change the selected production model.
+The subscription transport uses the [official Codex app-server](https://learn.chatgpt.com/docs/app-server) through the existing V.E.R.A adapter. These experiments do not create paid API fallback credentials, start fine-tuning, upload private documents or change the selected production model.
 
 ## Repeatable commands
 

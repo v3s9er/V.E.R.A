@@ -13,7 +13,7 @@
   다양성이 있을 때만 투표의 이득을 기대하도록 설계했습니다.
 - [OpenHands Agent SDK](https://github.com/All-Hands-AI/agent-sdk)와
   [agent-debate](https://github.com/Skytliang/Multi-Agents-Debate)을 기능 비교 대상으로
-  검토했습니다. 외부 코드를 복사하지 않았고 Mr.Robot의 타입/실행/저장 계약에 맞춰
+  검토했습니다. 외부 코드를 복사하지 않았고 V.E.R.A의 타입/실행/저장 계약에 맞춰
   독립 구현했습니다.
 
 여러 모델을 항상 부르면 품질이 자동으로 오르지 않고 토큰도 각자 소비합니다. 따라서 기본
@@ -34,7 +34,7 @@
   no-network, read-only root, resource cap을 중첩합니다.
 - 외부 파일 연결은 [Tailscale Taildrop의 peer-to-peer 전송 설명](https://tailscale.com/kb/1106/taildrop)을
   참고했지만 Taildrop API에 종속하지 않습니다. Tailscale은 IP transport이고 실제 전송 권한과
-  파일 API는 Mr.Robot이 소유합니다.
+  파일 API는 V.E.R.A가 소유합니다.
 - VPN 없는 선택 연결은 [Cloudflare Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)의
   임시 HTTPS 경로를 사용합니다. 개발·테스트용 임시 주소라는 공급자 경계를 UI에 표시하고,
   기본 설치·실행·자동 시작은 모두 끈 상태로 둡니다. 파일·상태 전송은 별도의 90초 1회성
@@ -71,8 +71,19 @@
 검사합니다. 이는 법률 자문이 아니며 공개 상용 배포 전에는 최종 SBOM/NOTICE와 코드 서명,
 각 공급자 이용약관 검토가 필요합니다.
 
-2026-08-31 최종 감사에서 직접 런타임 의존성은 MIT/Apache/BSD/ISC 계열로 확인됐습니다.
+2026-10-04 검사는 654개 production 패키지의 결정적 NOTICE를 lockfile 및 데스크톱 stage와
+대조했습니다. MIT/Apache/BSD/ISC 외에 MPL 라이선스 구성요소도 실제 NOTICE에 포함됩니다.
 브랜드 PNG 생성에만 쓰는 개발 의존성 Sharp의 사전 빌드 libvips 패키지는 LGPL-3.0-or-later를
-함께 표시하므로 결정적 NOTICE에 해당 고지를 포함했습니다. Sharp/libvips 바이너리는 Electron
-stage와 APK에는 들어가지 않고 생성된 이미지 자산만 배포됩니다. 공개 상용 배포 전에는 이
-NOTICE와 실제 패키지 내용을 다시 대조해야 합니다.
+함께 표시하지만, Sharp/libvips 바이너리는 Electron stage와 APK에 포함되지 않습니다.
+따라서 production NOTICE에는 Sharp를 포함하지 않고 생성된 이미지 자산만 배포합니다.
+Gradle/AOSP의 스캐폴딩, 수정한 Expo 의존성, OCR 엔진·언어 데이터 등 실제 외부 구성요소의
+고지는 각각 유지합니다. 외부 코드가 전혀 없거나 모든 소스가 단독 창작이라는 뜻은 아닙니다.
+
+같은 날짜 root production `npm audit`는 0건이었습니다. 모바일 의존성의 high 16개 표시는
+[braces](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)와
+[node-forge](https://github.com/advisories/GHSA-86w9-cpqp-85rv) 두 advisory가 빌드 도구 체인에
+전파된 결과입니다. APK와 바이트가 일치하는 Hermes 번들의 source map에서 해당 패키지가
+없음을 확인했습니다. 이는 빌드 환경의 경고가 해결됐다는 뜻이 아니며, 신뢰할 수 없는
+프로젝트 입력을 이 도구로 빌드하지 마세요. 수정 버전이 없는 상태에서 제안된 Expo 대규모
+다운그레이드는 적용하지 않았습니다. 공개 배포 때마다 NOTICE·실제 패키지·advisory를
+다시 대조해야 합니다.

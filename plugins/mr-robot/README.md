@@ -1,6 +1,6 @@
-# Mr. Robot Page Publisher
+# V.E.R.A Page Publisher
 
-페이지 저장, 수정 이력, 복원, 로컬 미리보기와 Cloudflare Worker 패키징을 제공하는 Mr.Robot 데스크톱 모듈입니다. `index.mjs`가 앱의 플러그인 관리자에 연결하며 기존 Codex 사용 지침도 함께 제공합니다. Python 3.10 이상을 사용하며 세 Python 도구는 표준 라이브러리만 필요합니다.
+페이지 저장, 수정 이력, 복원, 로컬 미리보기와 Cloudflare Worker 패키징을 제공하는 V.E.R.A 데스크톱 모듈입니다. `index.mjs`가 앱의 플러그인 관리자에 연결하며 기존 Codex 사용 지침도 함께 제공합니다. Python 3.10 이상을 사용하며 세 Python 도구는 표준 라이브러리만 필요합니다.
 
 ## 앱 연결과 OFF 상태
 

@@ -62,7 +62,7 @@ export function ProfileMenu({
   return <div ref={root} className={`profile-menu ${embedded ? 'embedded' : header ? 'header' : 'floating'}`}>
     {embedded && <div className="profile-shortcuts" aria-label="빠른 화면 이동">{SHORTCUTS.map((item) => <button key={item.key} type="button" title={LABELS[item.key]} aria-current={view === item.key ? 'page' : undefined} onClick={() => onChange(item.key)}><span>{item.icon}</span><small>{item.label}</small></button>)}</div>}
     {open && <div ref={popover} id={menuId} className="profile-popover" role="menu" aria-label="프로필 및 실행 PC">
-      <div className="profile-popover-title">Mr.Robot</div>
+      <div className="profile-popover-title">V.E.R.A</div>
       {(Object.keys(LABELS) as ViewKey[]).map((key) => key === view ? null :
         <button key={key} type="button" role="menuitem" className="profile-action" onClick={() => { onChange(key); setOpen(false); }}>{LABELS[key]}</button>)}
       {pcs.length > 1 && <div className="profile-section">
@@ -76,7 +76,7 @@ export function ProfileMenu({
     </div>}
     <button ref={trigger} type="button" className="profile-trigger" onClick={() => setOpen((value) => !value)} aria-label="프로필 및 실행 PC 메뉴" aria-haspopup="menu" aria-controls={menuId} aria-expanded={open}>
       <span className="profile-avatar">N</span>
-      <span className="profile-copy"><b>{deviceName || 'Mr.Robot'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (desktopLocal ? '로컬 에이전트 · 준비됨' : '연결됨') : '연결 끊김'}</small></span>
+      <span className="profile-copy"><b>{deviceName || 'V.E.R.A'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (desktopLocal ? '로컬 에이전트 · 준비됨' : '연결됨') : '연결 끊김'}</small></span>
       <span className="profile-more">•••</span>
     </button>
   </div>;

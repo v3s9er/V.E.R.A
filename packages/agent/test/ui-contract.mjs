@@ -96,9 +96,10 @@ if (!chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string):
 }
 if (!chat.includes('signal: uploadController.signal') || !chat.includes("uploadAbortReason.current = 'timeout'") || !chat.includes('업로드 취소')) throw new Error('chat drag-and-drop uploads lack cancellation and timeout UX');
 if (!chat.includes('routingPresetId: null,') || !chat.includes('providerId,') || !chat.includes('providerModel,')) throw new Error('model picker cannot switch directly from a routing preset to single-model mode');
-if (!chat.includes("const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])")
-  || !chat.includes('provider?.supportedReasoning.length')
-  || !chat.includes("value === 'auto' || supported.has(value)")) throw new Error('desktop reasoning choices can lose provider capabilities, auto, or the common fallback');
+if (!chat.includes('reasoningEffortsForModel(provider, model)')
+  || !chat.includes('selected?.providerModel ?? reasoningProvider?.model')
+  || !chat.includes('reasoningSupportUnconfirmed')
+  || chat.includes('COMMON_REASONING_EFFORTS')) throw new Error('desktop reasoning choices must use selected-model capabilities without guessing unknown options');
 const desktopComposerInput = chat.indexOf('<textarea className="chat-input"');
 const desktopReasoningControl = chat.indexOf('className="composer-select-control composer-reasoning"');
 if (desktopComposerInput < 0 || desktopReasoningControl < desktopComposerInput
@@ -217,10 +218,10 @@ if (!mobileManifest.includes('android:windowSoftInputMode="adjustResize"')
   || !mobileChat.includes('paddingBottom: keyboardVisible ? 6 : Math.max(10, insets.bottom)')) throw new Error('mobile chat keyboard avoidance can regress behind the IME or bottom tab bar');
 if (!mobileManifest.includes('android:usesCleartextTraffic="false"') || !mobileAppConfig.includes('"usesCleartextTraffic": false')) throw new Error('Android release can regress to sending device credentials over cleartext HTTP');
 if (!mobileChat.includes('accessibilityLabel="입력창 모델 선택"') || !mobileChat.includes('styles.composerToolbar, shortKeyboardViewport') || !mobileChat.includes('모델 ID 직접 지정') || !mobileChat.includes('{singleModelChoices(true)}')) throw new Error('mobile direct single-model controls can become hidden or lose explicit model selection');
-if (!mobileChat.includes("const ORDERED_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']")
-  || !mobileChat.includes("const FALLBACK_REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max']")
-  || !mobileChat.includes('provider?.supportedReasoning')
-  || !mobileChat.includes("effort === 'auto' || supportedSet.has(effort)")) throw new Error('mobile reasoning choices can lose provider capabilities, none support, auto, or the common fallback');
+if (!mobileChat.includes('const reasoningEffortsFor = reasoningEffortsForModel')
+  || !mobileChat.includes('conversation?.providerModel ?? reasoningProvider?.model')
+  || !mobileChat.includes('reasoningSupportUnconfirmed')
+  || mobileChat.includes('FALLBACK_REASONING_EFFORTS')) throw new Error('mobile reasoning choices must use selected-model capabilities without guessing unknown options');
 const mobileInputBar = mobileChat.indexOf('ref={composerRef}');
 const mobileReasoningControl = mobileChat.indexOf('accessibilityState={{ expanded: showReasoning, disabled: reasoningLocked }}');
 const mobileReasoningModal = mobileChat.indexOf('<Modal visible={showReasoning}');
@@ -235,7 +236,7 @@ if (!mobileChat.includes("client.call('conversations.update', { id: conversation
   || !mobileChat.includes('disabled={reasoningLocked}')
   || !mobileChat.includes('accessibilityState={{ selected, disabled: savingConfiguration }}')) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or change during a run');
 if (!mobileChat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')
-  || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider)')
+  || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model)')
   || !mobileChat.includes('applyConversationConfiguration(conversationId')
   || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile model, preset, workspace, access, or default-provider settings can race command execution');
 if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyboardShouldPersistTaps="handled"')) throw new Error('mobile PC setup form cannot scroll above the keyboard');

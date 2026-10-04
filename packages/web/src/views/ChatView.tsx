@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
-import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership } from '@mr-robot/shared';
+import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership, reasoningEffortsForModel } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
@@ -96,15 +96,14 @@ const TOOL_LABEL: Record<string, string> = {
 };
 const EFFORTS: Array<{ value: ReasoningEffort; label: string }> = [
   { value: 'auto', label: '자동' }, { value: 'none', label: '없음' }, { value: 'low', label: '낮음' },
-  { value: 'medium', label: '보통' }, { value: 'high', label: '높음' }, { value: 'xhigh', label: '매우 높음' }, { value: 'max', label: '최대' },
+  { value: 'medium', label: '보통' }, { value: 'high', label: '높음' }, { value: 'xhigh', label: '매우 높음' }, { value: 'max', label: '최대' }, { value: 'ultra', label: '울트라' },
 ];
-const COMMON_REASONING_EFFORTS = new Set<ReasoningEffort>(['auto', 'low', 'medium', 'high', 'xhigh', 'max']);
-const reasoningEffortsForProvider = (provider?: ProviderInfo): typeof EFFORTS => {
-  const supported = provider?.supportedReasoning.length ? new Set(provider.supportedReasoning) : COMMON_REASONING_EFFORTS;
-  return EFFORTS.filter(({ value }) => value === 'auto' || supported.has(value));
+const reasoningEffortsForProvider = (provider?: ProviderInfo, model = provider?.model): typeof EFFORTS => {
+  const supported = reasoningEffortsForModel(provider, model);
+  return EFFORTS.filter(({ value }) => supported.includes(value));
 };
-const compatibleReasoningEffort = (current: ReasoningEffort, provider?: ProviderInfo): ReasoningEffort => (
-  reasoningEffortsForProvider(provider).some(({ value }) => value === current) ? current : 'auto'
+const compatibleReasoningEffort = (current: ReasoningEffort, provider?: ProviderInfo, model = provider?.model): ReasoningEffort => (
+  reasoningEffortsForProvider(provider, model).some(({ value }) => value === current) ? current : 'auto'
 );
 const ACCESS: Array<{ value: PermissionMode; label: string; short: string; detail: string }> = [
   { value: 'read-only', label: '읽기 전용', short: '읽기', detail: '파일과 상태를 읽을 수 있지만 변경하지 않습니다.' },
@@ -121,7 +120,7 @@ const TOKEN_POLICIES: Array<{ value: ConversationTokenPolicy; label: string; sho
   { value: 'standard', label: '질문 예산 · 표준 25.6만', short: '표준 25.6만', detail: '질문 하나당 256,000토큰. 이전 질문의 사용량은 차감하지 않습니다.' },
   { value: 'quality', label: '질문 예산 · 고품질 100만', short: '고품질 100만', detail: '질문 하나당 1,000,000토큰. 긴 코드 작업과 복합 모델 실행용입니다.' },
   { value: 'adaptive', label: '질문 예산 · 자동', short: '자동', detail: '적응형 · 품질 우선. 질문마다 난이도에 맞춰 새 예산을 계산합니다. 이전 질문 사용량은 이월하지 않습니다.' },
-  { value: 'audit-only', label: '무제한 · 감사만', short: '감사만', detail: 'Mr.Robot의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정하며, 공급자 자체 한도와 요금은 계속 적용됩니다.' },
+  { value: 'audit-only', label: '무제한 · 감사만', short: '감사만', detail: 'V.E.R.A의 누적 토큰 예산으로 중단하지 않고 사용량만 기록합니다. 사용량을 보고하지 않는 로컬 CLI는 보수적으로 추정하며, 공급자 자체 한도와 요금은 계속 적용됩니다.' },
 ];
 
 export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activePc, executionPcs = [], onSwitchExecutionPc, onExecutionBusyChange }: {
@@ -387,6 +386,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const entries = await Promise.all(items.map(async (provider): Promise<[string, string[] | null]> => {
       try {
         const catalog = await loadModelCatalog(client, provider.id, force);
+        setProviders(current => current.map(item => item.id === provider.id && item.model === provider.model
+          ? { ...item, modelCapabilities: catalog.modelCapabilities } : item));
         if (catalog.state !== 'fresh') warnings.push(`${provider.label}: ${catalog.warning ?? '이전 목록 표시 중 · 설정에서 모델 목록을 갱신하세요.'}`);
         return [provider.id, [...new Set([provider.model, ...catalog.models])]];
       } catch {
@@ -990,11 +991,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const respondConfirm = async (approve: boolean): Promise<void> => { if (!confirm) return; const { requestId, conversationId } = confirm; setConfirm(null); await client.call('chat.confirmResponse', { requestId, conversationId, approve }).catch(() => undefined); };
 
   const selectedPreset = routingPresets.find((preset) => preset.id === selected?.routingPresetId);
+  const selectedExecutionMode = selectedPreset ? selectedPreset.executionMode ?? 'single' : selected?.routingPresetId ? undefined : 'single';
   const selectedProvider = providers.find((provider) => provider.id === selected?.providerId);
   const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
   const reasoningProvider = selected?.routingPresetId ? undefined : selectedProvider ?? defaultProvider;
-  const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider);
-  const displayedReasoningEffort = availableReasoningEfforts.some(({ value }) => value === selected?.reasoningEffort) ? selected?.reasoningEffort ?? 'auto' : 'auto';
+  const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider, selected?.providerModel ?? reasoningProvider?.model);
+  const displayedReasoningEffort = selected?.reasoningEffort ?? 'auto';
+  const reasoningSupportUnconfirmed = !availableReasoningEfforts.some(({ value }) => value === displayedReasoningEffort);
   const selectedWorkspace = resolveProjectWorkspace(workspaces, selected?.workspaceId);
   const requestedPermissionMode = selected?.permissionMode ?? 'ask';
   const effectivePermissionMode = permissionWithinCap(requestedPermissionMode, client.permissionCap) ? requestedPermissionMode : client.permissionCap;
@@ -1050,11 +1053,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   return (
     <div className={`conversation-layout ${navigationOpen ? 'navigation-open' : ''}`}>
-      <div className="chat-navigation"><button type="button" aria-label="프로젝트와 대화 목록 열기" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>☰ <span>{workspaces.find(w => w.id === projectScope)?.name ?? 'Mr.Robot'}</span></button><button type="button" onClick={() => void createConversation()} aria-label="새 대화 만들기">＋</button></div>
+      <div className="chat-navigation"><button type="button" aria-label="프로젝트와 대화 목록 열기" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>☰ <span>{workspaces.find(w => w.id === projectScope)?.name ?? 'V.E.R.A'}</span></button><button type="button" onClick={() => void createConversation()} aria-label="새 대화 만들기">＋</button></div>
       {navigationOpen && <button className="navigation-scrim" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)} />}
       <aside className="conversation-list">
         <button className="navigation-close" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)}>닫기 ×</button>
-        <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>Mr.Robot</b></div>
+        <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>V.E.R.A</b></div>
         <div className="conversation-spaces" role="tablist" aria-label="대화 공간">
           {(['personal', 'discord'] as const).map(key => <button key={key} role="tab" aria-selected={space === key} onClick={() => {
             if (space === key) return;
@@ -1090,7 +1093,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
             }}
           >•••</button></div>)}
-          {visibleConversations.length === 0 && (busy ? <RunTimeline run={runProgress} busy={busy} compact /> : <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '이 프로젝트의 대화가 없습니다.'}</div>)}
+          {visibleConversations.length === 0 && (busy ? <RunTimeline run={{ ...runProgress, status }} busy={busy} executionMode={selectedExecutionMode} compact /> : <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '이 프로젝트의 대화가 없습니다.'}</div>)}
         </div>
         {profile}
       </aside>
@@ -1107,7 +1110,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           <header className="chat-commandbar">
             <div className="chat-title-group">
               <input aria-label="대화 이름" className="conversation-title-input" value={selected.title} onChange={(e) => setSelected({ ...selected, title: e.target.value })} onBlur={() => void updateConversation({ title: selected.title })} />
-              <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? runPresentation({ ...runProgress, busy }).heading : activeModeLabel}</span>
+              <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? runPresentation({ ...runProgress, status, busy }).heading : activeModeLabel}</span>
             </div>
             <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
               <span className="context-trigger-icon">▱</span><span><b>프로젝트</b><small>{selectedWorkspace?.name ?? (selected.workspaceId ? '연결 해제됨' : '폴더 선택')}</small></span><em>⌄</em>
@@ -1125,15 +1128,15 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </>}
 
         <div className="chat-scroll" ref={scroller}>
-          {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">MR.ROBOT AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
+          {messages.length === 0 && <div className="chat-empty"><div className="chat-empty-orb">✦</div><span className="chat-empty-kicker">V.E.R.A AGENT</span><h2>무엇을 맡길까요?</h2><p>{selectedWorkspace ? <><b>{selectedWorkspace.name}</b>에서 파일을 읽고 실제 작업을 수행할 준비가 됐습니다.</> : '작업 폴더를 연결하면 프로젝트를 이해하고 파일까지 직접 다룰 수 있습니다.'}</p><div className="prompt-suggestions"><button onClick={() => setInput('이 작업 폴더의 구조와 현재 상태를 분석해줘')}>프로젝트 분석<span>구조·의존성·위험 확인</span></button><button onClick={() => setInput('현재 문제를 재현하고 원인을 찾아서 수정한 뒤 테스트해줘')}>문제 해결<span>재현부터 검증까지</span></button><button onClick={() => setInput('이 프로젝트의 사용성과 UI를 검토하고 개선해줘')}>사용성 개선<span>UI·UX 전반 검토</span></button><button onClick={() => setContextOpen(true)}>컨텍스트 설정<span>폴더·권한·추론 선택</span></button></div></div>}
           {(hiddenMessageCount > 0 || currentHistory?.hasMore) && <button type="button" className="chat-history-more" disabled={loadingHistory} onClick={() => void loadPreviousMessages()}>{loadingHistory ? '이전 메시지 불러오는 중…' : hiddenMessageCount > 0 ? `이전 메시지 ${Math.min(160, hiddenMessageCount)}개 더 보기` : '이전 메시지 불러오기'}</button>}
           {historyError && <p className="chat-history-notice" role="status">{historyError}</p>}
           {currentHistory?.displayTruncated && <p className="chat-history-notice">매우 긴 메시지는 화면에서 일부만 표시합니다. 보관된 원문은 유지됩니다.</p>}
           {currentHistory?.unavailable ? <p className="chat-history-notice">이전 대화 보관 파일을 읽을 수 없어 현재 남아 있는 메시지를 표시합니다.</p> : (currentHistory?.missingMessages ?? 0) > 0 && <p className="chat-history-notice">과거에 원문이 저장되지 않은 메시지 {currentHistory!.missingMessages.toLocaleString()}개는 표시할 수 없습니다.</p>}
           {visibleMessages.map((m) => <div key={m.id} data-message-id={m.id} className={`msg-row ${m.role}`}>
             <div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div>
-            <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
-              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <RunTimeline run={runProgress} busy={busy} />)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
+            <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'V.E.R.A'}</div>
+              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <RunTimeline run={{ ...runProgress, status }} busy={busy} executionMode={selectedExecutionMode} />)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
               {m.role === 'assistant' && activePc && selected && <ChatFiles key={`${activePc.id}:${selected.id}:${m.id}`} text={m.content} pc={activePc} conversationId={selected.id} />}
               {m.tools.length > 0 && <details className="tool-history"><summary>작업 내역 {m.tools.length}개 <span>⌄</span></summary><div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`}><span className="tool-icon" aria-hidden="true">{t.status === 'done' ? '✓' : t.status === 'error' ? '!' : '·'}</span><span className="tool-name">{activityLabel(t.name)}</span><span className="tool-state">{t.status === 'start' ? '실행 중' : t.status === 'done' ? '완료' : '오류'}</span></div>)}</div></details>}
             </div>
@@ -1142,7 +1145,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} agents={runProgress.agents} startedAt={runProgress.startedAt} updatedAt={runProgress.updatedAt} busy={busy} />}
+          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel status={status} executionMode={selectedExecutionMode} phase={runProgress.phase} activity={runProgress.activity} activityTruncated={runProgress.activityTruncated} activityHadErrors={runProgress.activityHadErrors} agents={runProgress.agents} startedAt={runProgress.startedAt} updatedAt={runProgress.updatedAt} busy={busy} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}{selected && <button type="button" onClick={() => void loadConversation(selected.id).catch(() => setComposerError('상태를 다시 확인하지 못했습니다. 연결을 확인하세요.'))}>상태 다시 확인</button>}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}
@@ -1156,7 +1159,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 const next = providerId ? providers.find(p => p.id === providerId) : defaultProvider;
                 void updateExecutionConfig({ routingPresetId: null, providerId: providerId ?? null, providerModel: providerModel ?? null,
                   daybreakEnabled: supportsDaybreak(next, providerModel ?? next?.model) && target.daybreakEnabled === true,
-                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, next) });
+                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, next, providerModel ?? next?.model) });
               }} />
             </div>}
               <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
@@ -1171,6 +1174,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 <span className="composer-control-label">추론</span>
                 <Select className="composer-control-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>
                   {availableReasoningEfforts.map((effort) => <option key={effort.value} value={effort.value}>{effort.label}</option>)}
+                  {reasoningSupportUnconfirmed && <option value={displayedReasoningEffort} disabled>{displayedReasoningEffort} · 지원 확인 필요</option>}
                 </Select>
               </label>
               <button type="button" className="composer-more" aria-label="추가 실행 설정" title="실행 PC · 프리셋 · 질문 예산" aria-haspopup="dialog" onClick={() => setShowComposerSettings(true)}>⋯</button>
@@ -1208,7 +1212,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 const nextProvider = routingPresetId ? undefined : selectedProvider ?? defaultProvider;
                 void updateExecutionConfig({
                   routingPresetId,
-                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider),
+                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider, target.providerModel ?? nextProvider?.model),
                 });
               }} disabled={executionControlsDisabled}>
                 <option value="">단일 모델</option>

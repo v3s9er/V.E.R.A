@@ -71,7 +71,7 @@ function walk(folder) {
 }
 walk(join(root, 'packages', 'desktop', '.stage'));
 const version = json(join(root, 'package.json')).version;
-const apk = join(root, 'release', 'mobile', `Mr.Robot-Mobile-${version}.apk`);
+const apk = join(root, 'release', 'mobile', `V.E.R.A-Mobile-${version}.apk`);
 if (!existsSync(apk)) throw new Error('Current APK missing; build it before release audit');
 const entries = unzipSync(readFileSync(apk));
 for (const [name, bytes] of Object.entries(entries)) {

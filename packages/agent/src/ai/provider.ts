@@ -1,4 +1,4 @@
-import type { ChatUsage, ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
+import type { ChatUsage, ModelReasoningCapabilities, ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
 
 /** Provider-agnostic conversation turn. Each provider maps this to its wire format. */
 export interface Turn {
@@ -195,6 +195,7 @@ export interface AiProvider {
   readonly baseUrl: string;
   readonly model: string;
   readonly supportedReasoning: ReasoningEffort[];
+  readonly modelCapabilities?: Record<string, ModelReasoningCapabilities>;
   readonly supportsTools: boolean;
   chat(req: ChatRequest): Promise<ProviderResult>;
   /** Cheap authenticated reachability check. */

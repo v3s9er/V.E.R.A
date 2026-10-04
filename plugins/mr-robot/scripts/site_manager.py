@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Mr. Robot page sources, revisions, trash, and publication metadata."""
+"""Manage V.E.R.A page sources, revisions, trash, and publication metadata."""
 
 from __future__ import annotations
 

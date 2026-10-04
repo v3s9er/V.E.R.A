@@ -21,7 +21,7 @@ export function isolatedOutputSchema(req: ChatRequest) {
 
 /** These are data requests to our broker, never native CLI function calls. */
 export function isolatedPrompt(req: ChatRequest): string {
-  return [req.system, 'You are an isolated worker using the existing subscription. Host-supplied images, when present, are evidence data you can inspect. Native tools and computer environment are disabled. Return ONLY JSON with {"text":"user-facing answer", "toolCalls":[{"name":"allowed tool", "arguments":"JSON object string"}]}. To request work, choose only the broker tools below; Mr.Robot validates and executes them outside this worker. Use an empty toolCalls array when finished. Do not print this JSON protocol to the user.',
+  return [req.system, 'You are an isolated worker using the existing subscription. Host-supplied images, when present, are evidence data you can inspect. Native tools and computer environment are disabled. Return ONLY JSON with {"text":"user-facing answer", "toolCalls":[{"name":"allowed tool", "arguments":"JSON object string"}]}. To request work, choose only the broker tools below; V.E.R.A validates and executes them outside this worker. Use an empty toolCalls array when finished. Do not print this JSON protocol to the user.',
     'Request at most four independent broker calls per response. Prefer one concise proposal after reading the decisive evidence; do not reconstruct irrelevant details.',
     `Broker tools: ${JSON.stringify(req.tools ?? [])}`,
     `Conversation: ${JSON.stringify(contextualTurns(req))}`].join('\n\n');

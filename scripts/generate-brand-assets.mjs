@@ -59,4 +59,4 @@ for (const [density, size] of splashDensities) {
 const favicon = join(root, 'packages', 'web', 'public', 'favicon.svg');
 ensureParent(favicon);
 copyFileSync(join(root, 'assets', 'brand', 'icon.svg'), favicon);
-console.log('Mr.Robot brand assets generated.');
+console.log('V.E.R.A brand assets generated.');

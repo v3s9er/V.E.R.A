@@ -40,7 +40,7 @@ export class SecretVault {
 
   protect(value: string): string {
     if (!value) return '';
-    if (process.platform !== 'win32') throw new Error('Mr.Robot secret storage currently requires Windows DPAPI');
+    if (process.platform !== 'win32') throw new Error('V.E.R.A secret storage currently requires Windows DPAPI');
     const encoded = runPowerShell(protectScript(this.entropy), value);
     return `dpapi:v1:${encoded}`;
   }

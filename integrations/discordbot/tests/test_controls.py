@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import discord
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from thread_sessions import Controls, Confirm, ModelPicker, ThreadManager
+from thread_sessions import Controls, Confirm, ModelPicker, ThreadManager, model_reasoning_efforts
 
 
 class ControlsTests(unittest.IsolatedAsyncioTestCase):
@@ -85,3 +85,21 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
         view = Confirm(self.manager, self.context, 'full')
         self.assertEqual([c.label for c in view.children], ['확인', '취소'])
         view.stop()
+
+    async def test_reasoning_uses_selected_model_capabilities_and_resets_unsupported_effort(self):
+        provider = {'providerId': 'p', 'name': 'Codex', 'type': 'codex-cli', 'model': 'model-a', 'supportedReasoning': ['auto', 'ultra']}
+        capabilities = {'model-a': {'supportedReasoningEfforts': ['low', 'ultra']}, 'model-b': {'supportedReasoningEfforts': ['low', 'max']}}
+        self.bridge.request.return_value = {'models': ['model-a', 'model-b'], 'modelCapabilities': capabilities}
+        picker = ModelPicker(self.manager, 3, [provider], {'providerId': 'p', 'model': 'model-a', 'effort': 'ultra'})
+        await picker.load(self.context)
+        reasoning = next(c for c in picker.children if isinstance(c, discord.ui.Select) and c.row == 2)
+        self.assertEqual([option.value for option in reasoning.options], ['auto', 'low', 'ultra'])
+        models = next(c for c in picker.children if isinstance(c, discord.ui.Select) and c.row == 1)
+        models._values = ['1']
+        await models.callback(self.context)
+        self.assertEqual(self.bridge.request.call_args.kwargs['effort'], 'auto')
+        reasoning = next(c for c in picker.children if isinstance(c, discord.ui.Select) and c.row == 2)
+        self.assertEqual([option.value for option in reasoning.options], ['auto', 'low', 'max'])
+        self.assertEqual(model_reasoning_efforts(provider, 'unknown', capabilities), ['auto'])
+        self.assertEqual(model_reasoning_efforts(provider, 'model-a', {}), ['auto'])
+        picker.stop()

@@ -54,7 +54,7 @@ export function Sidebar({
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark"><BrandIcon /></span>
-        <span className="brand-name">Mr.Robot</span>
+        <span className="brand-name">V.E.R.A</span>
       </div>
 
       <nav className="nav">

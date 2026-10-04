@@ -1,5 +1,5 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": { "noEmit": true, "types": ["node"] },
-  "include": ["performance-*.ts", "benchmark-*.ts", "tests/benchmark-*.test.ts", "../packages/agent/test/performance-evaluation.test.ts", "../packages/agent/test/external-*.test.ts"]
+  "include": ["performance-*.ts", "benchmark-*.ts", "app-benchmark*.ts", "tests/benchmark-*.test.ts", "tests/app-benchmark*.test.ts", "../packages/agent/test/performance-evaluation.test.ts", "../packages/agent/test/external-*.test.ts"]
 }

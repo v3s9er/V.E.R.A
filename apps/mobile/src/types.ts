@@ -81,7 +81,7 @@ export interface ShellResult {
 }
 
 export type ProviderType = 'openai-compatible' | 'anthropic' | 'ollama' | 'codex-cli' | 'claude-cli';
-export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'quality' | 'audit-only';
 export type PermissionMode = 'read-only' | 'ask' | 'workspace' | 'full';
 
@@ -109,6 +109,7 @@ export interface ProviderInfo {
   source: 'api' | 'subscription' | 'local' | 'free';
   costTier: number;
   supportedReasoning: ReasoningEffort[];
+  modelCapabilities?: Record<string, { supportedReasoningEfforts: ReasoningEffort[]; defaultReasoningEffort?: ReasoningEffort }>;
 }
 
 export interface PluginInfo {
@@ -180,6 +181,8 @@ export interface ChatRunState {
   phase?: 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
   updatedAt?: number;
   activity?: Array<{ id: string; label: string; state: 'running' | 'done' | 'error'; startedAt: number; finishedAt?: number }>;
+  activityTruncated?: boolean;
+  activityHadErrors?: boolean;
   partialText?: string;
   partialTextTruncated?: boolean;
   agents?: Array<{

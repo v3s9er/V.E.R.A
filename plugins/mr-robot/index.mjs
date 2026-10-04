@@ -1,4 +1,4 @@
-/** Mr.Robot desktop adapter. This module contains no browser UI or page content. */
+/** V.E.R.A desktop adapter. This module contains no browser UI or page content. */
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';

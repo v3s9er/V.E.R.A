@@ -22,7 +22,7 @@ const rootEl = document.getElementById('root');
 if (rootEl) {
   createRoot(rootEl).render(
     <StrictMode>
-      {overlayChrome && <div className="desktop-drag-region" aria-hidden="true"><span>Mr.Robot</span></div>}
+      {overlayChrome && <div className="desktop-drag-region" aria-hidden="true"><span>V.E.R.A</span></div>}
       <AppErrorBoundary><Suspense fallback={<main className="app-route-loading" role="status">불러오는 중…</main>}><RoutedApp /></Suspense></AppErrorBoundary>
     </StrictMode>,
   );

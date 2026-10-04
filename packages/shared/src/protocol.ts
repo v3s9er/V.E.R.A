@@ -67,11 +67,19 @@ export const RPC = {
 
 export type ProviderType = 'openai-compatible' | 'anthropic' | 'ollama' | 'codex-cli' | 'claude-cli';
 export type ProviderSource = 'api' | 'subscription' | 'local' | 'free';
-export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort = 'auto' | 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
+export interface ModelReasoningCapabilities {
+  /** Explicit protocol efforts only; auto means omit the override locally. */
+  supportedReasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+}
 
 /** Discovery metadata contains no credentials, executable paths, or raw CLI output. */
 export interface ProviderModelCatalog {
   models: string[];
+  /** Missing entry means unknown, not permission to guess from a model name. */
+  modelCapabilities?: Record<string, ModelReasoningCapabilities>;
   source: 'codex-model-list' | 'claude-cli-help' | 'provider';
   state: 'fresh' | 'stale' | 'fallback';
   lastUpdatedAt: number | null;
@@ -117,6 +125,7 @@ export interface ProviderInfo {
   source: ProviderSource;
   costTier: number;
   supportedReasoning: ReasoningEffort[];
+  modelCapabilities?: Record<string, ModelReasoningCapabilities>;
 }
 
 export interface ProviderAddInput {
@@ -412,6 +421,10 @@ export interface ChatRunState {
   phase?: ChatRunPhase;
   updatedAt?: number;
   activity?: ChatRunActivity[];
+  /** True when older tool rows were evicted from the bounded run-local feed. */
+  activityTruncated?: boolean;
+  /** Sticky observed-error evidence, including errors no longer in activity. Missing is unknown. */
+  activityHadErrors?: boolean;
   partialText?: string;
   partialTextTruncated?: boolean;
   agents?: import('./coordination.js').CoordinationAgent[];

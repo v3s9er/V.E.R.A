@@ -35,7 +35,7 @@ export class DiscordSessions {
       if (state.bindings[m.guildId] !== m.channelId || !snowflake(m.threadId) || m.threadId === m.channelId) throw new Error('연결된 채널의 새 스레드만 등록할 수 있습니다.');
       if (state.sessions[m.threadId]) throw new Error('이미 등록된 스레드입니다.');
       if (Object.keys(state.sessions).length >= 64 || Object.values(state.sessions).filter(s => s.ownerId === m.userId && s.guildId === m.guildId).length >= 20) throw new Error('대화 목록이 가득 찼습니다. 불필요한 스레드를 삭제하세요.');
-      state.sessions[m.threadId] = { guildId: m.guildId, parentId: m.channelId, ownerId: m.userId, name: String(m.name || 'Mr.Robot').slice(0, 100), archived: false };
+      state.sessions[m.threadId] = { guildId: m.guildId, parentId: m.channelId, ownerId: m.userId, name: String(m.name || 'V.E.R.A').slice(0, 100), archived: false };
       save(); return result({ ok: true });
     }
     if (m.action === 'thread.panel') {

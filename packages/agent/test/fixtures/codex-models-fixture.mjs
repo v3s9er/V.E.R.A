@@ -29,9 +29,17 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (mode === 'invalid') { process.stdout.write('invalid JSON\n'); return; }
   if (mode === 'cycle') { send({ id: m.id, result: { data: [], nextCursor: 'same' } }); return; }
   if (mode === 'empty') { send({ id: m.id, result: { data: [], nextCursor: null } }); return; }
+  if (mode === 'capability-edge') { send({ id: m.id, result: { data: [
+    { model: 'missing-capabilities', defaultReasoningEffort: 'ultra' },
+    { model: 'empty-capabilities', supportedReasoningEfforts: [], defaultReasoningEffort: 'high' },
+    { model: 'unknown-capabilities', supportedReasoningEfforts: [{ reasoningEffort: 'future' }, { reasoningEffort: 'auto' }, 'high', null, 2], defaultReasoningEffort: 'future' },
+    { model: 'constructor', supportedReasoningEfforts: [{ reasoningEffort: 'none' }], defaultReasoningEffort: 'none' },
+  ], nextCursor: null } }); return; }
   if (!m.params.cursor) send({ id: m.id, result: { data: [
-    { model: 'gpt-6-astra' }, { model: 'gpt-new-catalog-model' }, { model: 'hidden-model', hidden: true },
+    { model: 'gpt-6-astra', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'ultra', description: 'private-fixture-value' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'future' }], defaultReasoningEffort: 'medium' },
+    { model: 'gpt-new-catalog-model', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'max' }], defaultReasoningEffort: 'low' },
+    { model: 'hidden-model', hidden: true, supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }] },
     { model: '--config=unsafe' }, { model: 'bad\nname' },
   ], nextCursor: 'page2' } });
-  else send({ id: m.id, result: { data: [{ model: 'gpt-daybreak-blue-latest' }, { id: 'catalog-second-model' }, { model: 'gpt-new-catalog-model' }], nextCursor: null } });
+  else send({ id: m.id, result: { data: [{ model: 'gpt-daybreak-blue-latest', supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }], defaultReasoningEffort: 'high' }, { id: 'catalog-second-model' }, { model: 'gpt-new-catalog-model' }], nextCursor: null } });
 });

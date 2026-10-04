@@ -1,6 +1,6 @@
 # Native desktop execution
 
-Mr.Robot includes its own Windows desktop backend. No external desktop app or
+V.E.R.A includes its own Windows desktop backend. No external desktop app or
 Computer Use plugin installation is required. The
 native Codex app-server receives four host-owned dynamic tools: `desktop_windows`,
 `desktop_observe`, `desktop_act`, `desktop_open_browser`. This bridge currently requires Windows, a

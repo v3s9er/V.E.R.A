@@ -261,7 +261,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
     return (
       <div className="gate">
         <Card className="gate-card wide">
-          <div className="gate-brand"><h1>Mr.Robot</h1></div>
+          <div className="gate-brand"><h1>V.E.R.A</h1></div>
           <p className="gate-sub">로컬 에이전트를 시작하지 못했습니다.</p>
           {error && <div className="gate-error">{error}</div>}
           <Button variant="accent" onClick={() => window.location.reload()}>다시 시도</Button>
@@ -292,7 +292,7 @@ export function ConnectGate({ client, onConnected, onCancel, preferredPc = null,
       <Card className="gate-card wide">
         <div className="gate-brand">
           <span className="brand-mark"><BrandIcon /></span>
-          <h1>Mr.Robot</h1>
+          <h1>V.E.R.A</h1>
         </div>
         <p className="gate-sub">연결할 PC를 선택하세요</p>
 

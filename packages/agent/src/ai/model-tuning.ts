@@ -2,7 +2,7 @@ import type { ModelTuningCapabilities, ModelTuningProfile, ProviderTuningSetting
 import type { AiProvider, ChatRequest } from './provider.js';
 
 type TuningProvider = Pick<AiProvider, 'type' | 'model' | 'baseUrl' | 'supportedReasoning'>;
-const efforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max']);
+const efforts = new Set<ReasoningEffort>(['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const profileKeys = new Set(['id', 'name', 'reasoningEffort', 'maxOutputTokens', 'temperature', 'contextTokenLimit', 'helperMode', 'maxParallelHelpers', 'responseStyle']);
 
 function record(value: unknown, label: string): Record<string, unknown> {

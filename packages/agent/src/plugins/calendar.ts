@@ -345,13 +345,13 @@ export function createCalendarPlugin(options: { privateStore?: WorkCalendarStore
       });
 
       ctx.registerCommand('calendar.ics.export', () => {
-        const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Mr.Robot//Calendar//KO'];
+        const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//V.E.R.A//Calendar//KO'];
         for (const item of events(ctx)) {
           const format = (value: string) => new Date(value).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
           lines.push('BEGIN:VEVENT', `UID:${item.id}@mr-robot.local`, `DTSTART:${format(item.startAt)}`, `DTEND:${format(item.endAt)}`, `SUMMARY:${item.title.replace(/[;,]/g, '\\$&')}`, 'END:VEVENT');
         }
         lines.push('END:VCALENDAR');
-        return { filename: 'mr-robot-calendar.ics', content: lines.join('\r\n') };
+        return { filename: 'V.E.R.A-calendar.ics', content: lines.join('\r\n') };
       }, { destructive: false });
 
       ctx.registerCommand('calendar.work.month', (raw, execution) => {

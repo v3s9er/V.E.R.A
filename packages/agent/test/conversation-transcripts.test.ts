@@ -44,6 +44,15 @@ test('compaction bounds the prompt while exact original text survives reload', t
   assert.equal((store.exportSnapshot()[0] as any).transcript, undefined);
 });
 
+test('ultra preference survives reload while unknown protocol efforts are rejected', t => {
+  const { home, store, id } = fixture(t);
+  store.update(id, { reasoningEffort: 'ultra' });
+  assert.equal(new ConversationStore(home).get(id)?.reasoningEffort, 'ultra');
+  assert.throws(() => store.update(id, { reasoningEffort: 'future' as never }), /추론 단계/);
+  assert.equal(store.get(id)?.reasoningEffort, 'ultra');
+  assert.throws(() => store.create({ reasoningEffort: 'future' as never }), /추론 단계/);
+});
+
 test('paged history crosses chunk boundaries in chronological order without duplicates', t => {
   const { store, id } = fixture(t);
   const originals = Array.from({ length: 350 }, (_, i) => turn(i, 350));

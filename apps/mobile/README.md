@@ -1,6 +1,6 @@
-# Mr.Robot Mobile
+# V.E.R.A Mobile
 
-Mr.Robot PC 에이전트용 React Native(Expo) 앱.
+V.E.R.A PC 에이전트용 React Native(Expo) 앱.
 
 ## 실행
 
@@ -12,7 +12,7 @@ npx expo run:android  # 네이티브 빌드
 
 ## PC 연결
 
-1. PC에서 Mr.Robot 에이전트 실행 (웹 UI의 설정 → 모바일 연결 탭)
+1. PC에서 V.E.R.A 에이전트 실행 (웹 UI의 설정 → 모바일 연결 탭)
 2. 앱에서 `QR 코드 스캔` (PC 화면의 QR) 또는 `PIN으로 PC 추가`
 3. PC 여러 대 등록 가능 — 상단 `PC 전환`으로 전환
 4. 하단 탭: 대화 / 원격제어 / 예약 / 설정

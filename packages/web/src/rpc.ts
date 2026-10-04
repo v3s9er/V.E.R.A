@@ -40,7 +40,7 @@ async function publicWebSocketProtocols(url: string, secret: string, signal: Abo
 }
 
 /**
- * Minimal WebSocket RPC client for the Mr.Robot agent.
+ * Minimal WebSocket RPC client for the V.E.R.A agent.
  * - call(): request/response with a timeout
  * - on(): server-pushed events (id 0)
  * Cleanly rejects every in-flight call on disconnect.

@@ -306,7 +306,7 @@ export function PluginsView() {
 
   const testCall = async (name: string): Promise<void> => {
     try {
-      const result = await client.call('plugins.call', { name, params: { name: 'Mr.Robot' } });
+      const result = await client.call('plugins.call', { name, params: { name: 'V.E.R.A' } });
       setCallResult(JSON.stringify(result, null, 2));
     } catch (err) {
       setCallResult(`error: ${err instanceof Error ? err.message : String(err)}`);
@@ -986,7 +986,7 @@ export function PluginsView() {
               <p className="panel-hint">이 방식은 시스템 VPN을 만들지 않고 cloudflared 프로세스 하나가 loopback Agent로 outbound 연결합니다. 일반적으로 금융 앱의 VPN 감지에는 영향을 주지 않지만, 기기·앱별 보안 정책은 다를 수 있습니다.</p>
               {!cloudflared?.installed && <div className="dependency-warning">cloudflared가 없습니다. 아래 설치 버튼 또는 첫 연결 승인 시 Windows winget 사용자 범위로 설치하며 다음 연결에서도 재사용합니다.</div>}
               {remoteConfig.provider === 'cloudflare-named' && <div className="type-row remote-link-options">
-                <label><input type="checkbox" checked={remoteConfig.autoStart} onChange={(event) => setRemoteConfig({ ...remoteConfig, autoStart: event.target.checked })} /> Mr.Robot 시작 시 고정 Tunnel 자동 연결</label>
+                <label><input type="checkbox" checked={remoteConfig.autoStart} onChange={(event) => setRemoteConfig({ ...remoteConfig, autoStart: event.target.checked })} /> V.E.R.A 시작 시 고정 Tunnel 자동 연결</label>
                 {remoteConfig.hasTunnelToken && <Button variant="danger" onClick={() => void clearRemoteTunnelToken()} disabled={remoteBusy || remoteStatus?.running}>저장 토큰 삭제</Button>}
                 {remoteConfig.hasAccessCredentials && <Button variant="danger" onClick={() => void clearRemoteAccessCredentials()} disabled={remoteBusy || remoteStatus?.running}>Access 자격증명 삭제</Button>}
               </div>}
@@ -1029,7 +1029,7 @@ export function PluginsView() {
                 <div className="type-row"><Button variant="accent" disabled={remoteBusy} onClick={() => void recoverRemoteLink()}>{remoteBusy ? `${remoteStage || '복구 중'}…` : remoteStatus?.running ? '보안 다시 검사' : !cloudflared?.installed ? '의존성 자동 복구' : '설정 확인 후 다시 연결'}</Button><Button variant="ghost" disabled={remoteBusy} onClick={() => void refreshRemoteLink(true)}>상태 새로고침</Button></div>
               </div>}
               {remoteStatus?.diagnostics && <details className="remote-diagnostics"><summary>기술 진단 보기</summary><pre className="shell-out">{remoteStatus.diagnostics}</pre></details>}
-              <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 Mr.Robot이 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
+              <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 V.E.R.A가 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
             </div>}
             {details[p.id] !== undefined && <pre className="shell-out">{JSON.stringify(details[p.id], null, 2)}</pre>}
             </div>}

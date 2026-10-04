@@ -35,7 +35,7 @@ execFileSync(process.execPath, [join(repoRoot, 'scripts', 'audit-public-release.
   stdio: 'inherit',
 });
 
-const output = join(repoRoot, 'release', `Mr.Robot-source-${version}.zip`);
+const output = join(repoRoot, 'release', `V.E.R.A-source-${version}.zip`);
 const temporary = `${output}.partial`;
 mkdirSync(dirname(output), { recursive: true });
 rmSync(temporary, { force: true });

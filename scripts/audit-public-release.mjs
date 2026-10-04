@@ -65,7 +65,7 @@ function forbiddenTrackedPath(path) {
     return 'generated work or partial transfer';
   }
   if (lower.startsWith('release/')) {
-    const allowed = /^(?:release\/Mr\.Robot-Setup-[0-9.]+-x64\.exe|release\/mobile\/Mr\.Robot-Mobile-[0-9.]+\.apk|release\/SHA256SUMS-[0-9.]+\.txt)$/;
+    const allowed = /^(?:release\/(?:Mr\.Robot|V\.E\.R\.A)-Setup-[0-9.]+-x64\.exe|release\/mobile\/(?:Mr\.Robot|V\.E\.R\.A)-Mobile-[0-9.]+\.apk|release\/SHA256SUMS-[0-9.]+\.txt)$/;
     if (!allowed.test(normalized)) return 'unexpected tracked release payload';
   }
   return undefined;

@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { isolatedPrompt, parseIsolatedReply, ISOLATED_OUTPUT_SCHEMA } from './cli-isolated.js';
 import { pooledCodexText } from './cli-text-pool.js';
 import { pooledNativeCodex } from './cli-native-pool.js';
-import { discoverCodexModels, discoverCodexVersion, ModelListCache } from './cli-models.js';
+import { discoverCodexModelCatalog, discoverCodexVersion, ModelListCache } from './cli-models.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { contextualTurns } from './request-context.js';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { ProviderModelCatalog, ProviderType, ReasoningEffort } from '@mr-robot/shared';
+import { reasoningEffortsForModel, type ModelReasoningCapabilities, type ProviderModelCatalog, type ProviderType, type ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, BrokerAgentRequest, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
 import { terminateProcessTree } from '../computer/shell.js';
 
@@ -69,7 +69,7 @@ export function cliSubscriptionEnvironment(
   return env;
 }
 
-/** Keep optional CLI customization from weakening Mr.Robot's security flags. */
+/** Keep optional CLI customization from weakening V.E.R.A's security flags. */
 export function safeCliExtraArgs(
   type: Extract<ProviderType, 'codex-cli' | 'claude-cli'>,
   input: string[],
@@ -357,17 +357,27 @@ function runCliProcess(options: CliProcessOptions): Promise<string> {
 /**
  * Official CLI bridge for subscription-backed Codex and Claude Code.
  * It launches the user's already-authenticated CLI without a shell, so no
- * credentials are copied into Mr.Robot. CLIs run read-only here; Mr.Robot remains
+ * credentials are copied into V.E.R.A. CLIs run read-only here; V.E.R.A remains
  * the only component allowed to mutate the computer through audited tools.
  */
 export class CliProvider implements AiProvider {
   readonly runBrokerAgent?: (req: BrokerAgentRequest) => Promise<ProviderResult>;
   readonly supportsTools = false;
-  readonly supportedReasoning: ReasoningEffort[];
+  get supportedReasoning(): ReasoningEffort[] {
+    return reasoningEffortsForModel({ type: this.type, model: this.model, supportedReasoning: ['auto'], modelCapabilities: this.cachedCapabilities });
+  }
+  private get cachedCapabilities(): Record<string, ModelReasoningCapabilities> | undefined {
+    return this.catalogOwner?.cachedCapabilities ?? this.catalogCapabilities;
+  }
+  get modelCapabilities(): Record<string, ModelReasoningCapabilities> | undefined {
+    const value = this.cachedCapabilities;
+    return value ? structuredClone(value) : undefined;
+  }
   private readonly modelList = new ModelListCache(() => this.discoverModels(), () => [
     ...(this.model ? [this.model] : []), ...(this.type === 'codex-cli' ? [] : CURRENT_CLAUDE_MODELS),
   ]);
   private catalogCliVersion?: string;
+  private catalogCapabilities?: Record<string, ModelReasoningCapabilities>;
   private isolatedHealthUntil = 0;
 
   constructor(
@@ -378,18 +388,31 @@ export class CliProvider implements AiProvider {
     readonly model: string,
     private readonly command: string,
     private readonly extraArgs: string[] = [],
+    private readonly catalogOwner?: CliProvider,
   ) {
-    if (type === 'codex-cli') this.runBrokerAgent = req => pooledCodexText({
-      ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
-      model: this.model, providerId: this.id, req,
-    });
-    this.supportedReasoning = type === 'codex-cli'
-      ? ['auto', 'low', 'medium', 'high', 'xhigh', 'max']
-      : ['auto'];
+    if (type === 'codex-cli') this.runBrokerAgent = async req => {
+      await this.validateReasoningEffort(req.reasoningEffort);
+      return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
+        model: this.model, providerId: this.id, req });
+    };
+  }
+
+  /** Overrides share one account/executable catalog and its in-flight refresh. */
+  forModel(model: string): CliProvider {
+    return new CliProvider(this.id, this.label, this.type, this.baseUrl, model, this.command, this.extraArgs, this.catalogOwner ?? this);
+  }
+
+  async validateReasoningEffort(effort?: ReasoningEffort): Promise<void> {
+    if (this.type !== 'codex-cli' || !effort || effort === 'auto') return;
+    await this.models();
+    if (!this.supportedReasoning.includes(effort)) {
+      throw new Error('선택한 Codex 모델에서 요청한 추론 단계의 지원을 확인할 수 없습니다. 모델 목록을 새로고침하거나 자동을 선택하세요.');
+    }
   }
 
   async chat(req: ChatRequest): Promise<ProviderResult> {
     if (this.type === 'codex-cli') {
+      await this.validateReasoningEffort(req.reasoningEffort);
       // No selected workspace/native run: keep a conversation-scoped text
       // worker, not a fresh CLI launched in the desktop process's ambient cwd.
       return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type),
@@ -397,7 +420,7 @@ export class CliProvider implements AiProvider {
     }
     if (req.tools?.length) {
       // Deliberately ignored. Local CLI adapters are reasoning workers, while
-      // Mr.Robot executes computer tools under its own permission policy.
+      // V.E.R.A executes computer tools under its own permission policy.
     }
     const prompt = transcript(req.system, contextualTurns(req));
     const effort = req.reasoningEffort && req.reasoningEffort !== 'auto' ? req.reasoningEffort : undefined;
@@ -427,7 +450,10 @@ export class CliProvider implements AiProvider {
 
   async chatIsolated(req: ChatRequest): Promise<ProviderResult> {
     req.signal?.throwIfAborted();
-    if (this.type === 'codex-cli') return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type), model: this.model, providerId: this.id, req: { ...req, textOnly: !req.tools?.length } });
+    if (this.type === 'codex-cli') {
+      await this.validateReasoningEffort(req.reasoningEffort);
+      return pooledCodexText({ ...resolveCliInvocation(this.type, this.command), env: cliSubscriptionEnvironment(this.type), model: this.model, providerId: this.id, req: { ...req, textOnly: !req.tools?.length } });
+    }
     if (this.type === 'claude-cli' && Date.now() >= this.isolatedHealthUntil) {
       const health = await this.ping();
       if (!health.ok) throw new Error('PC 소유자의 Claude 구독 로그인이 필요합니다. PC에서 claude auth login으로 연결한 뒤 다시 요청하세요. API 키로 자동 전환하지 않습니다.');
@@ -459,6 +485,7 @@ export class CliProvider implements AiProvider {
   }
 
   async runAgent(req: NativeAgentRequest): Promise<ProviderResult> {
+    await this.validateReasoningEffort(req.reasoningEffort);
     if (this.type === 'codex-cli' && req.daybreakEnabled && !req.session) throw new Error('Daybreak에는 대화 세션을 사용하는 최신 Codex 연결이 필요합니다.');
     if (req.permissionMode === 'ask') throw new Error('네이티브 CLI에는 확인 대기 권한을 직접 전달할 수 없습니다. 먼저 명시적으로 승인해야 합니다.');
     if (this.type === 'claude-cli' && req.permissionMode !== 'full') {
@@ -556,15 +583,18 @@ export class CliProvider implements AiProvider {
   }
 
   async models(force = false): Promise<string[]> {
+    if (this.catalogOwner) return this.catalogOwner.models(force);
     return this.modelList.get(force);
   }
 
   async modelCatalog(force = false): Promise<ProviderModelCatalog> {
+    if (this.catalogOwner) return this.catalogOwner.modelCatalog(force);
     // The old string[] endpoint still throws on a failed explicit refresh.
     // This endpoint returns the retained list WITH its failure/freshness state.
     const models = await this.models(force).catch(() => this.models());
     return { models, source: this.type === 'codex-cli' ? 'codex-model-list' : 'claude-cli-help',
-      ...this.modelList.status(), ...(this.catalogCliVersion ? { cliVersion: this.catalogCliVersion } : {}) };
+      ...this.modelList.status(), ...(this.catalogCliVersion ? { cliVersion: this.catalogCliVersion } : {}),
+      ...(this.modelCapabilities ? { modelCapabilities: this.modelCapabilities } : {}) };
   }
 
   private async discoverModels(): Promise<string[]> {
@@ -575,10 +605,11 @@ export class CliProvider implements AiProvider {
       const options = { ...invocation, env: cliSubscriptionEnvironment(this.type) };
       // Wait for both bounded probes even on failure, so an older version can
       // be shown alongside its actionable model/list compatibility warning.
-      const [models, version] = await Promise.allSettled([discoverCodexModels(options), discoverCodexVersion(options)]);
+      const [catalog, version] = await Promise.allSettled([discoverCodexModelCatalog(options), discoverCodexVersion(options)]);
       if (version.status === 'fulfilled') this.catalogCliVersion = version.value;
-      if (models.status === 'rejected') throw models.reason;
-      return models.value;
+      if (catalog.status === 'rejected') throw catalog.reason;
+      this.catalogCapabilities = catalog.value.modelCapabilities;
+      return catalog.value.models;
     }
     const help = await new Promise<string>((resolve) => {
       const child = spawn(invocation.command, [...invocation.prefixArgs, '--help'], {

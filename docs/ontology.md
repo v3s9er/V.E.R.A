@@ -1,6 +1,6 @@
 # Scoped ontology and measured application behavior
 
-Mr.Robot now has a **bounded ontology rule engine**, not just subject/predicate/object
+V.E.R.A now has a **bounded ontology rule engine**, not just subject/predicate/object
 search. It is not an OWL reasoner, SHACL implementation, learned model, or proof
 that model answers are correct.
 
@@ -87,17 +87,28 @@ context has an input-token cost; usefulness and latency must be measured.
 
 ## Bounds and observability
 
-- At most 2,048 scoped active assertions considered, 24 relevant seeds, 128
+- All scoped active assertions are eligible for indexed matching; no initial
+  recency cutoff hides old relevant facts. At most 24 relevant seeds, 128
   connected assertions, six retrieval hops, eight closure rounds and 512 facts.
+- Every cyclic asserted premise is detected within the admitted graph. When
+  necessary, one additional bounded clean closure recovers an independent valid
+  proof. Invalid-only paths remain unresolved; alternative paths are not enumerated.
 - Deductions retain at most 24 source premises; 64 conflict details returned.
 - A 7,000-byte proof packet and approximately 4,000-byte plain-memory packet.
   Source IDs/text are emitted once and reused by short references. Partial graph
   or prompt results are explicitly labelled; they are not closed-world answers.
 - A 24-entry bounded query cache is invalidated on memory writes/deletes. Returns
   are defensive copies. No new background timers, network services or databases.
-- Candidates are tokenized once per query and ranking scores reused. Korean
-  particle forms keep the original token and an additional stem; entity IDs are
-  never merged or rewritten. Cache-hit timing reflects the current lookup.
+- A separate immutable scope-index LRU holds at most eight scopes, 40,000 records
+  and an estimated 32MiB; writes/deletes invalidate it. ASCII token postings and
+  adjacency avoid repeated normalization and unrelated-record scans. Unicode
+  substring matching retains a scan for recall. Cold index construction costs more
+  than a warm query. Ephemeral observations are freshly indexed, not cached, and
+  overlaid on the saved index in at most two layers. Global entity priority and
+  saved-before-observed ordering are preserved. An ID collision uses the original
+  combined rebuild path; observed facts never become an implicit override.
+- Korean particle forms keep the original token and an additional stem; entity
+  IDs are never merged or rewritten. Cache-hit timing reflects the current lookup.
 - Private telemetry records counts, bytes, retrieval duration and truncation, not
   fact/provenance bodies. Counts describe the selected graph, which may exceed the
   rendered subset under the prompt budget. The UI reports unresolved conflicts.
@@ -105,9 +116,12 @@ context has an input-token cost; usefulness and latency must be measured.
 ## Evaluation contract
 
 Rule/isolation tests are deterministic software tests, not an LLM accuracy score.
-Live comparisons use the installed application, the exact same `gpt-6-sol` model,
-medium reasoning, Daybreak off and unchanged permissions. Single/ontology/council/
-combined runs use fresh conversations and equal user-visible givens. Additional
+Earlier live comparisons used the installed application, the exact same
+`gpt-6-sol` model, medium reasoning, Daybreak off and unchanged permissions.
+The 0.7.0 [actual-app protocol](VERA_EVALUATION_PROTOCOL.md) fixes high reasoning
+and compares single/adaptive/ontology-adaptive where applicable; the manifest
+records the executed bundle, not an assumed latest checkout. All arms use fresh
+conversations and equal user-visible givens. Additional
 knowledge context has an actual token cost and must be counted.
 
 The new synthetic suite is a functional comparison, not an independent public

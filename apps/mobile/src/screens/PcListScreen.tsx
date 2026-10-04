@@ -47,7 +47,7 @@ function explainConnectionError(value: unknown): string {
     return `보안 인증이 거부됐습니다. 연결 코드와 Cloudflare Access 두 값을 확인하세요. (${detail})`;
   }
   if (/timed?\s*out|timeout/i.test(detail)) {
-    return `응답 시간이 초과됐습니다. PC가 켜져 있고 Mr.Robot과 원격 연결 플러그인이 실행 중인지 확인하세요. (${detail})`;
+    return `응답 시간이 초과됐습니다. PC가 켜져 있고 V.E.R.A와 원격 연결 플러그인이 실행 중인지 확인하세요. (${detail})`;
   }
   if (/network request failed|failed to fetch|connection refused|enotfound|econn/i.test(detail)) {
     return `주소에 도달하지 못했습니다. 휴대폰 인터넷 연결과 PC의 HTTPS 원격 주소를 확인하세요. (${detail})`;
@@ -206,8 +206,8 @@ export function PcListScreen({
     const payload = parsePairingPayload(data);
     if (!payload) {
       setScanError(pairingPayloadExpired(data)
-        ? '이 Mr.Robot 등록 QR은 만료되었습니다. PC에서 새 1회용 QR을 만드세요.'
-        : '다른 QR입니다. 카메라는 계속 스캔 중이니 Mr.Robot 연결 QR을 비춰주세요.');
+        ? '이 V.E.R.A 등록 QR은 만료되었습니다. PC에서 새 1회용 QR을 만드세요.'
+        : '다른 QR입니다. 카메라는 계속 스캔 중이니 V.E.R.A 연결 QR을 비춰주세요.');
       if (invalidHintTimerRef.current) clearTimeout(invalidHintTimerRef.current);
       const session = scannerSessionRef.current;
       invalidHintTimerRef.current = setTimeout(() => {
@@ -220,7 +220,7 @@ export function PcListScreen({
     setDetectedPayload(payload);
     setScanError('');
     setError('');
-    void AccessibilityInfo.announceForAccessibility('Mr.Robot 연결 QR을 인식했습니다. 내용을 확인한 뒤 연결 버튼을 누르세요.');
+    void AccessibilityInfo.announceForAccessibility('V.E.R.A 연결 QR을 인식했습니다. 내용을 확인한 뒤 연결 버튼을 누르세요.');
   };
 
   const clearAccessFields = (): void => {
@@ -408,7 +408,7 @@ export function PcListScreen({
   return (
     <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right }]}>
       <View style={[styles.header, compact && styles.headerCompact, { paddingTop: Math.max(insets.top + 18, 38) }]}>
-        <Text style={styles.logo}>Mr.Robot</Text>
+        <Text style={styles.logo}>V.E.R.A</Text>
         <Text style={styles.sub}>{pcs.length ? `등록된 PC ${pcs.length.toLocaleString()}대 · 실행 대상을 선택하세요` : '모바일 연결 마법사'}</Text>
       </View>
 
@@ -417,7 +417,7 @@ export function PcListScreen({
           <View style={styles.wizard}>
             <Text style={styles.wizardTitle}>앱 준비 완료</Text>
             <Text style={styles.wizardCopy}>파일 전송·QR 카메라·보안 저장소 모듈은 앱에 포함되어 별도 설치가 필요 없습니다.</Text>
-            <View style={styles.step}><Text style={styles.stepNo}>1</Text><View style={styles.stepContent}><Text style={styles.stepTitle}>PC 설치 마법사 완료</Text><Text style={styles.stepCopy}>PC에서 의존성 검사 후 Mr.Robot을 실행합니다.</Text></View></View>
+            <View style={styles.step}><Text style={styles.stepNo}>1</Text><View style={styles.stepContent}><Text style={styles.stepTitle}>PC 설치 마법사 완료</Text><Text style={styles.stepCopy}>PC에서 의존성 검사 후 V.E.R.A를 실행합니다.</Text></View></View>
             <View style={styles.step}><Text style={styles.stepNo}>2</Text><View style={styles.stepContent}><Text style={styles.stepTitle}>QR 또는 PIN으로 신뢰 연결</Text><Text style={styles.stepCopy}>Google 비밀번호나 AI API 키를 공유하지 않습니다.</Text></View></View>
             <View style={styles.step}><Text style={styles.stepNo}>3</Text><View style={styles.stepContent}><Text style={styles.stepTitle}>PC 명령·단일 모델·복합 트리 선택</Text><Text style={styles.stepCopy}>연결 직후 대화 화면에서 자유롭게 전환합니다.</Text></View></View>
           </View>
@@ -589,14 +589,14 @@ export function PcListScreen({
           <ScrollView style={[styles.scanPanel, scannerLandscape && styles.scanPanelLandscape]} contentContainerStyle={[styles.scanBar, { paddingBottom: Math.max(20, insets.bottom), paddingLeft: Math.max(20, insets.left), paddingRight: Math.max(20, insets.right) }]} keyboardShouldPersistTaps="handled">
             {!scanReady && !detectedPayload ? <ActivityIndicator color={colors.accent2} accessibilityLabel="카메라 준비 중" /> : null}
             <Text style={styles.scanHint} accessibilityLiveRegion="polite">
-              {scanError || (detectedPayload ? 'Mr.Robot QR 인식 완료 · 아래 내용을 확인하세요.' : '테두리 안에 PC의 Mr.Robot 연결 QR을 맞춰주세요. 다른 QR은 무시하고 계속 스캔합니다.')}
+              {scanError || (detectedPayload ? 'V.E.R.A QR 인식 완료 · 아래 내용을 확인하세요.' : '테두리 안에 PC의 V.E.R.A 연결 QR을 맞춰주세요. 다른 QR은 무시하고 계속 스캔합니다.')}
             </Text>
             {detectedPayload && <View
               style={styles.detectedCard}
               accessible
-              accessibilityLabel={`Mr.Robot QR 인식됨. 연결 후보 주소 ${detectedOrigins.join(', ')}. ${detectedPayload.pin.length}자리 일회용 연결 코드.`}
+              accessibilityLabel={`V.E.R.A QR 인식됨. 연결 후보 주소 ${detectedOrigins.join(', ')}. ${detectedPayload.pin.length}자리 일회용 연결 코드.`}
             >
-              <Text style={styles.detectedTitle}>✓ Mr.Robot QR 인식됨</Text>
+              <Text style={styles.detectedTitle}>✓ V.E.R.A QR 인식됨</Text>
               {detectedOrigins.map((origin, index) => <Text style={styles.detectedAddress} numberOfLines={2} key={origin}>
                 {detectedOrigins.length > 1 ? `후보 ${index + 1} · ${origin}` : origin}
               </Text>)}

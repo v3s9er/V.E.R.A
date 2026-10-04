@@ -1,4 +1,4 @@
-# Mr.Robot native desktop backend. Private, bounded NDJSON over stdio only.
+# V.E.R.A native desktop backend. Private, bounded NDJSON over stdio only.
 # UI Automation/Win32 implementation is original; no bundled third-party helper.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'

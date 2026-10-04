@@ -419,7 +419,7 @@ export function builtInRoutingPresets(): RoutingPreset[] {
       },
     },
     {
-      id: 'builtin:smart-cascade', name: 'Mr.Robot 스마트 캐스케이드 (기본)',
+      id: 'builtin:smart-cascade', name: 'V.E.R.A 스마트 캐스케이드 (기본)',
       description: '한 번의 저비용 난이도 판정으로 쉬운 일은 단일 경량 모델, 일반 작업은 균형 모델, 어려운 코딩·추론만 강한 모델에 올립니다. 검증은 실행 결과가 불확실할 때만 추가합니다.',
       builtin: true, createdAt: 0, updatedAt: 0, mode: 'balanced', executionMode: 'single', meetingRounds: 1,
       roles: {}, maxPremiumCalls: 1, escalationEnabled: true,
@@ -475,7 +475,7 @@ export function defaultSettings(): AppSettings {
       maxReadBytes: 20000,
       maxShellBytes: 40000,
     },
-    deviceName: hostname() || 'Mr.Robot PC',
+    deviceName: hostname() || 'V.E.R.A PC',
     setup: {},
     voice: {
       enabled: false,

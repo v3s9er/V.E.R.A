@@ -772,7 +772,7 @@ export function createHttpApi(
     assertDiskReserve(sharedRoot, bytes);
     const used = boundedDirectoryBytes(sharedRoot);
     if (used + sharedWriteReserved + bytes > SHARED_ROOT_QUOTA_BYTES) {
-      throw new InsufficientStorageError('Mr.Robot 공유 폴더는 최대 10GB까지 사용할 수 있습니다. 기존 파일을 정리해 주세요.');
+      throw new InsufficientStorageError('V.E.R.A 공유 폴더는 최대 10GB까지 사용할 수 있습니다. 기존 파일을 정리해 주세요.');
     }
     sharedWriteReserved += bytes;
     let reserved = true;
@@ -1319,10 +1319,10 @@ export function createHttpApi(
     const response = await fetchPeer(pingUrl, outboundPeerHeaders(pingUrl, { accept: 'application/json' }), AbortSignal.timeout(8_000));
     if (!response.ok) {
       await cancelResponseBody(response);
-      throw new Error(`원본 주소에서 Mr.Robot Agent를 확인할 수 없습니다. (HTTP ${response.status})`);
+      throw new Error(`원본 주소에서 V.E.R.A Agent를 확인할 수 없습니다. (HTTP ${response.status})`);
     }
     const ping = await readJsonResponseLimited(response, 16 * 1024) as { ok?: unknown; app?: unknown };
-    if (ping.ok !== true || ping.app !== 'mr-robot') throw new Error('원본 주소가 Mr.Robot Agent로 확인되지 않았습니다.');
+    if (ping.ok !== true || ping.app !== 'mr-robot') throw new Error('원본 주소가 V.E.R.A Agent로 확인되지 않았습니다.');
   };
   const sourceGrant = (value: unknown): string => {
     const grant = String(value ?? '');
@@ -1419,7 +1419,7 @@ export function createHttpApi(
           modifiedAt: stat.mtimeMs,
         };
       }).sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
-      res.json({ root: 'Mr.Robot 공유함', path: relative(sharedRoot, dir).replaceAll('\\', '/'), items });
+      res.json({ root: 'V.E.R.A 공유함', path: relative(sharedRoot, dir).replaceAll('\\', '/'), items });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -1708,7 +1708,7 @@ export function createHttpApi(
       res
         .status(200)
         .type('text/plain')
-        .send('Mr.Robot agent is running. Build packages/web for the UI, or connect with the mobile app.');
+        .send('V.E.R.A agent is running. Build packages/web for the UI, or connect with the mobile app.');
     });
   }
 

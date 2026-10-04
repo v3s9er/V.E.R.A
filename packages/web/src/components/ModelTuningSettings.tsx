@@ -14,7 +14,7 @@ export interface TuningPerformance {
   byModel: Array<{ model: string; samples: number; successes: number; completionMs: Distribution; firstTextMs: Distribution; averageTokens: number }>;
 }
 interface TuningResponse { settings: ProviderTuningSettings; capabilities: ModelTuningCapabilities; warning?: string }
-const EFFORT_LABEL: Record<string, string> = { auto: '자동', none: '없음', low: '낮음', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대' };
+const EFFORT_LABEL: Record<string, string> = { auto: '자동', none: '없음', low: '낮음', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대', ultra: '울트라' };
 const messageOf = (error: unknown) => error instanceof Error ? error.message : '요청을 처리하지 못했습니다. 연결 상태를 확인하고 다시 시도하세요.';
 
 export function ModelTuningSettings({ client, providers, nativeDesktopAdmin }: { client: MrRobotClient; providers: ProviderInfo[]; nativeDesktopAdmin: boolean }) {

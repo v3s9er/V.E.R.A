@@ -16,7 +16,7 @@ export class AppErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: unknown, info: ErrorInfo): void {
     // Keep the report local. It intentionally excludes chat content, tokens,
     // file paths and connection secrets.
-    console.error('Mr.Robot renderer error', {
+    console.error('V.E.R.A renderer error', {
       name: error instanceof Error ? error.name : 'UnknownError',
       message: error instanceof Error ? error.message : String(error),
       componentStack: info.componentStack,

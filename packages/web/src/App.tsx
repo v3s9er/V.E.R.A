@@ -213,7 +213,7 @@ export function App() {
             <div className="workspace-header-main">
               <button className="workspace-brand" type="button" onClick={() => setView('chat')} title="대화로 돌아가기">
                 <span className="workspace-brand-mark"><BrandIcon /></span>
-                <span><b>Mr.Robot</b><small>{viewMeta[view].eyebrow}</small></span>
+                <span><b>V.E.R.A</b><small>{viewMeta[view].eyebrow}</small></span>
               </button>
               <div className="workspace-heading"><h1>{viewMeta[view].title}</h1><p>{viewMeta[view].description}</p></div>
               <div className="topbar-meta">

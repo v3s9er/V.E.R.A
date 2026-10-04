@@ -10,6 +10,28 @@ import { TelemetryStore } from '../src/telemetry.js';
 const fact = (subject: string,predicate: string,object: string,id = `${subject}/${predicate}/${object}`): MemoryItem => ({ id,text:`${subject} ${predicate} ${object}`,tags:[],createdAt:1,updatedAt:1,source:'fixture-only',relationMode:'fact',relation:{subject,predicate,object} });
 const has = (result: ReturnType<typeof retrieveKnowledge>,s: string,p: string,o: string) => result.facts.some(f => f.subject===s && f.predicate===p && f.object===o);
 
+test('older relevant facts and their proofs survive thousands of newer unrelated records', () => {
+  const relevant = [fact('VeraTarget','is_a','Leaf'), fact('Leaf','subclass_of','Root')];
+  const noise = Array.from({length: 3000}, (_,i) => ({...fact(`noise${i}`, 'status', 'ready'), updatedAt: 100 + i}));
+  for (const input of [[...relevant, ...noise], [...noise].reverse().concat(relevant)]) {
+    const result = retrieveKnowledge(input, 'VeraTarget');
+    assert.ok(has(result, 'VeraTarget', 'is_a', 'Root'));
+    assert.equal(result.metrics.asserted, 2);
+    assert.equal(result.metrics.truncated, false);
+    assert.doesNotMatch(result.context, /noise/);
+  }
+});
+
+test('old conflicting values remain visible when a newer value matches the query', () => {
+  const old = fact('VeraTarget', 'status', 'blocked');
+  const recent = {...fact('VeraTarget', 'status', 'ready'), updatedAt: 5000};
+  const noise = Array.from({length: 3000}, (_,i) => ({...fact(`noise${i}`, 'status', 'ready'), updatedAt: 100 + i}));
+  const result = retrieveKnowledge([old, ...noise, recent], 'VeraTarget status');
+  assert.equal(result.conflicts.length, 1);
+  assert.ok(has(result, 'VeraTarget', 'status', 'blocked'));
+  assert.ok(result.facts.every(f => f.status === 'unresolved'));
+});
+
 test('literal values and generic query predicates do not pull unrelated subjects into a named-entity query', () => {
   const rows=[fact('Atlas','status','ready'),...Array.from({length:200},(_,i)=>fact(`unrelated${i}`,'status','ready'))];
   for (const query of ['Atlas', 'Atlas status']) {

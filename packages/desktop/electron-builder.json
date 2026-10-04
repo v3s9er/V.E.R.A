@@ -1,6 +1,7 @@
 {
   "appId": "com.polaris.mrrobot",
-  "productName": "Mr.Robot",
+  "productName": "V.E.R.A",
+  "executableName": "Mr.Robot",
   "electronVersion": "43.7.7",
   "asar": true,
   "asarUnpack": ["integrations/discordbot/**", "integrations/lid-display/**", "integrations/computer-use/**", "integrations/local-training/**", "integrations/evidence-ocr/**", "node_modules/**", "plugins/mr-robot/scripts/**"],
@@ -14,7 +15,7 @@
   "win": {
     "icon": "build/icon.png",
     "target": ["nsis"],
-    "artifactName": "Mr.Robot-Setup-${version}-${arch}.${ext}"
+    "artifactName": "V.E.R.A-Setup-${version}-${arch}.${ext}"
   },
   "nsis": {
     "oneClick": false,
@@ -23,6 +24,6 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "Mr.Robot"
+    "shortcutName": "V.E.R.A"
   }
 }

@@ -25,7 +25,7 @@ export function createSslScanPlugin(options: SslScannerOptions = {}): MrRobotPlu
     activate(ctx) {
       ctx.registerCommand('sslscan.status', (raw) => ({
         ...scanner.status(typeof (raw as { scanId?: unknown } | undefined)?.scanId === 'string' ? (raw as { scanId: string }).scanId : undefined),
-        scanner: 'Mr.Robot independent TLS inspector',
+        scanner: 'V.E.R.A independent TLS inspector',
         scanLimits,
         referenceProject: 'https://github.com/rbsec/sslscan',
       }), { destructive: false });

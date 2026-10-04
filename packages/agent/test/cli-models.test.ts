@@ -1,13 +1,27 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { discoverCodexModels, discoverCodexVersion, ModelDiscoveryError, ModelListCache } from '../src/ai/cli-models.js';
+import { discoverCodexModels, discoverCodexModelCatalog, discoverCodexVersion, ModelDiscoveryError, ModelListCache } from '../src/ai/cli-models.js';
 import { discordModelAllowed } from '../src/plugins/discord-model-policy.js';
 import { CliProvider } from '../src/ai/cli.js';
+import { ProviderRegistry } from '../src/ai/registry.js';
 const options = (mode: string) => ({ command: process.execPath,
   prefixArgs: [fileURLToPath(new URL('./fixtures/codex-models-fixture.mjs', import.meta.url))],
   env: { ...process.env, MRROBOT_MODEL_FIXTURE: mode }, timeoutMs: mode.includes('timeout') ? 250 : 3000 });
 const probe = (mode: string) => discoverCodexModels(options(mode));
 assert.deepEqual(await probe('normal'), ['gpt-6-astra', 'gpt-new-catalog-model', 'gpt-daybreak-blue-latest', 'catalog-second-model']);
+const discovered = await discoverCodexModelCatalog(options('normal'));
+assert.deepEqual(discovered.modelCapabilities, {
+  'gpt-6-astra': { supportedReasoningEfforts: ['low', 'medium', 'ultra'], defaultReasoningEffort: 'medium' },
+  'gpt-new-catalog-model': { supportedReasoningEfforts: ['low', 'max'], defaultReasoningEffort: 'low' },
+  'gpt-daybreak-blue-latest': { supportedReasoningEfforts: ['ultra'] },
+});
+assert(!JSON.stringify(discovered).includes('private-fixture-value'));
+const edge = await discoverCodexModelCatalog(options('capability-edge'));
+assert.deepEqual(edge.modelCapabilities, {
+  'empty-capabilities': { supportedReasoningEfforts: [] },
+  'unknown-capabilities': { supportedReasoningEfforts: [] },
+  constructor: { supportedReasoningEfforts: ['none'], defaultReasoningEffort: 'none' },
+});
 assert.equal(await discoverCodexVersion(options('normal')), '0.153.4');
 assert.equal(await discoverCodexVersion(options('private-version')), undefined);
 assert.equal(await discoverCodexVersion(options('version-timeout')), undefined);
@@ -51,7 +65,61 @@ assert.deepEqual(offlineCatalog.models, ['my-saved-model']); // Never invent acc
 assert.equal(offlineCatalog.source, 'codex-model-list'); assert.equal(offlineCatalog.state, 'fallback');
 assert.match(offlineCatalog.warning!, /CLI를 업데이트/);
 assert.deepEqual(await offlineProvider.models(), ['my-saved-model']);
+assert.deepEqual(offlineProvider.supportedReasoning, ['auto']);
+await assert.rejects(offlineProvider.validateReasoningEffort('ultra'), /지원.*확인/);
+await offlineProvider.validateReasoningEffort('auto');
 await assert.rejects(offlineProvider.models(true)); // Existing API contract remains unchanged.
+let providerDiscoveries = 0;
+const provider = new CliProvider('live-fixture', 'Codex', 'codex-cli', '', 'gpt-6-astra', 'codex');
+Object.defineProperty(provider, 'discoverModels', { value: async () => {
+  providerDiscoveries++;
+  Object.assign(provider, { catalogCapabilities: structuredClone(discovered.modelCapabilities) });
+  return [...discovered.models];
+} });
+const override = provider.forModel('gpt-new-catalog-model');
+const unknown = provider.forModel('not-discovered');
+assert.deepEqual(provider.supportedReasoning, ['auto']);
+await Promise.all([provider.models(), override.models(), unknown.models()]);
+assert.equal(providerDiscoveries, 1);
+assert.deepEqual(provider.supportedReasoning, ['auto', 'low', 'medium', 'ultra']);
+assert.deepEqual(override.supportedReasoning, ['auto', 'low', 'max']);
+assert.deepEqual(unknown.supportedReasoning, ['auto']);
+await provider.validateReasoningEffort('ultra');
+await override.validateReasoningEffort('max');
+await assert.rejects(override.validateReasoningEffort('ultra'), /지원.*확인/);
+await assert.rejects(unknown.validateReasoningEffort('low'), /지원.*확인/);
+await assert.rejects(provider.validateReasoningEffort('future' as never), /지원.*확인/);
+const isolatedCatalog = await override.modelCatalog();
+isolatedCatalog.modelCapabilities!['gpt-6-astra'].supportedReasoningEfforts.push('high');
+assert(!provider.supportedReasoning.includes('high'));
+assert.equal(providerDiscoveries, 1); // Override validation and reads reuse one catalog.
+const registry = new ProviderRegistry({ providers: [{ id: 'registry-fixture', label: 'Fixture', type: 'codex-cli', model: 'gpt-6-astra', command: 'codex', baseUrl: '', apiKey: '', isDefault: true }], routing: { roles: {} } } as never);
+const base = registry.get('registry-fixture') as CliProvider;
+let registryProbes = 0;
+Object.defineProperty(base, 'discoverModels', { value: async () => {
+  registryProbes++;
+  Object.assign(base, { catalogCapabilities: structuredClone(discovered.modelCapabilities) });
+  return [...discovered.models];
+} });
+await registry.prepareModelCapabilities('registry-fixture');
+const registryOverride = registry.getForModel('registry-fixture', 'gpt-new-catalog-model')!;
+assert.deepEqual(registryOverride.supportedReasoning, ['auto', 'low', 'max']);
+await registryOverride.models();
+await registry.prepareModelCapabilities('registry-fixture');
+assert.equal(registryProbes, 1);
+const overrideRegistry = new ProviderRegistry({ providers: [
+  { id: 'default-fixture', label: 'Default', type: 'codex-cli', model: 'gpt-6-astra', command: 'codex', baseUrl: '', apiKey: '', isDefault: true },
+  { id: 'selected-fixture', label: 'Selected', type: 'codex-cli', model: 'gpt-new-catalog-model', command: 'codex', baseUrl: '', apiKey: '' },
+], routing: { roles: {} } } as never);
+for (const id of ['default-fixture', 'selected-fixture']) {
+  const instance = overrideRegistry.get(id) as CliProvider;
+  Object.defineProperty(instance, 'discoverModels', { value: async () => {
+    Object.assign(instance, { catalogCapabilities: structuredClone(discovered.modelCapabilities) });
+    return [...discovered.models];
+  } });
+}
+await overrideRegistry.prepareModelCapabilities('selected-fixture', { roles: {} } as never);
+assert.deepEqual(overrideRegistry.get('selected-fixture')!.supportedReasoning, ['auto', 'low', 'max'], 'explicit provider outside preset roles must also be prepared');
 assert.equal(discordModelAllowed('sol', 'gpt-new-catalog-model'), false);
 assert.equal(discordModelAllowed('astra', 'gpt-new-catalog-model'), false);
 console.log('MODEL CATALOG TESTS PASSED: Astra/Daybreak discovery, CLI version, private diagnostics, pagination, hidden models, failure/timeout, freshness, TTL, force refresh, isolation.');

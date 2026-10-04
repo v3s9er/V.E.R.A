@@ -156,7 +156,7 @@ if ($expectedCertificate -and $actualCertificateSha256 -ne $expectedCertificate)
 Write-Output "APK signature verified: $actualCertificateSha256"
 if ($OutputDirectory) {
   New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-  $target = Join-Path $OutputDirectory "Mr.Robot-Mobile-$appVersion.apk"
+  $target = Join-Path $OutputDirectory "V.E.R.A-Mobile-$appVersion.apk"
   Copy-Item -LiteralPath $apkPath -Destination $target -Force
   Write-Output $target
 } else {

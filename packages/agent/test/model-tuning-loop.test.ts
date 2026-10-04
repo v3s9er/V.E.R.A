@@ -46,6 +46,15 @@ test('an unsupported active profile fails before admission or provider execution
   assert.equal(called, false); assert.equal(reserved, false);
 });
 
+test('unsupported explicit Codex effort fails before inference instead of being silently sent or downgraded', async () => {
+  let called = false, prepared = 0;
+  const selected = { ...api(async () => { called = true; return answer(); }), type: 'codex-cli' as const, supportedReasoning: ['auto', 'max'] as const };
+  const providers = { default: () => selected, prepareModelCapabilities: async () => { prepared++; } } as any;
+  await assert.rejects(new AgentLoop(providers, {} as any).run([], 'Substantive work', {}, [], { routing: null, reasoningEffort: 'ultra' }), /지원.*확인/);
+  assert.equal(called, false);
+  assert.equal(prepared, 1);
+});
+
 test('automatic profile effort keeps adaptive API and native choices', async () => {
   const profile: ModelTuningProfile = { id: 'auto-profile', name: 'Auto', reasoningEffort: 'auto', helperMode: 'off' };
   let apiRequest: ChatRequest | undefined;

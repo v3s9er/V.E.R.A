@@ -10,7 +10,7 @@ import { unzipSync } from 'fflate';
 import { listPackage, extractFile } from '@electron/asar';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const repo = 'v3s9er/Mr.Robot';
+const repo = 'v3s9er/V.E.R.A';
 const sevenZip = process.env.MR_ROBOT_AUDIT_7ZIP || 'C:/Program Files/7-Zip/7z.exe';
 const parent = join(homedir(), '.mr-robot', 'private', 'audits');
 mkdirSync(parent, { recursive: true });

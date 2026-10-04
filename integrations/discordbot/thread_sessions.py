@@ -129,6 +129,11 @@ async def choose_access(manager, interaction, mode):
         await manager.bridge.execute(interaction, 'access', mode=mode)
 
 
+def model_reasoning_efforts(provider, model, capabilities):
+    supported = capabilities.get(model, {}).get('supportedReasoningEfforts', []) if provider.get('type') == 'codex-cli' else provider.get('supportedReasoning', [])
+    return [v for v in ('auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra') if v == 'auto' or v in supported]
+
+
 class ModelPicker(SafeView):
     """Paged selectors use opaque indexes, not truncated model IDs as values."""
     def __init__(self, manager, owner_id, providers, preference):
@@ -142,6 +147,7 @@ class ModelPicker(SafeView):
         if self.current_provider:
             self.provider_page = self.providers.index(self.current_provider) // 25
         self.models = []
+        self.capabilities = {}
         self.warning = ''
 
     async def interaction_check(self, interaction):
@@ -153,9 +159,13 @@ class ModelPicker(SafeView):
 
     async def load(self, interaction):
         self.warning = ''
+        self.capabilities = {}
         if self.current_provider:
             try:
-                found = await self.manager.bridge.request(interaction, 'models', providerId=self.current_provider['providerId'])
+                found = await self.manager.bridge.request(interaction, 'models', providerId=self.current_provider['providerId'], includeCapabilities=True)
+                if isinstance(found, dict):
+                    self.capabilities = found.get('modelCapabilities', {})
+                    found = found.get('models', [])
                 if not isinstance(found, list):
                     raise RuntimeError('Invalid model catalog')
             except PermissionError:
@@ -195,7 +205,7 @@ class ModelPicker(SafeView):
             async def model_changed(interaction):
                 await interaction.response.defer()
                 effort = self.preference.get('effort', 'auto')
-                if effort not in provider_snapshot.get('supportedReasoning', ['auto']):
+                if effort not in model_reasoning_efforts(provider_snapshot, models_snapshot[int(models.values[0])], self.capabilities):
                     effort = 'auto'
                 preference = dict(providerId=provider_snapshot['providerId'], model=models_snapshot[int(models.values[0])], effort=effort)
                 await self.manager.bridge.request(interaction, 'settings', **preference)
@@ -204,8 +214,8 @@ class ModelPicker(SafeView):
                 await interaction.edit_original_response(content='저장했습니다.\n' + self.caption(), view=self)
             models.callback = model_changed
             self.add_item(models)
-        # The current Discord host accepts these four effort levels.
-        efforts = [v for v in ['auto', 'low', 'medium', 'high'] if v == 'auto' or v in self.current_provider.get('supportedReasoning', [])]
+        selected_model = self.preference.get('model') if self.preference.get('providerId') == self.current_provider['providerId'] else self.current_provider.get('model')
+        efforts = model_reasoning_efforts(self.current_provider, selected_model, self.capabilities)
         reasoning = discord.ui.Select(placeholder='추론 강도', row=2, options=[discord.SelectOption(label=v, value=v, default=v == self.preference.get('effort', 'auto')) for v in efforts])
         async def effort_changed(interaction):
             await interaction.response.defer()
@@ -355,7 +365,7 @@ class ThreadManager:
         await interaction.followup.send(view.caption() if providers else '등록된 공급자가 없습니다. PC 앱에서 먼저 연결하세요.', view=view, ephemeral=True)
 
     def panel_content(self):
-        content = '## Mr.Robot · 개인 티켓 작업실\nallow_ai 역할을 받은 사람은 [티켓 열기]를 눌러 개인 비공개 스레드를 만들 수 있습니다. 그 안에서 일반 채팅으로 작업을 요청하세요.\n기본 사용자는 인터넷 검색·격리 작업과 본인 결과물만 이용합니다. 기존 PC 파일에는 접근할 수 없습니다. 권한 변경은 서버 관리자 전용입니다.\n서버의 스레드 관리 권한자는 비공개 티켓도 볼 수 있습니다.'
+        content = '## V.E.R.A · 개인 티켓 작업실\nallow_ai 역할을 받은 사람은 [티켓 열기]를 눌러 개인 비공개 스레드를 만들 수 있습니다. 그 안에서 일반 채팅으로 작업을 요청하세요.\n기본 사용자는 인터넷 검색·격리 작업과 본인 결과물만 이용합니다. 기존 PC 파일에는 접근할 수 없습니다. 권한 변경은 서버 관리자 전용입니다.\n서버의 스레드 관리 권한자는 비공개 티켓도 볼 수 있습니다.'
         if not self.bridge.client.intents.message_content:
             content += '\n⚠ Developer Portal → Bot → Message Content Intent를 켜고 PC 플러그인을 재연결하세요. 그 전에는 /robot ask를 사용하세요.'
         return content
@@ -373,7 +383,7 @@ class ThreadManager:
             panel = await channel.send(self.panel_content(), view=Panel(self), allowed_mentions=discord.AllowedMentions.none())
         pinned = True
         try:
-            await panel.pin(reason='Mr.Robot ticket panel')
+            await panel.pin(reason='V.E.R.A ticket panel')
         except discord.Forbidden:
             pinned = False
         return panel, pinned
@@ -393,7 +403,7 @@ class ThreadManager:
             bound = self.state['bindings'].get(str(guild_id))
             if bound and (not matches or str(matches[0].id) != bound):
                 raise RuntimeError('다른 채널이 이미 연결되어 있습니다. 기존 채널에서 /robot unbind 후 다시 시도하세요.')
-            channel = matches[0] if matches else await guild.create_text_channel(channel_name, topic='Mr.Robot 개인 티켓 · 버튼을 눌러 요청하세요', overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, create_private_threads=True, send_messages_in_threads=True, manage_threads=True)}, reason='PC administrator requested Mr.Robot ticket workspace')
+            channel = matches[0] if matches else await guild.create_text_channel(channel_name, topic='V.E.R.A 개인 티켓 · 버튼을 눌러 요청하세요', overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, create_private_threads=True, send_messages_in_threads=True, manage_threads=True)}, reason='PC administrator requested V.E.R.A ticket workspace')
             await self.allow_ticket_role(channel, guild)
             panel, pinned = await self.publish_panel(channel)
             return {'guildId': str(guild_id), 'channelId': str(channel.id), 'panelId': str(panel.id), 'pinned': pinned}
@@ -448,7 +458,7 @@ class ThreadManager:
             if panel_id:
                 try:
                     panel = await interaction.channel.fetch_message(int(panel_id))
-                    await panel.edit(content='Mr.Robot 연결 해제됨. /robot bind로 다시 연결하세요.', view=None)
+                    await panel.edit(content='V.E.R.A 연결 해제됨. /robot bind로 다시 연결하세요.', view=None)
                 except discord.NotFound:
                     pass
             await interaction.followup.send(result['message'], ephemeral=True)
@@ -463,7 +473,7 @@ class ThreadManager:
             if len(sessions) >= 20:
                 raise RuntimeError('내 대화가 20개입니다. 불필요한 대화를 삭제하세요.')
             name = f'티켓 · {interaction.user.display_name} · {subject or "새 작업"}'[:100]
-            thread = await interaction.channel.create_thread(name=name, type=discord.ChannelType.private_thread, invitable=False, auto_archive_duration=1440, reason='User requested Mr.Robot session')
+            thread = await interaction.channel.create_thread(name=name, type=discord.ChannelType.private_thread, invitable=False, auto_archive_duration=1440, reason='User requested V.E.R.A session')
             registered = False
             try:
                 await thread.add_user(interaction.user)
@@ -472,7 +482,7 @@ class ThreadManager:
                 await self.send_controls(thread, '여기에 작업을 입력하거나 파일을 첨부하세요. 확장자 제한 없이 받으며, 읽을 수 있는 내용과 읽지 못한 부분을 구분합니다. 파일당 25MB·합계 50MB·최대 10개입니다.\n작업 중 추가 메시지는 순서대로 대기합니다. /robot controls로 제어 메뉴를 다시 꺼낼 수 있습니다. 일반 사용자는 본인 첨부와 결과물만 이용할 수 있으며, 기존 PC 파일 접근은 관리자 또는 별도 권한이 필요합니다.')
             except Exception:
                 if not registered:
-                    await thread.delete(reason='Roll back incomplete Mr.Robot session')
+                    await thread.delete(reason='Roll back incomplete V.E.R.A session')
                 raise
             await interaction.followup.send(f'내 대화가 준비됐습니다: {thread.jump_url}', ephemeral=True)
 

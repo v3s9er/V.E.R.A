@@ -197,7 +197,7 @@ async function readSmallJson(response: Response): Promise<SmallJson> {
   try {
     return JSON.parse(new TextDecoder().decode(body)) as SmallJson;
   } catch {
-    throw new Error('외부 주소가 올바른 Mr.Robot JSON 응답을 반환하지 않았습니다.');
+    throw new Error('외부 주소가 올바른 V.E.R.A JSON 응답을 반환하지 않았습니다.');
   }
 }
 
@@ -818,7 +818,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           verifiedAt: running ? verifiedAt : undefined,
           warning: temporary
             ? 'Quick Tunnel은 테스트·개발용 임시 주소이며 재시작하면 주소가 바뀝니다. trycloudflare.com 경로에는 사용자 도메인의 Cloudflare WAF·레이트리밋 규칙이 적용되지 않습니다.'
-            : '고정 Tunnel은 주소가 유지되지만 PC, Mr.Robot, cloudflared가 실행 중이어야 접속할 수 있습니다.' + (reachable && !toolPortalProtected ? ' 도구 포털은 외부 차단 상태이며 원격 포털 접근도 허용하지 않습니다. 대화·파일 연결은 별도로 검증합니다.' : ''),
+            : '고정 Tunnel은 주소가 유지되지만 PC, V.E.R.A, cloudflared가 실행 중이어야 접속할 수 있습니다.' + (reachable && !toolPortalProtected ? ' 도구 포털은 외부 차단 상태이며 원격 포털 접근도 허용하지 않습니다. 대화·파일 연결은 별도로 검증합니다.' : ''),
           lastError,
           diagnostics: [executableTrustDiagnostic, diagnostics].filter(Boolean).join('\n') || undefined,
           providers: providerInventory(executable, executableTrustDiagnostic),
@@ -1222,7 +1222,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
               || authenticatedPortalBody.app !== 'mr-robot'
               || authenticatedPortalBody.code !== TOOL_PORTAL_ACCESS_PROBE_CODE
               || !/(?:^|,)\s*no-store(?:\s*(?:,|$))/i.test(authenticatedPortal.headers.get('cache-control') ?? '')) {
-                throw new Error(`Access 인증 후 도구 포털 세션 경로가 정확한 Mr.Robot Agent marker를 반환하지 않았습니다. (HTTP ${authenticatedPortal.status})`);
+                throw new Error(`Access 인증 후 도구 포털 세션 경로가 정확한 V.E.R.A Agent marker를 반환하지 않았습니다. (HTTP ${authenticatedPortal.status})`);
               }
               verifiedPortal = true;
             }
@@ -1230,7 +1230,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             // Hostname-level Access should cover every path, but a mistaken
             // path-scoped/nested application can protect /api/ping while
             // leaving enrollment or WebSocket admission reachable. Probe one
-            // sensitive authenticated route without the inner Mr.Robot token:
+            // sensitive authenticated route without the inner V.E.R.A token:
             // the exact Agent response is a small 401 JSON body. It must be
             // invisible anonymously and visible with the Service Token.
             const ticketUrl = new URL('/api/ws-ticket', current.publicUrl);
@@ -1267,7 +1267,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             });
             const authenticatedTicketBody = await readSmallJson(authenticatedTicket);
             if (authenticatedTicket.status !== 401 || authenticatedTicketBody.error !== 'unauthorized') {
-              throw new Error(`Access 인증 후 WebSocket 티켓 경로가 정확한 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${authenticatedTicket.status})`);
+              throw new Error(`Access 인증 후 WebSocket 티켓 경로가 정확한 V.E.R.A Agent를 반환하지 않았습니다. (HTTP ${authenticatedTicket.status})`);
             }
 
             // Enrollment is intentionally public behind the edge, so verify
@@ -1315,7 +1315,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             if (authenticatedPair.status !== 400
               || authenticatedPairBody.app !== 'mr-robot'
               || authenticatedPairBody.error !== CLOUDFLARE_ACCESS_PAIR_PROBE_ERROR) {
-              throw new Error(`Access 인증 후 페어링 경로가 정확한 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${authenticatedPair.status})`);
+              throw new Error(`Access 인증 후 페어링 경로가 정확한 V.E.R.A Agent를 반환하지 않았습니다. (HTTP ${authenticatedPair.status})`);
             }
           }
           const response = await fetchUrl(new URL('/api/ping', current.publicUrl), {
@@ -1331,7 +1331,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
           });
           const body = await readSmallJson(response);
           if (!response.ok || body.ok !== true || body.app !== 'mr-robot') {
-            throw new Error(`공개 주소가 Mr.Robot Agent를 반환하지 않았습니다. (HTTP ${response.status})`);
+            throw new Error(`공개 주소가 V.E.R.A Agent를 반환하지 않았습니다. (HTTP ${response.status})`);
           }
           if (!targetStillCurrent()) throw new Error('검사 중 원격 링크가 변경되어 이전 검사 결과를 폐기했습니다.');
           reachable = true;
@@ -1346,7 +1346,7 @@ export function createRemoteLinkPlugin(runtime: RemoteLinkRuntime = {}): RemoteL
             checkedAt,
             message: current.provider === 'cloudflare-named'
               ? 'Cloudflare Access의 익명 차단과 Service Token 인증을 모두 확인했습니다.'
-              : '외부 HTTPS 주소에서 Mr.Robot Agent 응답을 확인했습니다.',
+              : '외부 HTTPS 주소에서 V.E.R.A Agent 응답을 확인했습니다.',
           };
         } catch (error) {
           if (!targetStillCurrent()) {

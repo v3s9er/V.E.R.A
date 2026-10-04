@@ -16,7 +16,7 @@ const observedCalls: string[] = [];
 (window as any).runtimeFixture = { observedCalls, restoreRuns: () => { runsUnavailable = false; } };
 const emit = (event: string, data: unknown) => listeners.get(event)?.forEach(fn => fn(data));
 const projects: WorkspaceInfo[] = [{ id: 'design', name: '앱 리뉴얼', path: 'C:\\Fixture\\Design', isDefault: true, createdAt: 1 }, { id: 'docs', name: '사용 가이드', path: 'C:\\Fixture\\Docs', isDefault: false, createdAt: 2 }];
-const makeChat = (id: string, workspaceId?: string): ConversationDetail => ({ id, workspaceId, title: '프로젝트 흐름 정리', status: 'active', pinned: false, createdAt: 1, updatedAt: Date.now(), messageCount: 2, reasoningEffort: 'medium', providerId: 'demo', permissionMode: 'ask', tokenPolicy: 'adaptive', compactedMessages: 0, usage: { promptTokens: 0, completionTokens: 0 }, messages: [ { role: 'user', content: '프로젝트별로 대화를 나누고 작업 진행 상황을 확인하고 싶어.' }, { role: 'assistant', content: '프로젝트에 작업 폴더를 연결하고 대화를 이어가세요.\n\n각 대화는 별도 세션을 유지합니다. 실행 기록은 입력창 위에서 펼쳐볼 수 있고, 작업 중에는 지시를 추가하거나 정지할 수 있어요.\n\n### 이번 작업\n\n- 프로젝트와 작업 폴더 연결\n- 대화별 실행 상태 복원\n- 도구 결과와 오류를 구분해서 표시' } ] });
+const makeChat = (id: string, workspaceId?: string): ConversationDetail => ({ id, workspaceId, routingPresetId: fixtureParams.has('adaptiveRoute') ? 'adaptive-fixture' : undefined, title: '프로젝트 흐름 정리', status: 'active', pinned: false, createdAt: 1, updatedAt: Date.now(), messageCount: 2, reasoningEffort: 'medium', providerId: 'demo', permissionMode: 'ask', tokenPolicy: 'adaptive', compactedMessages: 0, usage: { promptTokens: 0, completionTokens: 0 }, messages: [ { role: 'user', content: '프로젝트별로 대화를 나누고 작업 진행 상황을 확인하고 싶어.' }, { role: 'assistant', content: '프로젝트에 작업 폴더를 연결하고 대화를 이어가세요.\n\n각 대화는 별도 세션을 유지합니다. 실행 기록은 입력창 위에서 펼쳐볼 수 있고, 작업 중에는 지시를 추가하거나 정지할 수 있어요.\n\n### 이번 작업\n\n- 프로젝트와 작업 폴더 연결\n- 대화별 실행 상태 복원\n- 도구 결과와 오류를 구분해서 표시' } ] });
 const chats = [makeChat('chat-design', 'design'), makeChat('chat-docs', 'docs')];
 if (fixtureParams.has('longHistory')) chats.push(...Array.from({ length: 60 }, (_, i) => makeChat(`history-${i}`, 'design')));
 for (const chat of chats) {
@@ -28,6 +28,11 @@ const helperStates = [
   { agentId: 'tests', label: '테스트 범위 확인', providerId: 'demo', model: 'demo-balanced', state: 'running' as const, sequence: 4, turns: 1, status: '프로젝트 파일 읽는 중', usage: { promptTokens: 840, completionTokens: 160 } },
 ];
 let pending: { id: string; text: string; finish: (value: unknown) => void } | undefined;
+(window as any).runtimeFixture.setHelperState = (state: 'queued' | 'running' | 'completed') => {
+  if (!pending) return;
+  emit('chat.progress', { conversationId: pending.id, phase: 'working', activity: [], agents: helperStates.map(agent => ({ ...agent, state })) });
+  emit('chat.status', { conversationId: pending.id, status: state === 'completed' ? '최종 검증 시작 · FIXTURE_PRIVATE_NODE' : '모델 처리 중' });
+};
 let steering = 0;
 const done = (cancelled = false) => {
   if (!pending) return; const run = pending; pending = undefined;
@@ -58,9 +63,13 @@ const mock = {
     if (method === 'projects.create' || method === 'projects.update') { const project = method.endsWith('create') ? { id: crypto.randomUUID(), path: params.path || 'C:\\Fixture\\NewProject', createdAt: Date.now(), isDefault: false } : projects.find(p => p.id === params.id)!; Object.assign(project, { name: params.name, instructions: params.instructions }); if (method.endsWith('create')) projects.push(project as WorkspaceInfo); emit('workspaces.changed', [...projects]); return project; }
     if (method === 'projects.delete') { projects.splice(projects.findIndex(p => p.id === params.id), 1); emit('workspaces.changed', [...projects]); return { ok: true }; }
     if (method === 'providers.list') return [{ id: 'demo', label: 'Codex 구독', type: 'codex-cli', model: 'gpt-6-sol', enabled: true, isDefault: true, supportedReasoning: ['auto', 'low', 'medium', 'high'] }, { id: 'claude', label: 'Claude 구독', type: 'claude-cli', model: 'claude-sonnet', enabled: true, isDefault: false, supportedReasoning: ['auto', 'high'] }];
-    if (method === 'providers.catalog') return { models: params.id === 'claude' ? ['claude-sonnet', 'claude-opus'] : ['gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-daybreak-blue-latest'], state: 'fresh', source: 'provider' };
+    if (method === 'providers.catalog') return { models: params.id === 'claude' ? ['claude-sonnet', 'claude-opus'] : ['gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-daybreak-blue-latest'], state: 'fresh', source: 'provider', modelCapabilities: params.id === 'claude' ? undefined : {
+      'gpt-6-sol': { supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultReasoningEffort: 'medium' },
+      'gpt-6-astra': { supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultReasoningEffort: 'medium' },
+      'gpt-6-luna': { supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoningEffort: 'medium' },
+    } };
     if (method === 'chat.recovery') return null;
-    if (method === 'routing.presets.list') return [];
+    if (method === 'routing.presets.list') return fixtureParams.has('adaptiveRoute') ? [{ id: 'adaptive-fixture', name: '필요할 때 협업', mode: 'balanced', executionMode: 'adaptive', roles: {}, maxPremiumCalls: 2, escalationEnabled: false, builtin: true, createdAt: 1, updatedAt: 1 }] : [];
     if (method === 'chat.runs') { if (runsUnavailable) throw Error('temporary network loss'); return pending ? [{ conversationId: pending.id, running: true, phase: 'working', steeringQueued: steering, partialText: '테스트 출력 복원', activity: [] }] : []; }
     if (method === 'chat.pendingConfirm') return null;
     if (method === 'chat.start') return new Promise(resolve => { pending = { id: params.conversationId, text: params.text, finish: resolve }; steering = 0; setTimeout(() => { if (!pending) return; emit('chat.progress', { conversationId: pending.id, runId: 'fixture', phase: 'working', startedAt: Date.now(), agents: helperStates, activity: [{ id: 'read', label: 'read_file', state: 'done', startedAt: Date.now()-200, finishedAt: Date.now() }] }); emit('chat.tool', { conversationId: pending.id, callId: 'a', name: 'read_file', status: 'start' }); emit('chat.tool', { conversationId: pending.id, callId: 'a', name: 'read_file', status: 'done' }); }, 60); });
@@ -72,7 +81,7 @@ const mock = {
 const embedded = new URLSearchParams(location.search).has('embedded');
 function Preview() {
   const [size, setSize] = React.useState([1280, 800]);
-  if (!embedded) return <div style={{padding:12}}><div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}><b>UI fixture · 실제 AI 호출 없음</b>{[[1280,800],[820,650],[390,780],[390,430]].map(s => <button key={s.join('x')} onClick={()=>setSize(s)}>{s.join(' × ')}</button>)}</div><iframe title="Mr.Robot 테스트 화면" src="/test/runtime-preview.html?embedded" style={{width:size[0],height:size[1],border:'1px solid #ffffff22',maxWidth:'none'}} /></div>;
+  if (!embedded) return <div style={{padding:12}}><div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}><b>UI fixture · 실제 AI 호출 없음</b>{[[1280,800],[820,650],[390,780],[390,430]].map(s => <button key={s.join('x')} onClick={()=>setSize(s)}>{s.join(' × ')}</button>)}</div><iframe title="V.E.R.A 테스트 화면" src="/test/runtime-preview.html?embedded" style={{width:size[0],height:size[1],border:'1px solid #ffffff22',maxWidth:'none'}} /></div>;
   return <div style={{height:'100%',display:'flex',flexDirection:'column'}}><div style={{height:28,flexShrink:0,fontSize:11,padding:4,background:'#172321',display:'flex',justifyContent:'space-between'}}>테스트 화면 · PC/AI 연결 없음 <button onClick={()=>done()}>테스트 응답 완료</button></div><MrRobotContext.Provider value={{client: mock as unknown as MrRobotClient}}><ChatView /></MrRobotContext.Provider></div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><Preview /></React.StrictMode>);

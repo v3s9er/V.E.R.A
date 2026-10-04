@@ -2,12 +2,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { MemoryItem } from '@mr-robot/shared';
-import { retrieveKnowledge, type KnowledgeResult } from './ontology.js';
+import { retrieveIndexedKnowledge, type KnowledgeResult } from './ontology.js';
+import { KnowledgeIndexCache } from './ontology-index.js';
 
 export class MemoryStore {
   private readonly file: string;
   private items: MemoryItem[] = [];
   private readonly knowledgeCache = new Map<string, KnowledgeResult>();
+  private readonly knowledgeIndexes = new KnowledgeIndexCache();
 
   constructor(home: string) {
     this.file = join(home, 'memory.json');
@@ -74,9 +76,12 @@ export class MemoryStore {
       result.metrics.retrievalMs = Math.round((performance.now()-started)*1000)/1000;
       return result;
     }
-    const scoped = [...this.items, ...observed].filter(item => !item.supersededBy && (!item.workspaceId || item.workspaceId === scope.workspaceId)
-      && (!item.conversationId || item.conversationId === scope.conversationId));
-    const result = retrieveKnowledge(scoped, query);
+    const matchesScope = (item: MemoryItem) => !item.supersededBy && (!item.workspaceId || item.workspaceId === scope.workspaceId)
+      && (!item.conversationId || item.conversationId === scope.conversationId);
+    const savedIndex = this.knowledgeIndexes.get(JSON.stringify([scope.workspaceId, scope.conversationId]), () => this.items.filter(matchesScope));
+    const index = observed.length ? savedIndex.withObservations(observed.filter(matchesScope)) : savedIndex;
+    const result = retrieveIndexedKnowledge(index, query);
+    result.metrics.retrievalMs = Math.round((performance.now() - started) * 1000) / 1000;
     if (!observed.length) {
       if (this.knowledgeCache.size >= 24) this.knowledgeCache.delete(this.knowledgeCache.keys().next().value!);
       this.knowledgeCache.set(cacheKey,result);
@@ -122,6 +127,7 @@ export class MemoryStore {
 
   private save(): void {
     this.knowledgeCache.clear();
+    this.knowledgeIndexes.clear();
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.items, null, 2), 'utf8');

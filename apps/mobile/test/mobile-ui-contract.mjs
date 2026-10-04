@@ -149,7 +149,7 @@ check('work details open in a bounded dismissible sheet instead of pushing the c
   && progress.includes('<Modal visible={open}')
   && progress.includes('onRequestClose={() => setOpen(false)}')
   && progress.includes("maxHeight: '75%'")
-  && chat.includes('<RunActivity run={activeRun ?? null} busy={busy} compact />')
+  && chat.includes('<RunActivity run={activeRun ?? null} busy={busy} executionMode={selectedExecutionMode} compact />')
   && home.includes("paddingTop: keyboardVisible || tab === 'chat' ? insets.top : 0")
   && !progress.includes('item.input') && !progress.includes('item.detail'));
 check('mobile tool history is collapsed, bounded and hides raw payloads',
@@ -163,7 +163,7 @@ const timeline = read('src/components/RunTimeline.tsx');
 check('mobile unifies the PC and conversation header and shows actual waiting events',
   home.includes("!keyboardVisible && tab !== 'chat'")
   && home.includes('onSelectExecutionPc={() => setShowPcPicker(true)}')
-  && chat.includes('<RunTimeline run={activeRun ?? null} busy={busy} />')
+  && chat.includes('<RunTimeline run={activeRun ?? null} busy={busy} executionMode={selectedExecutionMode} />')
   && timeline.includes('runTimeline(run ?? {})')
   && !timeline.includes('item.input') && !timeline.includes('item.output'));
 console.log('MOBILE UI CONTRACT PASSED');

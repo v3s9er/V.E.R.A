@@ -61,7 +61,7 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
 const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra', 'unknown', 'sol'];
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], modelCatalog: async () => ({ models: catalog, source: 'codex-model-list', state: 'fresh', lastUpdatedAt: 1, lastAttemptAt: 1, modelCapabilities: { 'gpt-6-astra': { supportedReasoningEfforts: ['ultra'] }, 'gpt-5.6-sol': { supportedReasoningEfforts: ['low', 'ultra'] }, 'gpt-5.6-luna': { supportedReasoningEfforts: ['max'] } } }), permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -180,6 +180,15 @@ try {
   assert.equal(lastRun, undefined, 'rejected requests never invoke the agent');
   assert.ok((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'invented' })).error);
   assert.equal((storage.get('modelLimits') as any)[`${identity.guildId}:${identity.userId}`], 'sol', 'policy persisted and invalid update did not widen it');
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-sol', effort: 'auto' })).result);
+  const capabilityCatalog = (await request({ action: 'models', providerId: 'provider', includeCapabilities: true })).result;
+  assert(!capabilityCatalog.models.includes('gpt-6-astra'));
+  assert(!Object.hasOwn(capabilityCatalog.modelCapabilities, 'gpt-6-astra'), 'Reasoning metadata never widens the model ceiling');
+  assert.deepEqual(capabilityCatalog.modelCapabilities['gpt-5.6-sol'].supportedReasoningEfforts, ['low', 'ultra']);
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-sol', effort: 'ultra' })).result);
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-luna', effort: 'ultra' })).error);
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'unknown', effort: 'ultra' })).error);
+  assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-sol', effort: 'future' })).error);
   assert.ok((await request({ action: 'settings', providerId: 'provider', model: 'gpt-5.6-sol', effort: 'auto' })).result);
   emit({ ...identity, id: 'ask', action: 'ask', text: '한글 명령' });
   await waitFor(() => replies.some(r => r.event === 'approval'));

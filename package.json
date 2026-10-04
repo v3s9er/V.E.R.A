@@ -1,9 +1,9 @@
 {
   "name": "mr-robot",
-  "version": "0.6.17",
+  "version": "0.7.0",
   "private": true,
   "license": "MIT",
-  "description": "Mr.Robot — 모바일↔PC AI 에이전트 (Windows)",
+  "description": "V.E.R.A — 모바일↔PC AI 에이전트 (Windows)",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -28,7 +28,7 @@
     "pretest": "npm run build",
     "posttest": "npm run test:session-events && npm run test:native-sessions && npm run test:coordination && npm run test:tuning && npm run test:performance && npm run test:benchmarks && npm run test:adaptive-update && npm run test:desktop-recovery && node --test scripts/tests/test-local-training-runner.test.mjs",
     "test": "tsx packages/agent/test/discord-sessions.test.ts && tsx packages/agent/test/discord.test.ts && tsx packages/agent/test/discord-authority.test.ts && tsx packages/agent/test/question-budget.test.ts && node packages/agent/test/smoke.mjs && node packages/agent/test/core-hardening.mjs && node packages/agent/test/storage-recovery.mjs && node packages/agent/test/pairing-secret-storage.mjs && node packages/agent/test/mcp-environment-storage.mjs && node packages/agent/test/desktop-auth-boundary.mjs && node packages/agent/test/desktop-remote-pair-security.mjs && tsx packages/agent/test/qr-security.ts && tsx packages/agent/test/calendar/calendar-sources.test.ts && tsx packages/agent/test/resource-archiver.test.ts && tsx --test packages/agent/test/tool-portal.test.ts && tsx --test packages/agent/test/sslscan/sslscan.test.ts && tsx --test packages/agent/test/webcrypto-observer/webcrypto-observer.test.ts && node packages/agent/test/plugin-execution-security.mjs && node packages/agent/test/provider-security.mjs && tsx --test packages/agent/test/provider-stream-safety.test.ts && node packages/agent/test/scheduler.mjs && node packages/agent/test/ai-loop.mjs && node packages/agent/test/dependencies.mjs && node packages/agent/test/routing-presets.mjs && node packages/agent/test/cli-resolution.mjs && node packages/agent/test/v02.mjs && node packages/agent/test/ui-contract.mjs && node packages/web/test/responsive-ui-contract.mjs && tsx packages/web/test/plugin-categories.test.ts && tsx packages/web/test/plugin-workbench.test.ts && tsx packages/web/test/tool-portal.test.ts && tsx --test packages/web/test/tool-portal-client.test.ts && tsx packages/web/test/pcs-storage.test.ts && node packages/agent/test/logger.mjs && node packages/agent/test/voice.mjs && npm run test:privacy --prefix apps/mobile && node apps/mobile/test/cloudflare-access-contract.mjs && npm run test:ui --prefix apps/mobile && npm run audit:public && npm run test:discord-fast",
-    "test:adaptive-update": "node --import tsx --test packages/agent/test/adaptive-update.test.ts packages/agent/test/ontology.test.ts packages/agent/test/project-knowledge.test.ts packages/agent/test/knowledge-loop.test.ts packages/agent/test/evidence-ocr.test.ts packages/agent/test/evidence-ocr-observation.test.ts",
+    "test:adaptive-update": "node --import tsx --test packages/agent/test/adaptive-update.test.ts packages/agent/test/ontology.test.ts packages/agent/test/ontology-admission.test.ts packages/agent/test/ontology-proofs.test.ts packages/agent/test/project-knowledge.test.ts packages/agent/test/knowledge-loop.test.ts packages/agent/test/evidence-ocr.test.ts packages/agent/test/evidence-ocr-observation.test.ts",
     "test:leak": "node --expose-gc packages/agent/test/leak.mjs",
     "test:discord": "tsx packages/agent/test/discord.test.ts && tsx packages/agent/test/discord-sessions.test.ts && tsx packages/agent/test/discord-authority.test.ts && tsx packages/agent/test/discord-isolation.test.ts && tsx packages/agent/test/discord-attachments.test.ts && tsx packages/agent/test/discord-attachment-selection.test.ts && tsx packages/agent/test/cli-text-pool.test.ts && npm run test:discord-fast",
     "test:lid-display": "tsx packages/agent/test/lid-display.test.ts && powershell.exe -NoProfile -NonInteractive -Sta -File packages/agent/test/lid-display-controller.ps1",
@@ -39,11 +39,11 @@
     "test:codex-installed": "tsx packages/agent/test/cli-pool-installed.test.ts && tsx packages/agent/test/cli-plain-installed.test.ts && tsx packages/agent/test/cli-broker-installed.test.ts && tsx packages/agent/test/cli-native-installed.test.ts",
     "test:native-sessions": "tsx packages/agent/test/cli-native-pool.test.ts && tsx --test packages/agent/test/native-orchestration.test.ts packages/agent/test/pipeline-native-route.test.ts",
     "test:desktop-native": "tsx --test packages/agent/test/desktop-runtime.test.ts packages/agent/test/native-desktop.test.ts packages/agent/test/desktop-browser.test.ts",
-    "test:desktop-recovery": "node --test scripts/tests/desktop-window-recovery.test.mjs scripts/tests/desktop-window-bounds.test.mjs",
+    "test:desktop-recovery": "node --test scripts/tests/desktop-window-recovery.test.mjs scripts/tests/desktop-window-bounds.test.mjs packages/web/test/branding.test.mjs",
     "test:desktop-recovery-live": "node scripts/tests/desktop-window-recovery.smoke.mjs",
     "test:calendar-ui": "node packages/web/test/calendar-layout.mjs",
     "test:desktop-installed": "tsx packages/agent/test/native-desktop-installed.test.ts",
-    "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts && tsx packages/web/test/model-catalog.test.ts",
+    "test:model-catalog": "tsx packages/agent/test/cli-models.test.ts && tsx packages/web/test/model-catalog.test.ts && node --import tsx --test packages/web/test/model-capabilities.test.ts packages/agent/test/model-capability-preparation.test.ts",
     "test:agent-runtime": "tsx --test packages/agent/test/agent-runtime.test.ts packages/agent/test/projects.test.ts",
     "test:runtime-ui": "node packages/web/test/runtime-ui.mjs && node --import tsx --test packages/web/test/chat-lifecycle.test.ts packages/web/test/run-presentation.test.ts && node packages/web/test/chat-lifecycle-ui.mjs",
     "test:ui-live": "npm run test:runtime-ui && node packages/web/test/agent-surface-ui.mjs && node packages/web/test/model-picker-ui.mjs && node packages/web/test/calendar-layout.mjs",
@@ -58,10 +58,12 @@
     "benchmark:transport": "node --import tsx scripts/performance-transport.ts",
     "benchmark:live": "node --import tsx scripts/performance-live.ts",
     "benchmark:paired": "node --import tsx scripts/performance-paired-live.ts",
+    "benchmark:app": "node --import tsx scripts/app-benchmark.ts",
+    "benchmark:knowledge": "node --import tsx scripts/benchmark-knowledge.ts",
     "benchmark:compare": "node --import tsx scripts/performance-compare.ts",
     "benchmark:bfcl": "node --import tsx scripts/benchmark-bfcl.ts",
     "benchmark:aime": "node --import tsx scripts/benchmark-aime.ts",
-    "test:benchmarks": "node --import tsx --test packages/agent/test/external-tool-benchmark.test.ts packages/agent/test/external-scorecard.test.ts packages/agent/test/cli-failure.test.ts scripts/tests/benchmark-bfcl-data.test.ts scripts/tests/benchmark-report.test.ts scripts/tests/benchmark-preflight.test.ts scripts/tests/benchmark-aime.test.ts && tsc -p scripts/performance-tsconfig.json",
+    "test:benchmarks": "node --import tsx --test packages/agent/test/external-tool-benchmark.test.ts packages/agent/test/external-scorecard.test.ts packages/agent/test/cli-failure.test.ts scripts/tests/benchmark-bfcl-data.test.ts scripts/tests/benchmark-report.test.ts scripts/tests/benchmark-preflight.test.ts scripts/tests/benchmark-aime.test.ts scripts/tests/app-benchmark.test.ts scripts/tests/app-benchmark-arc.test.ts && tsc -p scripts/performance-tsconfig.json",
     "benchmark:report": "node --import tsx scripts/benchmark-report.ts"
   },
   "devDependencies": {

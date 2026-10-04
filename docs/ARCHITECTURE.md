@@ -1,8 +1,8 @@
-# Mr.Robot architecture
+# V.E.R.A architecture
 
 ## Product boundary
 
-Mr.Robot has one authority boundary: the PC agent owns computer tools, credentials,
+V.E.R.A has one authority boundary: the PC agent owns computer tools, credentials,
 conversation persistence, and permission decisions. Web and mobile apps are
 authenticated clients. They submit a task over the paired WebSocket connection;
 the PC agent selects a model, calls audited tools, and streams progress/results
@@ -28,7 +28,7 @@ In single-model mode with a selected workspace, CLI modules launch the official
 Codex or Claude Code executable without a shell, in that workspace, with the
 selected model and mapped permission mode. The native agent owns its established
 tool loop. This avoids paying a second API model to reinterpret its plan. In a
-multi-node preset, provider-neutral nodes remain inside Mr.Robot's bounded loop.
+multi-node preset, provider-neutral nodes remain inside V.E.R.A's bounded loop.
 
 The router first classifies task shape and complexity, then selects the configured
 role node (`fast`, `general`, `reasoning`, `coding`, `vision`). The graph editor
@@ -46,7 +46,7 @@ Token policy keeps the static system prefix short, exposes only task-relevant
 computer tool schemas, caps runs at 16 model steps, blocks a third identical tool
 call, bounds tool output, and keeps recent turns plus a compressed older summary.
 
-Desktop execution uses Mr.Robot's bundled Windows backend. Retained native Codex
+Desktop execution uses V.E.R.A's bundled Windows backend. Retained native Codex
 sessions receive host-owned tools for window discovery, observation, actions and
 browser opening when the current permission policy allows full PC access. Each
 call rechecks authority, bounds its output and supports cancellation; observations
@@ -58,7 +58,7 @@ Research basis:
   that escalates only when expected quality is insufficient.
 - [RouteLLM (ICLR 2025)](https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html)
   learns strong/weak routing from preference data and exposes a cost-quality
-  threshold. Mr.Robot preserves the data and policy boundaries needed to adopt this.
+  threshold. V.E.R.A preserves the data and policy boundaries needed to adopt this.
 - [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
   recommends selecting reasoning effort intentionally, using low effort for
   latency-sensitive work and higher effort only when evaluation shows a gain.
@@ -71,14 +71,14 @@ are atomic (temporary file then rename). Large conversations keep recent turns
 verbatim and compress older turns into a bounded summary. The UI reports how many
 messages were compacted.
 
-`memory.json` is an explicit long-term memory store. Mr.Robot does not silently turn
+`memory.json` is an explicit long-term memory store. V.E.R.A does not silently turn
 all chat content into memory. The user adds or removes durable facts, and a small
 keyword ranker injects the most relevant items into a task. This reduces privacy
 risk and avoids paying a model merely to retrieve a handful of personal facts.
 
 OpenAI's current API guidance also supports persisted reasoning and multi-turn
 continuation where available. Provider-specific native continuation can be added
-behind the same conversation contract; Mr.Robot currently keeps a portable,
+behind the same conversation contract; V.E.R.A currently keeps a portable,
 provider-neutral history so conversations can switch models.
 
 ## Workspaces, context broker, and run control
@@ -109,7 +109,7 @@ does not call a model and consumes zero model tokens. A source PC issues a
 90-second, single-use capability scoped to one file or one state snapshot, so the
 destination PC never receives the source device's long-lived credential. Cloudflare
 Quick Link supplies an optional VPN-free HTTPS/WSS path and Tailscale remains an
-optional encrypted transport. Mr.Robot keeps pairing, device revocation, and
+optional encrypted transport. V.E.R.A keeps pairing, device revocation, and
 per-device permission caps at the application layer.
 
 ## CTF sandbox

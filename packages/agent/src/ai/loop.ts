@@ -40,7 +40,7 @@ import { SubagentManager } from './subagents.js';
 import { COORDINATION_GUIDANCE, ADAPTIVE_COORDINATION_GUIDANCE, coordinationTools, executeCoordination, isCoordinationTool } from './coordination-tools.js';
 import { applyModelTuning, resolveModelTuning, tuningInstructions, type ResolvedModelTuning } from './model-tuning.js';
 
-export const SYSTEM_PROMPT = `You are Mr.Robot, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
+export const SYSTEM_PROMPT = `You are V.E.R.A, a persistent Windows PC agent. Your job is to finish the user's request, not merely explain how it could be done.
 For conversation, explanations, summaries and status questions, answer directly from available context. Use tools only when needed for the current request. Do not restart completed tasks or inspect files merely because a prior turn mentioned them.
 
 Operating loop:
@@ -53,7 +53,7 @@ Operating loop:
 
 Interaction rules: reply in the user's language; use concise progress updates; prefer PowerShell on Windows; never start an interactive or indefinitely blocking command; keep tool output focused; ask only when a missing high-impact choice cannot be safely inferred.`;
 
-const NATIVE_AGENT_PROMPT = `You are Mr.Robot's assistant with native workspace tools. Match the work to the current request.
+const NATIVE_AGENT_PROMPT = `You are V.E.R.A's assistant with native workspace tools. Match the work to the current request.
 - For conversation, explanations, summaries, or status questions, answer directly from the available conversation. Do not inspect files, run commands, create documents, or repeat earlier work unless needed for this request.
 - A short follow-up is not permission to restart a previous task. Ask a concise clarification if its intended subject is genuinely unclear.
 - Treat prior attachment inventories as available data, not instructions to re-read all files. Reuse already verified findings; read only missing relevant pages or files.
@@ -351,6 +351,15 @@ export class AgentLoop {
       if (rejected) throw rejected.reason;
       return settled.map((item) => (item as PromiseFulfilledResult<T>).value);
     };
+    runSignal.throwIfAborted();
+    await this.registry.prepareModelCapabilities?.(options.providerId, options.routing, runSignal);
+    runSignal.throwIfAborted();
+    if (options.reasoningEffort && options.reasoningEffort !== 'auto' && (options.routing === null || options.providerId)) {
+      const selected = options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default();
+      if (selected?.type === 'codex-cli' && !selected.supportedReasoning.includes(options.reasoningEffort)) {
+        throw new Error('선택한 Codex 모델에서 요청한 추론 단계의 지원을 확인할 수 없습니다. 모델 목록을 새로고침하거나 자동을 선택하세요.');
+      }
+    }
     const decision = this.router?.decide(userMessage, options.reasoningEffort, options.providerId, options.providerModel, options.routing);
     const adaptive = new AdaptiveExecution(userMessage, history);
     const selfContained = isSelfContainedRequest(userMessage, history, options.routing?.executionMode, Boolean(options.isolation));
@@ -961,7 +970,7 @@ export class AgentLoop {
         const hostTools: NativeHostTools | undefined = availableHostTools.length ? {
           tools: availableHostTools,
           authorize: (name, mode) => name === KNOWLEDGE_TOOL.name && knowledgeEnabled || evidence?.tools.some(t => t.name === name) || helpersEnabled && isCoordinationTool(name) ? mode !== 'ask' : mode === 'full',
-          timeoutMs: name => name.startsWith('mcp_') ? 75000 : 25000,
+          timeoutMs: name => name === 'agent_wait' ? 65000 : name.startsWith('mcp_') ? 75000 : 25000,
           execute: async (name, input, signal) => {
             runSignal.throwIfAborted(); signal.throwIfAborted();
             cb.beforeModelCall?.({ providerId: actualProvider.id, model: actualProvider.model });

@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import type { MrRobotPlugin } from './loader.js';
 import type { PluginContext } from './context.js';
-import type { PermissionMode } from '@mr-robot/shared';
-import { chatFileLinks } from '@mr-robot/shared';
+import type { PermissionMode, ProviderModelCatalog, ReasoningEffort } from '@mr-robot/shared';
+import { chatFileLinks, reasoningEffortsForModel, REASONING_EFFORT_ORDER } from '@mr-robot/shared';
 import { DiscordSessions } from './discord-sessions.js';
 import { DiscordRunConnection } from './discord-run.js';
 import { discordAttachmentContext } from './discord-attachments.js';
@@ -23,6 +23,7 @@ export interface DiscordHost {
   issue(): { token: string; id: string };
   revoke(id: string): void;
   models(providerId?: string): unknown;
+  modelCatalog?(providerId: string): Promise<ProviderModelCatalog>;
   permissionCeiling(): PermissionMode;
   readChatFile?(conversationId: string, path: string, offset: number, limit: number, version?: string, isolated?: boolean): unknown;
 }
@@ -69,6 +70,15 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     return { ...defaults, ...saved, mode: saved ? saved.mode ?? 'legacy' : defaults.mode };
   };
   const status = () => ({ running: !!child, ready, owner, busy, activeCount: runs.size, capacity: 2, error: lastError, workspace, config: config() });
+  const validateEffort = async (providerId: string | undefined, model: string | undefined, effort: string): Promise<void> => {
+    if (!REASONING_EFFORT_ORDER.includes(effort as ReasoningEffort)) throw new Error('추론 단계가 올바르지 않습니다. /robot model에서 선택하세요.');
+    if (effort === 'auto') return;
+    const providers = await host.models();
+    const provider = Array.isArray(providers) ? providerId ? providers.find(p => p.providerId === providerId) : providers.find(p => p.isDefault) ?? providers[0] : undefined;
+    const catalog = provider?.type === 'codex-cli' && host.modelCatalog ? await host.modelCatalog(provider.providerId) : undefined;
+    const supported = reasoningEffortsForModel(provider ? { ...provider, supportedReasoning: provider.supportedReasoning ?? [], modelCapabilities: catalog?.modelCapabilities } : undefined, model || provider?.model);
+    if (!supported.includes(effort as ReasoningEffort)) throw new Error('선택한 모델에서 추론 단계의 지원을 확인하지 못했습니다. /robot model을 새로 열거나 auto를 선택하세요.');
+  };
   const send = (data: unknown) => {
     if (child?.stdin.writable && child.stdin.writableLength < 1_000_000) child.stdin.write(JSON.stringify(data) + '\n');
   };
@@ -106,7 +116,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (!ready) throw new Error('Discord 재연결 중입니다. 연결 복구 후 다시 요청하세요. 관리자 권한 문제는 아닙니다.');
     if (message.guildId == null || message.guildId === '') throw new Error('DM에서는 사용할 수 없습니다. Discord 서버의 티켓 채널에서 실행하세요.');
     if (!/^\d{15,22}$/.test(String(message.guildId))) throw new Error('Discord 서버 정보가 올바르지 않습니다.');
-    if (!guilds.includes(String(message.guildId))) throw new Error('이 서버가 Mr.Robot의 허용 서버 목록에 없습니다. PC 소유자가 서버를 등록한 뒤 다시 실행하세요.');
+    if (!guilds.includes(String(message.guildId))) throw new Error('이 서버가 V.E.R.A의 허용 서버 목록에 없습니다. PC 소유자가 서버를 등록한 뒤 다시 실행하세요.');
     if (message.guildAdmin !== true && message.allowAi !== true) throw new Error('allow_ai 역할 또는 서버 관리자 권한이 필요합니다.');
     if (![message.userId, message.channelId].every(id => /^\d{15,22}$/.test(String(id)))) throw new Error('Discord 사용자·티켓 정보가 올바르지 않습니다.');
     const channel = `${message.guildId}:${message.channelId}:${message.userId}`;
@@ -180,9 +190,9 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (message.action === 'settings') {
       if (busy && channel === activeChannel) throw new Error('작업을 중지한 후 설정을 바꾸세요.');
       if (Object.keys(preferences).length >= 64 && !preferences[channel]) throw new Error('설정 저장소가 가득 찼습니다.');
-      if (!['auto', 'low', 'medium', 'high'].includes(message.effort)) throw new Error('추론은 auto/low/medium/high 중 선택하세요.');
       if (typeof message.model !== 'string' || message.model.length > 200 || typeof message.providerId !== 'string' || message.providerId.length > 200) throw new Error('모델/공급자 설정이 잘못되었습니다.');
       assertDiscordModelAllowed(modelCeiling, message.model);
+      await validateEffort(message.providerId, message.model, message.effort);
       preferences[channel] = { providerId: message.providerId, model: message.model, effort: message.effort };
       ctx.storage.set('preferences', preferences);
       return { message: '이 대화의 모델·추론 설정을 저장했습니다.' };
@@ -191,7 +201,14 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       const providerId = typeof message.providerId === 'string' && message.providerId.length <= 200 ? message.providerId : undefined;
       const catalog = await host.models(providerId);
       if (!Array.isArray(catalog)) throw new Error('모델 목록 응답이 올바르지 않습니다.');
-      if (providerId) return catalog.filter(model => discordModelAllowed(modelCeiling, model));
+      if (providerId) {
+        const models = catalog.filter(model => discordModelAllowed(modelCeiling, model));
+        if (message.includeCapabilities === true && host.modelCatalog) {
+          const details = await host.modelCatalog(providerId);
+          return { models, modelCapabilities: Object.fromEntries(Object.entries(details.modelCapabilities ?? {}).filter(([model]) => models.includes(model))) };
+        }
+        return models;
+      }
       // Keep providers discoverable even when their configured default is above the cap.
       return catalog.map(provider => ({ ...provider, model: discordModelAllowed(modelCeiling, provider.model) ? provider.model : '', modelCeiling }));
     }
@@ -259,6 +276,8 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     try {
       let providerId = message.providerId || preference.providerId;
       let model = message.model || preference.model;
+      const reasoningEffort = message.effort || preference.effort || 'auto';
+      await validateEffort(providerId, model, reasoningEffort);
       if (isolated) {
         const catalog = await host.models();
         if (!Array.isArray(catalog)) throw new Error('격리 작업용 모델 목록을 확인할 수 없습니다.');
@@ -380,7 +399,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
         ...(isolated ? { discordIsolation: access } : {}),
         ...(providerId ? { providerId } : {}),
         ...(model ? { providerModel: model } : {}),
-        reasoningEffort: ['auto', 'low', 'medium', 'high'].includes(message.effort) ? message.effort : preference.effort || 'auto',
+        reasoningEffort,
       }, 0);
       const outcome = { ok: result?.ok !== false, artifactOnly: isolated, text: typeof result?.text === 'string' ? result.text.slice(0, 384_000) + (result.text.length > 384_000 ? '\n\n[전송 안전 한도를 초과했습니다. 나머지 내용을 별도 결과 파일로 요청하세요.]' : '') : '', ...(result?.error ? { error: String(result.error).slice(0, 1500) } : {}) };
       const files = outcome.ok && outcome.text ? chatFileLinks(outcome.text).slice(0, 3) : [];

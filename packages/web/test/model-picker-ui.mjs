@@ -18,6 +18,19 @@ try {
     await page.getByLabel('대화 모델', { exact: true }).click();
     await page.getByLabel('모델 검색').fill('sol');
     await page.getByRole('button', { name: /^gpt-6-sol/ }).click();
+    const reasoning = page.getByLabel('입력창 추론 강도', { exact: true });
+    await expect(reasoning.locator('option[value="ultra"]')).toHaveCount(1);
+    await reasoning.selectOption('ultra');
+    await expect(reasoning).toHaveValue('ultra');
+    await page.getByLabel('대화 모델', { exact: true }).click();
+    await page.getByLabel('모델 검색').fill('luna');
+    await page.getByRole('button', { name: /^gpt-6-luna/ }).click();
+    await expect(reasoning).toHaveValue('auto');
+    await expect(reasoning.locator('option[value="ultra"]')).toHaveCount(0);
+    await expect(reasoning.locator('option[value="max"]')).toHaveCount(1);
+    await page.getByLabel('대화 모델', { exact: true }).click();
+    await page.getByLabel('모델 검색').fill('sol');
+    await page.getByRole('button', { name: /^gpt-6-sol/ }).click();
     const daybreak = page.getByRole('button', { name: /Daybreak/ });
     await daybreak.waitFor();
     await daybreak.click();
@@ -36,7 +49,7 @@ try {
     await page.getByRole('button', { name: /^gpt-6-sol/ }).click();
     await expect(page.getByRole('button', { name: /Daybreak/ })).toHaveAttribute('aria-pressed', 'false');
     assert.deepEqual(errors, []);
-    console.log(`${width}x${height}: search, provider filter, toggle persistence and provider switch passed`);
+    console.log(`${width}x${height}: search, provider filter, toggle persistence, per-model ultra availability and safe effort reset passed`);
     await page.close();
   }
 } finally { await browser?.close(); await server.close(); }

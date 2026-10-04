@@ -17,7 +17,7 @@ const legacy = { async call(method: string) {
 } };
 const retained = await loadModelCatalog(legacy, 'old-pc');
 assert.deepEqual(retained.models, ['saved-model']); assert.equal(retained.state, 'stale');
-assert.match(retained.warning!, /해당 PC의 Mr.Robot을 업데이트/);
+assert.match(retained.warning!, /해당 PC의 V.E.R.A를 업데이트/);
 let failedCalls = 0;
 await assert.rejects(loadModelCatalog({ async call() { failedCalls++; throw Error('unauthorized'); } }, 'remote'), /unauthorized/);
 assert.equal(failedCalls, 1);

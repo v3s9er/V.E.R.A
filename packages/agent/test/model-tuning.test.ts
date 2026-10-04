@@ -62,6 +62,14 @@ test('subscription capabilities reject unsupported weight, output and sampling c
   assert.equal(resolveModelTuning({ ...profile, responseStyle: 'concise', contextTokenLimit: 4096, helperMode: 'off', maxParallelHelpers: 1 }, cli).helperMode, 'off');
 });
 
+test('ultra tuning is valid only for an adapter with verified model support', () => {
+  const ultra = { ...profile, reasoningEffort: 'ultra' as const };
+  assert.equal(normalizeProviderTuningSettings({ profiles: [ultra] }).profiles[0].reasoningEffort, 'ultra');
+  assert.equal(resolveModelTuning(ultra, { ...cli, supportedReasoning: ['auto', 'ultra'] }).reasoningEffort, 'ultra');
+  assert.throws(() => resolveModelTuning(ultra, { ...cli, supportedReasoning: ['auto', 'max'] }), /지원하지/);
+  assert.throws(() => resolveModelTuning(ultra, { ...cli, supportedReasoning: ['auto'] }), /지원하지/);
+});
+
 test('sampling controls use actual verified model and endpoint capabilities', () => {
   const sampling = { ...profile, reasoningEffort: 'none' as const, temperature: 0.4 };
   assert.equal(resolveModelTuning(sampling, api).temperature, 0.4);

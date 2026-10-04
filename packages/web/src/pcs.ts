@@ -2,7 +2,7 @@ import { DESKTOP_LOCAL_AUTH_TOKEN, parsePairingPayload } from './rpc';
 
 /**
  * Multi-PC registry for the current browser session. Each entry holds everything
- * needed to reach one Mr.Robot agent: host, port and its pairing secret.
+ * needed to reach one V.E.R.A agent: host, port and its pairing secret.
  * The web UI can register any number of PCs and switch between them.
  */
 

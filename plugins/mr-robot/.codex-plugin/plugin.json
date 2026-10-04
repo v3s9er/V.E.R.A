@@ -8,16 +8,16 @@
   "keywords": ["hosting", "html", "publisher", "cloudflare", "web-pages"],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Mr. Robot",
+    "displayName": "V.E.R.A",
     "shortDescription": "Save, edit, preview, and publish page code.",
-    "longDescription": "Mr. Robot manages a versioned library of small HTML, CSS, and JavaScript sites and prepares them for Cloudflare Workers publishing.",
+    "longDescription": "V.E.R.A manages a versioned library of small HTML, CSS, and JavaScript sites and prepares them for Cloudflare Workers publishing.",
     "developerName": "v3s9er",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Write"],
     "defaultPrompt": [
       "Publish this HTML as a new page.",
       "Update my saved page with this code.",
-      "List my Mr. Robot pages and their status."
+      "List my V.E.R.A pages and their status."
     ],
     "brandColor": "#111827"
   }

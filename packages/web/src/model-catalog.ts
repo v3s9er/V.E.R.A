@@ -10,7 +10,7 @@ export async function loadModelCatalog(client: CatalogClient, id: string, refres
     if (!(error instanceof Error) || error.message !== 'unknown method: providers.catalog') throw error;
     const models = await client.call('providers.models', { id, refresh }) as string[];
     return { models, source: 'provider', state: 'stale', lastUpdatedAt: null, lastAttemptAt: null,
-      warning: '연결된 PC는 모델 갱신 상태를 제공하지 않는 구버전입니다. 해당 PC의 Mr.Robot을 업데이트하세요.' };
+      warning: '연결된 PC는 모델 갱신 상태를 제공하지 않는 구버전입니다. 해당 PC의 V.E.R.A를 업데이트하세요.' };
   }
 }
 

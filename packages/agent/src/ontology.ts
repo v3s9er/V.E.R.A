@@ -1,4 +1,5 @@
 import type { MemoryItem, KnowledgeMetrics } from '@mr-robot/shared';
+import { KnowledgeIndex, entityEdges } from './ontology-index.js';
 
 type Triple = NonNullable<MemoryItem['relation']>;
 export interface KnowledgeFact extends Triple { evidence: string[]; rules: string[]; status: 'asserted' | 'inferred' | 'unresolved' }
@@ -8,8 +9,6 @@ const key = (t: Triple) => JSON.stringify([t.subject, t.predicate, t.object]);
 const pair = (t: Triple) => JSON.stringify([t.subject, t.predicate]);
 const functional = new Set(['located_in', 'owner', 'status']);
 const transitive = new Set(['subclass_of', 'part_of', 'depends_on']);
-// Literal values such as status=ready must not become graph join keys.
-const entityEdges = new Set(['is_a', 'subclass_of', 'part_of', 'depends_on', 'requires', 'disjoint_with', 'owner', 'located_in']);
 const MAX_ASSERTIONS = 128, MAX_FACTS = 512, MAX_CONTEXT_BYTES = 7000;
 const terms = (s: string) => [...new Set(s.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter(Boolean).flatMap(token => {
   // Keep the original as well: this is recall assistance, not entity identity rewriting.
@@ -32,44 +31,118 @@ function scorer(queryTerms: string[]) {
 }
 const union = (...sets: string[][]) => [...new Set(sets.flat())].sort();
 
+/** An asserted edge is cyclic exactly when its target can reach its source
+ * through the same transitive predicate. Admission bounds this search to 128
+ * claims. Record every cyclic premise, even if one chosen closure proof never
+ * happened to use it; retain only one concrete witness per entity/predicate. */
+function cyclicPremises(assertions: readonly KnowledgeFact[]): { blocked: Set<string>; conflicts: KnowledgeConflict[] } {
+  const byPredicate = new Map<string, KnowledgeFact[]>();
+  for (const fact of assertions) if (transitive.has(fact.predicate)) {
+    const group = byPredicate.get(fact.predicate);
+    if (group) group.push(fact); else byPredicate.set(fact.predicate, [fact]);
+  }
+  const blocked = new Set<string>(), conflicts = new Map<string, KnowledgeConflict>();
+  for (const [predicate, edges] of byPredicate) {
+    const outgoing = new Map<string, KnowledgeFact[]>();
+    for (const edge of edges.sort((a, b) => key(a).localeCompare(key(b)))) {
+      const list = outgoing.get(edge.subject);
+      if (list) list.push(edge); else outgoing.set(edge.subject, [edge]);
+    }
+    for (const edge of edges) {
+      const previous = new Map<string, KnowledgeFact | undefined>([[edge.object, undefined]]);
+      const queue = [edge.object];
+      for (let i = 0; i < queue.length && !previous.has(edge.subject); i++) {
+        for (const next of outgoing.get(queue[i]) ?? []) if (!previous.has(next.object)) {
+          previous.set(next.object, next); queue.push(next.object);
+        }
+      }
+      if (!previous.has(edge.subject)) continue;
+      edge.evidence.forEach(id => blocked.add(id));
+      const path = [edge.evidence];
+      let cursor = edge.subject;
+      while (cursor !== edge.object) {
+        const step = previous.get(cursor)!;
+        path.push(step.evidence); cursor = step.subject;
+      }
+      const evidence = union(...path), id = pair(edge);
+      const known = conflicts.get(id);
+      if (!known || evidence.length < known.evidence.length) conflicts.set(id, { kind: 'cycle', subject: edge.subject, predicate, evidence });
+    }
+  }
+  return { blocked, conflicts: [...conflicts.values()] };
+}
+
+/** Keep only the best k candidates; sorting the entire memory on every query
+ * costs O(n log n) and a recency cutoff can hide the only relevant old proof. */
+function retainBest<T>(items: T[], item: T, limit: number, compare: (a: T, b: T) => number): void {
+  if (!limit || (items.length === limit && compare(item, items[items.length - 1]) >= 0)) return;
+  let low = 0, high = items.length;
+  while (low < high) { const mid = (low + high) >>> 1; if (compare(item, items[mid]) < 0) high = mid; else low = mid + 1; }
+  items.splice(low, 0, item);
+  if (items.length > limit) items.pop();
+}
+
 /** Pure, read-only, bounded rules over explicitly saved facts. Never an authority engine. */
 export function retrieveKnowledge(items: readonly MemoryItem[], query: string): KnowledgeResult {
   const start = performance.now();
+  return retrieveFromIndex(new KnowledgeIndex(items), query, start);
+}
+
+/** Reuse only a host-owned immutable index with the requested workspace/ticket scope. */
+export function retrieveIndexedKnowledge(index: KnowledgeIndex, query: string): KnowledgeResult {
+  return retrieveFromIndex(index, query, performance.now());
+}
+
+function retrieveFromIndex(index: KnowledgeIndex, query: string, start: number): KnowledgeResult {
   const queryTerms = terms(query.slice(0, 16000));
   const scoreText = scorer(queryTerms);
-  const eligible = items.filter(i => i.relation && !i.supersededBy);
   const result: KnowledgeResult = { context: '', facts: [], conflicts: [], metrics: { asserted: 0, inferred: 0, conflicts: 0, contextBytes: 0, retrievalMs: 0, truncated: false } };
   const finish = () => { result.metrics.retrievalMs = Math.round((performance.now() - start) * 1000) / 1000; return result; };
-  if (!queryTerms.length || !eligible.length) return finish();
-  // Bound CPU before graph construction. Latest facts win admission, not truth.
-  const available = eligible.slice().sort((a,b) => b.updatedAt-a.updatedAt || a.id.localeCompare(b.id)).slice(0, 2048);
-  result.metrics.truncated = eligible.length > available.length;
-  const score = (item: MemoryItem) => {
-    const r = item.relation!;
-    const entity = `${norm(r.subject)} ${entityEdges.has(r.predicate) ? norm(r.object) : ''}`;
-    const rest = norm(`${r.predicate} ${item.text} ${item.tags.join(' ')}`);
-    return scoreText(entity,rest);
-  };
-  const ranked = available.map(item => ({ item, score: score(item), entityScore: scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`)) })).filter(x => x.score > 0).sort((a,b) => b.score-a.score || b.item.updatedAt-a.item.updatedAt || a.item.id.localeCompare(b.item.id));
-  if (!ranked.length) return finish();
+  if (!queryTerms.length || !index.size) return finish();
+  type Candidate = { item: MemoryItem; score: number };
+  const recentFirst = (a: MemoryItem, b: MemoryItem) => b.updatedAt-a.updatedAt || a.id.localeCompare(b.id);
+  const bestFirst = (a: Candidate, b: Candidate) => b.score-a.score || recentFirst(a.item,b.item);
+  const entitySeeds: Candidate[] = [], textSeeds: Candidate[] = [];
+  let entityMatches = 0, textMatches = 0;
+  // Exact-token postings avoid rescanning unrelated saved claims. Unicode
+  // substring queries retain a full candidate scan for unchanged recall.
+  for (const { item, score, entityScore } of index.matches(queryTerms)) {
+    if (entityScore > 0) { entityMatches++; retainBest(entitySeeds,{item,score},24,bestFirst); }
+    else if (score > 0) { textMatches++; retainBest(textSeeds,{item,score},24,bestFirst); }
+  }
+  const seeds = entitySeeds.length ? entitySeeds : textSeeds;
+  if (!seeds.length) return finish();
+  const seedMatches = entitySeeds.length ? entityMatches : textMatches;
   const selected = new Map<string, MemoryItem>();
   const entities = new Set<string>();
   const add = (item: MemoryItem) => { selected.set(item.id,item); entities.add(item.relation!.subject); if (entityEdges.has(item.relation!.predicate)) entities.add(item.relation!.object); };
-  const seeds = ranked.some(x => x.entityScore > 0) ? ranked.filter(x => x.entityScore > 0) : ranked;
-  for (const { item } of seeds.slice(0, 24)) add(item);
+  for (const { item } of seeds) add(item);
   // Connected facts, including contradictory values, not a full memory dump.
+  const visited = new Set<string>();
   for (let hop = 0; hop < 6; hop++) {
-    const frontier = new Set(entities);
-    let added = 0;
-    for (const item of available) {
-      if (selected.has(item.id)) continue;
-      const r = item.relation!;
-      if (!frontier.has(r.subject) && !(entityEdges.has(r.predicate) && frontier.has(r.object))) continue;
-      if (selected.size === MAX_ASSERTIONS) { result.metrics.truncated = true; break; }
-      add(item); added++;
+    const next: MemoryItem[] = [], seen = new Set<string>();
+    const capacity = MAX_ASSERTIONS-selected.size;
+    for (const entity of [...entities]) {
+      if (visited.has(entity)) continue;
+      visited.add(entity);
+      for (const item of index.neighbors(entity)) {
+        if (selected.has(item.id) || seen.has(item.id)) continue;
+        seen.add(item.id);
+        retainBest(next,item,capacity,recentFirst);
+      }
     }
-    if (!added) break;
-    if (hop === 5) result.metrics.truncated = true;
+    if (seen.size > next.length) result.metrics.truncated = true;
+    for (const item of next) add(item);
+    if (!next.length) break;
+    if (hop === 5 && [...entities].some(entity => !visited.has(entity)
+      && index.neighbors(entity).some(item => !selected.has(item.id)))) result.metrics.truncated = true;
+  }
+  // Disconnected positive matches beyond seed capacity were not examined.
+  if (seedMatches > seeds.length) {
+    const selectedMatches = [...selected.values()].filter(item => entitySeeds.length
+      ? scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`)) > 0
+      : scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`),norm(`${item.relation!.predicate} ${item.text} ${item.tags.join(' ')}`)) > 0).length;
+    if (selectedMatches < seedMatches) result.metrics.truncated = true;
   }
   const facts = new Map<string, KnowledgeFact>();
   for (const item of selected.values()) {
@@ -79,6 +152,7 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
     else facts.set(key(r), { ...r, evidence: [item.id], rules: [], status: 'asserted' });
   }
   result.metrics.asserted = facts.size;
+  const assertions = [...facts.values()];
   const blocked = new Set<string>();
   const groups = new Map<string, KnowledgeFact[]>();
   for (const f of facts.values()) if (functional.has(f.predicate)) groups.set(pair(f), [...(groups.get(pair(f)) ?? []), f]);
@@ -87,28 +161,48 @@ export function retrieveKnowledge(items: readonly MemoryItem[], query: string): 
     result.conflicts.push({ kind: 'single_value', subject: group[0].subject, predicate: group[0].predicate, evidence });
     evidence.forEach(id => blocked.add(id));
   }
-  const derive = (a: KnowledgeFact, b: KnowledgeFact, predicate: string, rule: string) => {
-    const next: KnowledgeFact = { subject: a.subject, predicate, object: b.object, evidence: union(a.evidence,b.evidence), rules: union(a.rules,b.rules,[rule]), status: 'inferred' };
-    if (facts.has(key(next))) return false;
-    if (next.evidence.length > 24) { result.metrics.truncated = true; return false; }
-    if (facts.size >= MAX_FACTS) { result.metrics.truncated = true; return false; }
-    facts.set(key(next),next); return true;
-  };
-  // Finite Horn-style closure; no eval, arbitrary predicates, permissions or model calls.
-  for (let round = 0; round < 8; round++) {
-    const snapshot = [...facts.values()].filter(f => !f.evidence.some(id => blocked.has(id)));
-    const outgoing = new Map<string, KnowledgeFact[]>();
-    for (const f of snapshot) outgoing.set(f.subject, [...(outgoing.get(f.subject) ?? []),f]);
-    let changed = false;
-    for (const a of snapshot) for (const b of outgoing.get(a.object) ?? []) {
-      if (a.predicate === 'is_a' && b.predicate === 'subclass_of') changed = derive(a,b,'is_a','type_inheritance') || changed;
-      if (transitive.has(a.predicate) && a.predicate === b.predicate) changed = derive(a,b,a.predicate,`${a.predicate}_transitivity`) || changed;
+  const close = (target: Map<string, KnowledgeFact>) => {
+    const derive = (a: KnowledgeFact, b: KnowledgeFact, predicate: string, rule: string) => {
+      const next: KnowledgeFact = { subject: a.subject, predicate, object: b.object, evidence: union(a.evidence,b.evidence), rules: union(a.rules,b.rules,[rule]), status: 'inferred' };
+      if (target.has(key(next))) return false;
+      if (next.evidence.length > 24) { result.metrics.truncated = true; return false; }
+      if (target.size >= MAX_FACTS) { result.metrics.truncated = true; return false; }
+      target.set(key(next),next); return true;
+    };
+    // Finite Horn-style closure; no eval, arbitrary predicates, permissions or model calls.
+    for (let round = 0; round < 8; round++) {
+      const snapshot = [...target.values()].filter(f => !f.evidence.some(id => blocked.has(id)));
+      const outgoing = new Map<string, KnowledgeFact[]>();
+      for (const f of snapshot) outgoing.set(f.subject, [...(outgoing.get(f.subject) ?? []),f]);
+      let changed = false;
+      for (const a of snapshot) for (const b of outgoing.get(a.object) ?? []) {
+        if (a.predicate === 'is_a' && b.predicate === 'subclass_of') changed = derive(a,b,'is_a','type_inheritance') || changed;
+        if (transitive.has(a.predicate) && a.predicate === b.predicate) changed = derive(a,b,a.predicate,`${a.predicate}_transitivity`) || changed;
+      }
+      if (!changed || target.size >= MAX_FACTS) break;
+      if (round === 7) result.metrics.truncated = true;
     }
-    if (!changed || facts.size >= MAX_FACTS) break;
-    if (round === 7) result.metrics.truncated = true;
+  };
+  close(facts);
+  const cycles = cyclicPremises(assertions);
+  result.conflicts.push(...cycles.conflicts);
+  if (cycles.blocked.size) {
+    cycles.blocked.forEach(id => blocked.add(id));
+    // Reconstruct once from clean assertions rather than enumerating competing
+    // paths. A bad first derivation must not poison a separate valid proof.
+    // Keep original claims and unresolved deductions for conflict disclosure.
+    const clean = new Map(assertions.filter(f => !f.evidence.some(id => blocked.has(id))).map(f => [key(f), f]));
+    close(clean);
+    const original = [...facts];
+    facts.clear();
+    for (const fact of assertions) facts.set(key(fact), fact);
+    for (const [id, fact] of [...clean, ...original]) {
+      if (facts.has(id)) continue;
+      if (facts.size >= MAX_FACTS) { result.metrics.truncated = true; continue; }
+      facts.set(id, fact);
+    }
   }
   const all = [...facts.values()];
-  for (const f of all) if (f.subject === f.object && transitive.has(f.predicate)) result.conflicts.push({ kind: 'cycle', subject: f.subject, predicate: f.predicate, evidence: f.evidence });
   const types = all.filter(f => f.predicate === 'is_a');
   const unresolvedTypes = new Set<string>();
   for (const disjoint of all.filter(f => f.predicate === 'disjoint_with')) {

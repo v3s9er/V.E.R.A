@@ -92,7 +92,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.6.17';
+export const VERSION = '0.7.0';
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -618,7 +618,7 @@ export class ChatRunAdmissionPolicy {
         ? this.options.adaptiveStandardCallTokens
         : this.options.adaptiveComplexCallTokens;
     const effortPercent: Record<ReasoningEffort, number> = {
-      none: 80, low: 80, auto: 100, medium: 125, high: 160, xhigh: 220, max: 300,
+      none: 80, low: 80, auto: 100, medium: 125, high: 160, xhigh: 220, max: 300, ultra: 300,
     };
     const effort = effortPercent[profile.reasoningEffort] ?? 100;
     const inputBytes = Number.isFinite(profile.inputBytes) ? Math.max(0, Math.floor(profile.inputBytes)) : 0;
@@ -735,6 +735,7 @@ export class AgentServer {
     models: (providerId) => providerId
       ? this.providersModels(providerId).then(models => [...new Set(models)].filter(model => typeof model === 'string' && model.length <= 200).slice(0, 1000))
       : this.registry.list().map(provider => ({ providerId: provider.id, type: provider.type, name: provider.label, model: provider.model, isDefault: provider.isDefault, supportedReasoning: provider.supportedReasoning })),
+    modelCatalog: providerId => this.registry.modelCatalog(providerId),
   });
   private readonly webCryptoObserverPlugin = createWebCryptoObserverPlugin({
     policyProvider: {
@@ -2000,10 +2001,10 @@ export class AgentServer {
     await closeDiscordSandboxes();
     this.revokeRemoteHandoff('agent stopped');
     this.scheduler.stop();
-    await this.revokeToolPortalAuthority('Mr.Robot Agent가 종료되었습니다.');
+    await this.revokeToolPortalAuthority('V.E.R.A Agent가 종료되었습니다.');
     for (const run of this.activeRuns.values()) run.session.cancel('shutdown');
     for (const transfer of this.activeHttpTransfers) {
-      if (!transfer.signal.aborted) transfer.abort(new Error('Mr.Robot Agent가 종료되어 전송을 중단했습니다.'));
+      if (!transfer.signal.aborted) transfer.abort(new Error('V.E.R.A Agent가 종료되어 전송을 중단했습니다.'));
     }
     this.activeHttpTransfers.clear();
     this.wsUpgradeTickets.clear();
@@ -2298,23 +2299,25 @@ export class AgentServer {
     h.set('providers.models', async (params, client) => { assertAdmin(client); return this.providersModels(str(p(params).id), p(params).refresh === true); });
     h.set('providers.catalog', async (params, client) => { assertAdmin(client); return this.registry.modelCatalog(str(p(params).id), p(params).refresh === true); });
     h.set('providers.updateModel', (params, client) => { assertAdmin(client); return this.providersUpdateModel(str(p(params).id), str(p(params).model)); });
-    h.set('providers.tuning.get', (params, client) => {
+    h.set('providers.tuning.get', async (params, client) => {
       assertAdmin(client);
       const id = str(p(params).id);
       const provider = this.registry.get(id);
       if (!provider) throw new Error('공급자를 찾을 수 없습니다.');
+      if (provider.type === 'codex-cli') await provider.models();
       const settings = this.config.getProviderTuning(id);
       let warning = this.config.getProviderTuningWarning(id);
       try { resolveModelTuning(activeTuningProfile(settings), provider); }
       catch (error) { warning = error instanceof Error ? error.message : '튜닝 설정을 확인하세요.'; }
       return { settings, capabilities: getTuningCapabilities(provider), warning };
     });
-    h.set('providers.tuning.set', (params, client) => {
+    h.set('providers.tuning.set', async (params, client) => {
       assertAdmin(client);
       const id = str(p(params).id);
       const provider = this.registry.get(id);
       if (!provider) throw new Error('공급자를 찾을 수 없습니다.');
       const settings = normalizeProviderTuningSettings(p(params).settings);
+      if (provider.type === 'codex-cli') await provider.models();
       resolveModelTuning(activeTuningProfile(settings), provider);
       return this.config.saveProviderTuning(id, settings);
     });

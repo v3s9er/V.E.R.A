@@ -447,7 +447,7 @@ function SslScannerPanel({ client, onCompleted, setGlobalError }: {
 
   return (
     <form className="workbench-form" onSubmit={prepare}>
-      <div className="workbench-engine"><span className={`status-dot ${engine?.ok === true ? 'ok' : 'off'}`} /><div><b>{asString(engine?.scanner) ?? 'Mr.Robot 독립 TLS 검사기'}</b><small>{asString(engine?.engine) ?? '로컬 TLS 엔진 상태 확인 중…'}</small></div><Badge tone="accent">단일 대상</Badge></div>
+      <div className="workbench-engine"><span className={`status-dot ${engine?.ok === true ? 'ok' : 'off'}`} /><div><b>{asString(engine?.scanner) ?? 'V.E.R.A 독립 TLS 검사기'}</b><small>{asString(engine?.engine) ?? '로컬 TLS 엔진 상태 확인 중…'}</small></div><Badge tone="accent">단일 대상</Badge></div>
       <div className="workbench-mode-picker" role="radiogroup" aria-label="TLS 검사 강도">
         <button type="button" role="radio" aria-checked={mode === 'quick'} className={mode === 'quick' ? 'active' : ''} disabled={busy} onClick={() => { setMode('quick'); setPending(null); }}><span>권장 · 최소 트래픽</span><b>빠른 점검</b><small>TLS 버전 4회 + 인증서 · 암호군 0회</small></button>
         <button type="button" role="radio" aria-checked={mode === 'standard'} className={mode === 'standard' ? 'active' : ''} disabled={busy} onClick={() => { setMode('standard'); setPending(null); }}><span>제한 탐색</span><b>표준 점검</b><small>빠른 점검 + 암호군 최대 12회</small></button>

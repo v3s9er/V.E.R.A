@@ -17,7 +17,7 @@ export function createTailscalePlugin(): MrRobotPlugin {
   return {
     manifest: {
       id: 'tailscale-connect', name: 'Tailscale Connect', version: '0.2.0', kind: 'transport', enabledByDefault: false,
-      description: '휴대폰·노트북을 외부망에서도 직접 연결하고 Mr.Robot 파일 전송을 운반합니다.',
+      description: '휴대폰·노트북을 외부망에서도 직접 연결하고 V.E.R.A 파일 전송을 운반합니다.',
       capabilities: ['transport.tailnet', 'files.peer-transfer'],
       permissions: ['network.client'],
       dependencies: [{ id: 'tailscale', name: 'Tailscale', required: true }],
