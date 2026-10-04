@@ -11,9 +11,16 @@ export function terminalRunUpdate(run: { phase?: ChatRunPhase; updatedAt?: numbe
   return run?.phase && ['completed', 'failed', 'cancelled'].includes(run.phase)
     ? { phase: run.phase, updatedAt: run.updatedAt ?? now } : { phase, updatedAt: now };
 }
+/** Exact host-owned protocol notice; never infer limits from arbitrary provider text. */
+export function isObservationLimitedStatus(status?: string): boolean {
+  return status === '도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.';
+}
 const TOOLS: Record<string, string> = {
   read_file: '파일 읽기', list_files: '폴더 확인', shell_exec: '명령 실행', write_file: '파일 수정',
-  native_agent: '네이티브 에이전트', screenshot: '화면 확인', mouse_click: '화면 조작',
+  native_agent: '네이티브 에이전트', native_command: '명령 실행', native_file_change: '파일 변경',
+  native_web_search: '웹 검색', native_image_view: '이미지 확인', native_mcp: 'MCP 도구',
+  native_host_tool: '연결 도구', native_function: '도구 호출', native_custom_tool: '코드 실행',
+  screenshot: '화면 확인', mouse_click: '화면 조작',
   desktop_open_browser: '브라우저 열기', desktop_windows: '앱 창 확인', desktop_observe: '화면 읽기', desktop_act: '화면 조작',
   web_search: '웹 검색', web_fetch: '웹 문서 읽기',
 };
@@ -94,12 +101,15 @@ export function mergeToolActivity<T extends { key: string; callId?: string; name
     if (event.callId && items.some(item => item.callId === event.callId)) return items;
     return [...items.slice(-63), event];
   }
-  const index = items.findIndex(item => (event.callId ? item.callId === event.callId : item.name === event.name) && item.status === 'start');
+  // An explicit failure can correct a provisional native completion for the
+  // same call. Never replay its start or let a late done erase the error.
+  const index = items.findIndex(item => (event.callId ? item.callId === event.callId : item.name === event.name)
+    && (item.status === 'start' || (!!event.callId && event.status === 'error' && item.status === 'done')));
   return index < 0 ? items : items.map((item, i) => i === index ? { ...item, status: event.status } : item);
 }
 export function runPresentation(run: {
   phase?: ChatRunPhase; activity?: ChatRunActivity[]; agents?: CoordinationAgent[];
-  activityTruncated?: boolean; activityHadErrors?: boolean;
+  activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean;
   startedAt?: number; updatedAt?: number; busy: boolean; status?: string;
 }, now = Date.now()) {
   const state = run.phase ?? (run.busy ? 'starting' : 'completed');
@@ -108,6 +118,8 @@ export function runPresentation(run: {
   const toolErrors = activity.filter(item => item.state === 'error').length;
   const errors = toolErrors + agents.filter(agent => agent.state === 'failed').length;
   const hasErrors = errors > 0 || run.activityHadErrors === true;
+  const observationLimited = run.observationLimited === true || isObservationLimitedStatus(run.status);
+  const observationNotice = observationLimited ? '일부 내부 도구 기록은 이 연결에서 제공되지 않습니다' : '';
   // Legacy hosts omit the flags. A full 32-row tail cannot establish that no
   // older work/errors existed, so never present it as complete run accounting.
   const partial = run.activityTruncated === true || (run.activityTruncated === undefined && activity.length >= 32);
@@ -126,7 +138,7 @@ export function runPresentation(run: {
         : queuedAgents ? '보조 작업 실행 대기' : state === 'working' ? '모델 응답 대기' : PHASES[state]
       : PHASES[state];
   const detail = terminal
-    ? [activity.length ? `${partial ? '최근 ' : ''}도구 ${finished}/${activity.length} 완료` : partial || hiddenErrorNotice ? '표시된 도구 기록 없음' : '도구 실행 없음',
+    ? [activity.length ? `${partial ? '최근 ' : observationLimited ? '관측된 ' : ''}도구 ${finished}/${activity.length} 완료` : partial || hiddenErrorNotice ? '표시된 도구 기록 없음' : observationLimited ? '관측된 도구 기록 없음' : '도구 실행 없음',
       agents.length ? `보조 작업 ${agents.filter(agent => agent.state === 'completed').length}/${agents.length} 완료` : '',
       errors ? `${partial || hiddenErrorNotice ? '표시된 ' : ''}오류 ${errors}개` : '', hiddenErrorNotice, historyNotice].filter(Boolean).join(' · ')
     : state === 'approval' ? '승인 또는 거절을 기다리고 있어요'
@@ -141,6 +153,6 @@ export function runPresentation(run: {
   const end = terminal ? run.updatedAt : now;
   const seconds = run.startedAt && end ? Math.max(0, Math.floor((end - run.startedAt) / 1000)) : undefined;
   const elapsed = seconds === undefined ? '' : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-  return { state, terminal, errors, hasErrors, historyNotice, heading,
+  return { state, terminal, errors, hasErrors, historyNotice, observationNotice, heading,
     detail: !terminal && hiddenErrorNotice ? `${detail} · ${hiddenErrorNotice}` : detail, elapsed };
 }

@@ -127,7 +127,7 @@ export interface LoopCallbacks {
   /** Trusted host policy, checked before every actual provider invocation. */
   beforeModelCall?(source: { providerId: string; model: string }): void;
   onText?(delta: string): void;
-  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string; elapsedMs?: number }): void;
+  onTool?(info: { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string; elapsedMs?: number; terminalCorrection?: true }): void;
   /** Ask the human to approve a destructive tool call (safety mode: confirm). */
   confirm?: ConfirmFn;
   onStatus?(status: string): void;

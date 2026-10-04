@@ -163,6 +163,8 @@ export interface NativeToolEvent {
   input: Record<string, never>;
   status: 'start' | 'done' | 'error';
   elapsedMs?: number;
+  /** Corrects a prior return-only completion; not a second terminal effect. */
+  terminalCorrection?: true;
 }
 
 export interface NativeToolResult {

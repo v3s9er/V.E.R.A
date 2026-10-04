@@ -77,6 +77,21 @@ react {
     autolinkLibrariesWithApp()
 }
 
+// Metro watchFolders do not register Gradle inputs outside the mobile root.
+// Track the shared workspace explicitly so incremental release bundles stay fresh.
+def mrRobotSharedRoot = new File(rootDir, '../../../packages/shared')
+tasks.withType(com.facebook.react.tasks.BundleHermesCTask).configureEach {
+    inputs.dir(new File(mrRobotSharedRoot, 'src'))
+        .withPropertyName('mrRobotSharedSources')
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.files(
+        new File(mrRobotSharedRoot, 'package.json'),
+        new File(mrRobotSharedRoot, 'tsconfig.json'),
+        new File(rootDir, '../../../tsconfig.base.json')
+    ).withPropertyName('mrRobotSharedConfig')
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+}
+
 /**
  * Set this to true in release builds to optimize the app using [R8](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization).
  */

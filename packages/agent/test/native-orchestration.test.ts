@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
@@ -15,14 +15,75 @@ import type { NativeAgentRequest, Turn } from '../src/ai/provider.js';
 import { nativeHistory } from '../src/ai/native-history.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/native-control-app-server.mjs', import.meta.url));
+async function withSyntheticCleanup(body: () => Promise<void>, retire: () => Promise<void>, cleanup: () => void) {
+  const failures: Error[] = [];
+  const capture = async (phase: string, action: () => void | Promise<void>) => {
+    try { await action(); return true; }
+    catch (cause) { failures.push(new Error(`Synthetic native fixture ${phase} failed`, { cause })); return false; }
+  };
+  // A previous 5s retirement timeout was inconclusive: the old finally could
+  // replace a body failure. Preserve both causes and identify each phase;
+  // never remove the workspace until the existing retirement guard succeeds.
+  await capture('body', body);
+  if (await capture('retirement', retire)) await capture('directory cleanup', cleanup);
+  if (failures.length > 1) throw new AggregateError(failures, 'Synthetic native fixture failed in multiple phases', { cause: failures[0] });
+  if (failures.length) throw failures[0];
+}
 async function sandbox(fn: (base: NativeAgentRequest, call: (req: NativeAgentRequest) => ReturnType<typeof pooledNativeCodex>) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), 'mrrobot-control-test-'));
   const base: NativeAgentRequest = { prompt: 'fixture', cwd: dir, permissionMode: 'read-only',
     session: { key: 'fixture-ticket', directory: dir, history: [], input: 'hello', instructions: 'fixture only', context: '' } };
   const call = (req: NativeAgentRequest) => pooledNativeCodex({ command: process.execPath, prefixArgs: [fixture], env: process.env, providerId: 'fixture', model: 'fixture', req });
-  try { await fn(base, call); }
-  finally { closeNativeWorkers(); await waitForCliRetirements(process.env); rmSync(dir, { recursive: true, force: true }); }
+  await withSyntheticCleanup(() => fn(base, call), async () => {
+    closeNativeWorkers(); await waitForCliRetirements(process.env);
+  }, () => {
+    const target = resolve(dir), parent = resolve(tmpdir()) + sep;
+    assert.ok(target.startsWith(parent) && target.slice(parent.length).startsWith('mrrobot-control-test-'));
+    rmSync(target, { recursive: true, force: true });
+  });
 }
+
+test('synthetic cleanup preserves a body failure while completing confirmed retirement', async () => {
+  const bodyFailure = new Error('synthetic body failure'), phases: string[] = [];
+  await assert.rejects(withSyntheticCleanup(async () => { phases.push('body'); throw bodyFailure; },
+    async () => { phases.push('retirement'); }, () => { phases.push('cleanup'); }), (error: Error) => {
+    assert.match(error.message, /fixture body failed/); assert.equal(error.cause, bodyFailure); return true;
+  });
+  assert.deepEqual(phases, ['body', 'retirement', 'cleanup']);
+});
+
+test('synthetic cleanup retains both body and retirement failures and does not remove a live workspace', async () => {
+  const bodyFailure = new Error('synthetic body failure'), retirementFailure = new Error('synthetic retirement timeout');
+  await assert.rejects(withSyntheticCleanup(async () => { throw bodyFailure; }, async () => { throw retirementFailure; },
+    () => { assert.fail('unconfirmed retirement must not permit directory removal'); }), (error: AggregateError) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors.map(item => item.cause), [bodyFailure, retirementFailure]);
+    assert.match(error.errors[0].message, /fixture body failed/);
+    assert.match(error.errors[1].message, /fixture retirement failed/);
+    assert.equal(error.cause, error.errors[0]); return true;
+  });
+});
+
+test('synthetic cleanup distinguishes a retirement-only failure from a failed test body', async () => {
+  const retirementFailure = new Error('synthetic retirement timeout');
+  await assert.rejects(withSyntheticCleanup(async () => {}, async () => { throw retirementFailure; },
+    () => { assert.fail('unconfirmed retirement must not permit directory removal'); }), (error: Error) => {
+    assert.match(error.message, /fixture retirement failed/); assert.equal(error.cause, retirementFailure); return true;
+  });
+});
+
+test('synthetic cleanup preserves body and directory-removal failures without changing successful cleanup', async () => {
+  const bodyFailure = new Error('synthetic body failure'), cleanupFailure = new Error('synthetic removal failure');
+  await assert.rejects(withSyntheticCleanup(async () => { throw bodyFailure; }, async () => {}, () => { throw cleanupFailure; }),
+    (error: AggregateError) => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(error.errors.map(item => item.cause), [bodyFailure, cleanupFailure]);
+      assert.match(error.errors[1].message, /fixture directory cleanup failed/); return true;
+    });
+  const phases: string[] = [];
+  await withSyntheticCleanup(async () => { phases.push('body'); }, async () => { phases.push('retirement'); }, () => { phases.push('cleanup'); });
+  assert.deepEqual(phases, ['body', 'retirement', 'cleanup']);
+});
 
 test('scheduler is FIFO, bounded, cancel-aware and rejects duplicate ownership', async () => {
   const scheduler = new NativeRunScheduler(1, 2);

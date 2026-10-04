@@ -28,6 +28,12 @@ const helperStates = [
   { agentId: 'tests', label: '테스트 범위 확인', providerId: 'demo', model: 'demo-balanced', state: 'running' as const, sequence: 4, turns: 1, status: '프로젝트 파일 읽는 중', usage: { promptTokens: 840, completionTokens: 160 } },
 ];
 let pending: { id: string; text: string; finish: (value: unknown) => void } | undefined;
+(window as any).runtimeFixture.setObservationLimited = (hadErrors = false) => {
+  if (!pending) return;
+  emit('chat.status', { conversationId: pending.id, status: '도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.' });
+  emit('chat.progress', { conversationId: pending.id, observationLimited: true, activityHadErrors: hadErrors, activityTruncated: false });
+  emit('chat.status', { conversationId: pending.id, status: '모델 처리 중 · FIXTURE_PRIVATE_STATUS' });
+};
 (window as any).runtimeFixture.setHelperState = (state: 'queued' | 'running' | 'completed') => {
   if (!pending) return;
   emit('chat.progress', { conversationId: pending.id, phase: 'working', activity: [], agents: helperStates.map(agent => ({ ...agent, state })) });

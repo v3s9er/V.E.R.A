@@ -214,3 +214,53 @@ These are design references, not imported implementations or promised effect siz
   varies decision protocol while fixing other debate parameters and finds that
   additional discussion rounds can hurt. Test independent drafts and a bounded
   verification step against single execution before increasing agent/round counts.
+
+- [Towards a Science of Scaling Agent Systems, version 3](https://arxiv.org/html/2512.08296v3)
+  compares task/architecture alignment across six agentic benchmarks. Coordination
+  can help decomposable work and hurt sequential work; its measured gains are not
+  universal routing thresholds. Keep static reasoning, interactive file/tool work,
+  and scoped-memory tests separate. Do not infer an orchestration advantage from
+  AIME or ARC accuracy alone.
+- [Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
+  motivates independent outcome checks, repeat consistency and isolated trial
+  state. The native functional smoke checks the resulting file hash and completed
+  helper, not a model's claim that it performed an action. All-repeat success is
+  reported separately from selecting a successful attempt.
+
+## Metadata-only report
+
+```powershell
+node --import tsx scripts/app-benchmark-report.ts PLAN.json REPORT.json NEW-SUMMARY.md
+```
+
+This offline command performs no model calls. It validates the canonical plan hash,
+the complete paired task schedule, model/effort/native-route agreement, persisted
+and streamed final agreement, usage accounting and cleanup evidence. Duplicate or
+unplanned samples fail validation; missing runs remain in the planned denominator.
+Unknown or capped usage is not treated as zero or an exact total. The Markdown
+contains only allowlisted aggregate metadata, never prompts, solutions, local
+paths, raw tool payloads or provider errors. Existing output files are not replaced.
+
+## Native observation limitations
+
+Native CLI code-mode calls are not always included in ordinary item notifications.
+Version 0.7.0 opts new Codex threads into raw item events where the CLI supports the
+field, immediately discards text/reasoning/arguments/results and retains only the
+bounded allowlisted `exec` lifecycle. Cold resume preserves the existing thread;
+it never starts a different conversation merely to improve logging. If that
+connection cannot enable raw events, PC/mobile show a persistent observation
+limitation rather than implying that zero observed tools means zero tool use.
+
+Older frozen evaluation bundles predate this correction. Their native tool counts
+can undercount code-mode execution. In the first eight completed ARC runs, a private
+metadata-only cross-check found matching provider final usage, checkpoints and
+report totals; the missing tool events did not imply duplicate token accounting.
+These historical scores must not be relabeled as measurements of the later bundle.
+
+The separate `test:native-observation-live` command defaults to plan-only and needs
+`--allow-account-usage yes` plus a new output directory for inference. It uses fresh
+app/profile/project state and normal desktop RPC, requests exactly `gpt-6-sol`,
+checks a random scratch-file SHA-256 artifact and one read-only completed helper,
+and cancels/settles only its own run on deadline. These deliberately prescribed
+operations are functional regression checks, not evidence of autonomous model
+quality or a public benchmark score.

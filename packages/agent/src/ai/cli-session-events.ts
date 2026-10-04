@@ -1,3 +1,51 @@
+const RAW_TOOL_NOTIFICATION = 'rawResponseItem/completed';
+const rawFailureStates = new Set(['failed', 'declined', 'cancelled', 'interrupted']);
+
+/** Drop raw model content at ingress, before correlation queues or consumers.
+ * Only the known code-mode exec wrapper is missing from ordinary lifecycle
+ * events. Other tools keep their existing native telemetry, without guessing
+ * from arguments, arbitrary names, reasoning, or output text.
+ */
+export function sanitizeNativeRawNotification(message: any): any | undefined {
+  if (typeof message?.method !== 'string' || !message.method.startsWith('rawResponse')) return message;
+  if (message.method !== RAW_TOOL_NOTIFICATION || message.id !== undefined) return undefined;
+  const item = message.params?.item;
+  if (item?.type !== 'custom_tool_call_output' && !(item?.type === 'custom_tool_call' && item.name === 'exec')) return undefined;
+  if (typeof item.call_id !== 'string' || !item.call_id || item.call_id.length > 200) return undefined;
+  return { method: RAW_TOOL_NOTIFICATION, params: {
+    threadId: message.params.threadId, turnId: message.params.turnId,
+    item: { type: item.type, call_id: item.call_id,
+      ...(item.type === 'custom_tool_call' ? { name: 'exec' } : {}),
+      ...(rawFailureStates.has(item.status) ? { status: item.status } : {}),
+    },
+  } };
+}
+
+/** Feed only correlated, sanitized notifications. Output arrival means the
+ * invocation returned, never that its arbitrary result proves success.
+ */
+export class NativeRawToolEvents {
+  private calls = new Map<string, { started: boolean; terminal?: string }>();
+  constructor(private emit: (method: string, item: { id: string; type: string; status?: string }) => void) {}
+  accept(item: { type: string; call_id: string; name?: string; status?: string }): void {
+    let call = this.calls.get(item.call_id);
+    if (!call) {
+      if (this.calls.size >= 2048) throw new Error('네이티브 도구 이벤트 한도를 초과했습니다.');
+      call = { started: false }; this.calls.set(item.call_id, call);
+    }
+    if (item.status && rawFailureStates.has(item.status)) call.terminal = item.status;
+    if (item.type === 'custom_tool_call_output') call.terminal ??= 'completed';
+    else if (item.type === 'custom_tool_call' && item.name === 'exec') {
+      if (!call.started) {
+        call.started = true;
+        this.emit('item/started', { id: item.call_id, type: 'customToolCall' });
+      }
+    }
+    if (call.started && call.terminal) this.emit('item/completed', { id: item.call_id, type: 'customToolCall', status: call.terminal });
+  }
+  clear(): void { this.calls.clear(); }
+}
+
 /** Correlates RPC responses before consuming asynchronous lifecycle events.
  * IDs are adopted ONLY from matching thread/start/resume and turn/start replies.
  * Notifications cannot select a thread or authorize a tool call.
@@ -58,10 +106,15 @@ export class CliSessionEvents {
   }
   /** False means ignored/queued; true means safe for the caller's event handler. */
   accept(m: any): boolean {
+    m = sanitizeNativeRawNotification(m);
+    if (!m) return false;
     if (typeof m.method !== 'string' || m.id !== undefined) return false;
     // Account notices and warnings can carry a threadId before thread/resume
     // finishes. They are not conversation output: ignore their payload entirely.
-    if (!/^(?:thread\/|item\/|turn\/)/.test(m.method)) return false;
+    if (!/^(?:thread\/|item\/|turn\/)/.test(m.method) && m.method !== RAW_TOOL_NOTIFICATION) return false;
+    if (m.method === RAW_TOOL_NOTIFICATION && (typeof m.params?.threadId !== 'string' || typeof m.params?.turnId !== 'string')) {
+      throw new Error('네이티브 도구 관측 식별자가 올바르지 않습니다.');
+    }
     const thread = m.params?.threadId ?? m.params?.thread?.id;
     if (thread != null) {
       if (!this.thread) {
@@ -76,7 +129,7 @@ export class CliSessionEvents {
     }
     const turn = m.params?.turnId ?? m.params?.turn?.id;
     if (turn != null && this.finished.has(turn)) return false;
-    if (!/^(?:item\/|turn\/|thread\/tokenUsage\/)/.test(m.method)) return false;
+    if (!/^(?:item\/|turn\/|thread\/tokenUsage\/)/.test(m.method) && m.method !== RAW_TOOL_NOTIFICATION) return false;
     if (this.turnRequest !== undefined) {
       this.enqueue(m);
       return false;

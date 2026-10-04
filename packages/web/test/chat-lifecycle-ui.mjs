@@ -15,7 +15,7 @@ try {
     await page.getByLabel('대화 이름').waitFor();
     await page.locator('.chat-input').fill('첫 번째 요청');
     await page.getByRole('button', { name: '보내기', exact: true }).click();
-    await page.locator('.run-panel').getByText('도구로 작업 중', { exact: true }).waitFor();
+    await page.locator('.run-panel.phase-working').waitFor();
     if (query.startsWith('cancel')) {
       await page.getByLabel('실행 중인 작업 중지').click();
       await page.waitForTimeout(3200);
@@ -28,7 +28,7 @@ try {
       await page.getByRole('button', { name: '보내기', exact: true }).waitFor();
       await page.locator('.chat-input').fill('두 번째 요청');
       await page.getByRole('button', { name: '보내기', exact: true }).click();
-      await page.locator('.run-panel').getByText('도구로 작업 중', { exact: true }).waitFor();
+      await page.locator('.run-panel.phase-working').waitFor();
       await page.waitForTimeout(4500);
       assert.equal(await page.getByLabel('실행 중인 작업 중지').count(), 1, 'late old RPC must not stop the new UI');
       assert.equal(await page.getByText('LATE_OLD_REPLY', { exact: true }).count(), 0);

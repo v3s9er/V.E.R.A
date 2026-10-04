@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activityLabel, executionPresentation, mergeToolActivity, runPresentation, runTimeline, terminalRunUpdate, timelineStateLabel } from '../../shared/src/run-presentation.js';
+import { activityLabel, executionPresentation, isObservationLimitedStatus, mergeToolActivity, runPresentation, runTimeline, terminalRunUpdate, timelineStateLabel } from '../../shared/src/run-presentation.js';
 import type { CoordinationAgent } from '../../shared/src/coordination.js';
 
 const helper = (state: CoordinationAgent['state'], overrides: Partial<CoordinationAgent> = {}): CoordinationAgent => ({
@@ -11,6 +11,9 @@ const helper = (state: CoordinationAgent['state'], overrides: Partial<Coordinati
 test('progress reports actual tools, waiting, approvals and failures without fabricated reasoning', () => {
   assert.equal(activityLabel('{"token":"private"}'), '도구 작업');
   assert.equal(activityLabel('read_file'), '파일 읽기');
+  assert.equal(activityLabel('native_custom_tool'), '코드 실행');
+  assert.equal(activityLabel('native_command'), '명령 실행');
+  assert.equal(activityLabel('native_file_change'), '파일 변경');
   assert.equal(runPresentation({ busy: true }).detail, '모델 응답을 기다리고 있어요');
   assert.match(runPresentation({ busy: true, phase: 'approval' }).detail, /승인 또는 거절/);
   assert.match(runPresentation({ busy: true, phase: 'working', activity: [{ id: 'a', label: 'read_file', state: 'running', startedAt: 1 }] }).detail, /파일 읽기/);
@@ -35,6 +38,21 @@ test('tool rows are immutable and duplicate call events cannot duplicate a row',
   assert.equal(started[0].status, 'start');
   assert.equal(ended[0].status, 'done');
   assert.equal(mergeToolActivity(ended, event)[0].status, 'done');
+});
+
+test('same-call explicit failure corrects provisional success and cannot be downgraded by replay', () => {
+  const event = { key: 'exec1', callId: 'native-1', name: 'native_custom_tool', status: 'start' as const };
+  const started = mergeToolActivity<Omit<typeof event, 'status'> & { status: 'start' | 'done' | 'error' }>([], event);
+  const done = mergeToolActivity(started, { ...event, status: 'done' });
+  const failed = mergeToolActivity(done, { ...event, status: 'error' });
+  assert.equal(done[0].status, 'done');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].status, 'error');
+  assert.equal(mergeToolActivity(failed, { ...event, status: 'done' }), failed);
+  assert.equal(mergeToolActivity(failed, event), failed);
+  assert.equal(mergeToolActivity(failed, { ...event, status: 'error' }), failed);
+  assert.equal(mergeToolActivity(done, { ...event, callId: 'other', status: 'error' }), done);
+  assert.equal(mergeToolActivity(done, { ...event, callId: undefined, status: 'error' }), done, 'uncorrelated legacy errors must not rewrite completed calls');
 });
 test('inline timeline stays chronological and bounded without reflecting raw tool payloads', () => {
   const activity = Array.from({ length: 40 }, (_, i) => ({ id: String(i), label: i === 39 ? '{"secret":"TEST_ONLY"}' : 'read_file', startedAt: i, state: 'done' as const, input: 'PRIVATE_INPUT', output: 'PRIVATE_OUTPUT' })).reverse();
@@ -131,4 +149,35 @@ test('omitted error metadata never overrides visible errors or invents an exact 
   assert.doesNotMatch(missing.detail, /도구 실행 없음|오류 [0-9]+개/);
   assert.match(missing.detail, /전체 내역 일부 생략/);
   assert.equal(runPresentation({ busy: false, phase: 'completed', activity, activityHadErrors: false }).hasErrors, true);
+});
+
+test('observation limitation recognizes only the exact host marker, never provider prose or payloads', () => {
+  const marker = '도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.';
+  assert.equal(isObservationLimitedStatus(marker), true);
+  for (const status of [undefined, '', `${marker} PRIVATE_OUTPUT`, `PRIVATE_PREFIX ${marker}`, '도구 관측 제한', '{"reasoning":"PRIVATE_CHAIN"}']) {
+    assert.equal(isObservationLimitedStatus(status), false);
+    const view = runPresentation({ busy: true, phase: 'working', status });
+    assert.equal(view.observationNotice, '');
+    assert.doesNotMatch(JSON.stringify(view), /PRIVATE_/);
+  }
+  assert.equal(runPresentation({ busy: true, status: marker }).observationNotice, '일부 내부 도구 기록은 이 연결에서 제공되지 않습니다');
+});
+
+test('sticky observation limitation survives generic statuses without changing verification, errors or clipping', () => {
+  const run = { busy: true, phase: 'working' as const, observationLimited: true, activityTruncated: false };
+  const expected = '일부 내부 도구 기록은 이 연결에서 제공되지 않습니다';
+  assert.equal(runPresentation({ ...run, status: '답변 작성 중 PRIVATE_STATUS' }).observationNotice, expected);
+  const verifying = runPresentation({ ...run, status: '최종 검증 시작 · PRIVATE_LABEL' });
+  assert.equal(verifying.heading, '최종 결과 검토 중');
+  assert.equal(verifying.observationNotice, expected);
+  assert.equal(verifying.historyNotice, '');
+  assert.equal(verifying.hasErrors, false);
+  const completed = runPresentation({ ...run, busy: false, phase: 'completed', activityHadErrors: true });
+  assert.equal(completed.heading, '응답 완료 · 실행 오류 확인');
+  assert.equal(completed.observationNotice, expected);
+  assert.doesNotMatch(completed.detail, /도구 실행 없음/);
+  const noEvents = runPresentation({ ...run, busy: false, phase: 'completed' });
+  assert.equal(noEvents.detail, '관측된 도구 기록 없음');
+  assert.equal(runPresentation({ busy: false, phase: 'completed', activityTruncated: true }).observationNotice, '');
+  assert.equal(runPresentation({ busy: true, phase: 'starting', observationLimited: false }).observationNotice, '');
 });

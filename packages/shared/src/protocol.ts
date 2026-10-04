@@ -425,6 +425,8 @@ export interface ChatRunState {
   activityTruncated?: boolean;
   /** Sticky observed-error evidence, including errors no longer in activity. Missing is unknown. */
   activityHadErrors?: boolean;
+  /** Host-confirmed transport limitation, distinct from bounded activity history. */
+  observationLimited?: boolean;
   partialText?: string;
   partialTextTruncated?: boolean;
   agents?: import('./coordination.js').CoordinationAgent[];

@@ -183,6 +183,7 @@ export interface ChatRunState {
   activity?: Array<{ id: string; label: string; state: 'running' | 'done' | 'error'; startedAt: number; finishedAt?: number }>;
   activityTruncated?: boolean;
   activityHadErrors?: boolean;
+  observationLimited?: boolean;
   partialText?: string;
   partialTextTruncated?: boolean;
   agents?: Array<{

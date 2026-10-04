@@ -91,6 +91,50 @@ test('tool metrics reset per request, count start events only and ignore older t
   assert.equal(traces[1].firstTextMs, undefined, 'Absent observation must not fabricate zero latency.');
 }));
 
+test('late native failure corrects progress without completing another tool or double-counting duration', () => withServer(async (server, handlers, client, events) => {
+  const traces: RoutingTrace[] = [], pending: boolean[] = [];
+  server.telemetry.record = (trace: RoutingTrace) => traces.push(trace);
+  server.runJournal.tool = (_runId: string, value: boolean) => pending.push(value);
+  server.loop.run = async (history: Turn[], text: string, callbacks: any) => {
+    callbacks.onTool({ name: 'native_custom_tool', callId: 'a', input: {}, status: 'start' });
+    callbacks.onTool({ name: 'native_custom_tool', callId: 'a', input: {}, status: 'done', elapsedMs: 10 });
+    callbacks.onTool({ name: 'native_command', callId: 'b', input: {}, status: 'start' });
+    callbacks.onTool({ name: 'native_custom_tool', callId: 'a', input: {}, status: 'error', terminalCorrection: true, elapsedMs: 20 });
+    const snapshot = (await handlers.get('chat.runs')({}, client))[0];
+    assert.deepEqual(snapshot.activity.map((item: any) => item.state), ['error', 'running']);
+    callbacks.onTool({ name: 'native_command', callId: 'b', input: {}, status: 'done', elapsedMs: 2 });
+    return { text: 'Fixture result', turns: [...history, { role: 'user', content: text }, { role: 'assistant', content: 'Fixture result' }], usage, route };
+  };
+  const result = await handlers.get('chat.start')({ text: 'Synthetic lifecycle' }, client);
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(pending, [true, false, true, true, false]);
+  assert.equal(traces[0].toolCalls, 2);
+  assert.equal(traces[0].toolElapsedMs, 12);
+  const final = events.filter(item => item.event === 'chat.progress').at(-1)!.data;
+  assert.equal(final.activityHadErrors, true);
+  assert.deepEqual(final.activity.map((item: any) => item.state), ['error', 'done']);
+}));
+
+test('chat status keeps observation limitation in authorized reattach and terminal progress, but resets per run', () => withServer(async (server, handlers, client, events) => {
+  let turn = 0;
+  server.loop.run = async (history: Turn[], text: string, callbacks: any) => {
+    if (++turn === 1) callbacks.onStatus('도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.');
+    callbacks.onStatus('Synthetic generic progress');
+    const snapshot = (await handlers.get('chat.runs')({}, client))[0];
+    assert.equal(snapshot.observationLimited, turn === 1);
+    assert.equal(snapshot.phase, 'starting');
+    assert.equal(snapshot.activityHadErrors, false);
+    assert.equal(snapshot.activityTruncated, false);
+    return { text: 'Fixture result', turns: [...history, { role: 'user', content: text }, { role: 'assistant', content: 'Fixture result' }], usage, route };
+  };
+  const first = await handlers.get('chat.start')({ text: 'Synthetic limited connection' }, client);
+  assert.equal(first.ok, true, first.error);
+  assert.equal(events.filter(item => item.event === 'chat.progress').at(-1)!.data.observationLimited, true);
+  const second = await handlers.get('chat.start')({ text: 'Next fixture', conversationId: first.conversationId }, client);
+  assert.equal(second.ok, true, second.error);
+  assert.equal(events.filter(item => item.event === 'chat.progress').at(-1)!.data.observationLimited, false);
+}));
+
 test('failed chat retains its real provider error and partial usage despite telemetry persistence failure', () => withServer(async (server, handlers, client, events, errors) => {
   const traces: RoutingTrace[] = [];
   server.telemetry.record = (trace: RoutingTrace) => { traces.push(trace); throw new Error('synthetic telemetry failure'); };

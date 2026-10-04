@@ -14,6 +14,7 @@
 .run-panel-heading { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .run-panel-heading b { font-size: 12px; font-weight: 600; }
 .run-panel-heading small { font-size: 11px; color: #9da8bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-panel-heading .run-observation-notice { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
 .run-panel-chevron { color: #9da8bd; transition: transform .15s; }
 .run-panel[open] .run-panel-chevron { transform: rotate(180deg); }
 .run-panel-content { max-height: min(280px, 38dvh); overflow: auto; overscroll-behavior: contain; border: 1px solid #ffffff20; background: #191e2a; border-radius: 12px; box-shadow: 0 8px 28px #0006; position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; z-index: 30; }

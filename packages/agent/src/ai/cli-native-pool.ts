@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { daybreakProgram } from '@mr-robot/shared';
 import { classifyCliFailure } from './cli-failure.js';
-import { CliSessionEvents } from './cli-session-events.js';
+import { CliSessionEvents, NativeRawToolEvents, sanitizeNativeRawNotification } from './cli-session-events.js';
 import { NativeToolEvents } from './native-tool-events.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
@@ -87,7 +87,10 @@ class NativeWorker {
     steeringDisabled?: boolean; turnCompleted?: boolean; cancelling?: boolean; interruptTimer?: NodeJS.Timeout;
     toolAbort: AbortController; toolCalls: Set<string>; pendingTool?: string; toolTimer?: NodeJS.Timeout;
     toolEvents: NativeToolEvents;
+    rawToolEvents: NativeRawToolEvents;
   };
+  private rawEventsSupported = true;
+  private rawEventsActive = false;
   closed = false;
   lastUsed = Date.now();
   get busy() { return !!this.active; }
@@ -121,7 +124,10 @@ class NativeWorker {
       while (!this.closed && (end = this.buffer.indexOf('\n')) >= 0) {
         const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
         if (!line.trim()) continue;
-        try { this.receive(JSON.parse(line)); }
+        try {
+          const message = sanitizeNativeRawNotification(JSON.parse(line));
+          if (message) this.receive(message);
+        }
         catch (error) { this.close(error instanceof SyntaxError ? new Error('네이티브 세션 응답을 처리하지 못했습니다.') : error instanceof Error ? error : new Error('네이티브 연결 검증 오류'));
         }
       }
@@ -153,11 +159,13 @@ class NativeWorker {
         if (this.active) this.status(`${this.active.status.replace(/ · \d+초$/, '')} · ${Math.floor((Date.now() - startedAt) / 1000)}초`);
       }, 10_000);
       heartbeat.unref();
+      const toolEvents = new NativeToolEvents(req.onTool);
       this.active = { req, resolve, reject, abort, timer, heartbeat, startedAt, status: '', text: '', turn: '',
         baseline: this.checkpoint?.usage ?? emptyUsage(), total: this.checkpoint?.usage ?? emptyUsage(),
         usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Map(), streamed: new Map(), applied: [],
         timingStart, reused: !!this.checkpoint, timings: new Set(), output: '',
-        toolAbort: new AbortController(), toolCalls: new Set(), toolEvents: new NativeToolEvents(req.onTool) };
+        toolAbort: new AbortController(), toolCalls: new Set(), toolEvents,
+        rawToolEvents: new NativeRawToolEvents((method, item) => toolEvents.accept(method, item)) };
       this.mark('worker');
       this.active.unsubscribe = req.steering?.subscribe(() => this.steer());
       req.signal?.addEventListener('abort', abort, { once: true });
@@ -231,11 +239,15 @@ class NativeWorker {
     const req = this.active!.req;
     if (this.thread) { this.startTurn(); return; }
     const sandbox = req.permissionMode === 'full' ? 'danger-full-access' : req.permissionMode === 'workspace' ? 'workspace-write' : 'read-only';
+    // The protocol currently exposes this opt-in only on thread/start. Keep
+    // cold resumes intact rather than rebuilding a conversation for telemetry.
+    this.rawEventsActive = !this.checkpoint && this.rawEventsSupported;
     this.events.beginThread();
     this.send({ id: 2, method: this.checkpoint ? 'thread/resume' : 'thread/start', params: {
       ...(this.checkpoint ? { threadId: this.checkpoint.thread } : { ephemeral: false }),
       model: this.model, allowProviderModelFallback: false, cwd: req.cwd, approvalPolicy: 'never', sandbox,
       baseInstructions: req.session!.instructions,
+      ...(this.rawEventsActive ? { experimentalRawEvents: true } : {}),
       ...(!this.checkpoint && req.hostTools ? { dynamicTools: req.hostTools.tools.map(tool => ({
         type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters,
       })) } : {}),
@@ -243,6 +255,7 @@ class NativeWorker {
   }
   private startTurn() {
     const a = this.active!, s = a.req.session!;
+    if (!this.rawEventsActive) a.req.onStatus?.('도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.');
     this.mark('thread');
     const context = !this.checkpoint || this.checkpoint.context !== digest(s.context)
       ? `Current retained context (replaces prior retained context):\n${s.context || '(none)'}` : '';
@@ -287,6 +300,15 @@ class NativeWorker {
       this.finish(); this.steer(); return;
     }
     if (m.error) {
+      // Negotiate only this optional field, once per worker and strictly before
+      // a thread/turn exists. Never retry a failed model invocation or another
+      // invalid parameter, and do not add schema/catalog probes to the hot path.
+      if (m.id === 2 && !this.checkpoint && !this.thread && this.rawEventsActive
+        && m.error.code === -32602 && typeof m.error.message === 'string'
+        && /experimentalRawEvents/.test(m.error.message)
+        && /unknown|unrecognized|unsupported|not supported|unexpected/i.test(m.error.message)) {
+        this.rawEventsSupported = false; this.openThread(); return;
+      }
       // A failed resume has not started a turn: safely rebuild from host history.
       // Never retry a failed turn automatically (it may already have side effects).
       if (m.id === 2 && this.checkpoint && !this.thread) {
@@ -322,7 +344,9 @@ class NativeWorker {
       return;
     }
     if (!this.events.accept(m)) return;
-    if (m.method === 'thread/tokenUsage/updated') {
+    if (m.method === 'rawResponseItem/completed') {
+      a.rawToolEvents.accept(m.params.item);
+    } else if (m.method === 'thread/tokenUsage/updated') {
       const u = m.params?.tokenUsage?.total;
       if (u) {
         a.total = { inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedInputTokens: u.cachedInputTokens ?? 0 };
@@ -406,6 +430,7 @@ class NativeWorker {
   }
   private release() { const a = this.active; if (a) {
     a.toolEvents.finish();
+    a.rawToolEvents.clear();
     clearTimeout(a.timer); clearInterval(a.heartbeat); clearTimeout(a.interruptTimer); clearTimeout(a.steering?.timer);
     a.unsubscribe?.(); a.req.signal?.removeEventListener('abort', a.abort);
     clearTimeout(a.toolTimer); a.toolAbort.abort(); a.req.hostTools?.dispose();

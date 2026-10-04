@@ -4,6 +4,7 @@ const read = (relativePath) => readFileSync(new URL(`../${relativePath}`, import
 const appConfig = JSON.parse(read('app.json'));
 const app = read('App.tsx');
 const manifest = read('android/app/src/main/AndroidManifest.xml');
+const androidBuild = read('android/app/build.gradle');
 const home = read('src/screens/HomeScreen.tsx');
 const chat = read('src/screens/ChatScreen.tsx');
 const rpc = read('src/rpc.ts');
@@ -11,10 +12,30 @@ const pcList = read('src/screens/PcListScreen.tsx');
 const settings = read('src/screens/SettingsScreen.tsx');
 const schedules = read('src/screens/SchedulesScreen.tsx');
 const types = read('src/types.ts');
+const runActivity = read('src/components/RunActivity.tsx');
 
 function check(description, condition) {
   if (!condition) throw new Error(`MOBILE UI CONTRACT FAILED: ${description}`);
 }
+
+check('Gradle bundle tasks track shared workspace sources and configuration outside the mobile root',
+  androidBuild.includes("def mrRobotSharedRoot = new File(rootDir, '../../../packages/shared')")
+  && androidBuild.includes('tasks.withType(com.facebook.react.tasks.BundleHermesCTask).configureEach')
+  && androidBuild.includes("inputs.dir(new File(mrRobotSharedRoot, 'src'))")
+  && androidBuild.includes("withPropertyName('mrRobotSharedSources')")
+  && androidBuild.includes("new File(mrRobotSharedRoot, 'package.json')")
+  && androidBuild.includes("new File(mrRobotSharedRoot, 'tsconfig.json')")
+  && androidBuild.includes("new File(rootDir, '../../../tsconfig.base.json')")
+  && androidBuild.includes("withPropertyName('mrRobotSharedConfig')")
+  && (androidBuild.match(/withPathSensitivity\(org\.gradle\.api\.tasks\.PathSensitivity\.RELATIVE\)/g) ?? []).length >= 2);
+
+check('run observation limits remain separate from phases and stay accessible in compact and expanded layouts',
+  types.includes('observationLimited?: boolean;')
+  && runActivity.includes('runPresentation({ ...run, busy }')
+  && runActivity.includes('view.observationNotice')
+  && runActivity.includes('compact && view.observationNotice')
+  && runActivity.includes('accessibilityHint={`${view.heading}. ${view.detail}. ${view.observationNotice}`}')
+  && chat.includes('mergeToolActivity(last.tools, event)'));
 
 check('Expo and the committed Android activity both resize the app viewport for the soft keyboard',
   appConfig.expo?.android?.softwareKeyboardLayoutMode === 'resize'

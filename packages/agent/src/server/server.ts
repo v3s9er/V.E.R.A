@@ -2639,13 +2639,14 @@ export class AgentServer {
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
             onTool: (info) => {
               if (info.status === 'start') { observedToolCalls++; pendingToolCount++; }
-              else pendingToolCount = Math.max(0, pendingToolCount - 1);
-              if (info.status !== 'start' && Number.isFinite(info.elapsedMs) && info.elapsedMs! >= 0) observedToolElapsedMs += info.elapsedMs!;
+              else if (!info.terminalCorrection) pendingToolCount = Math.max(0, pendingToolCount - 1);
+              if (info.status !== 'start' && !info.terminalCorrection && Number.isFinite(info.elapsedMs) && info.elapsedMs! >= 0) observedToolElapsedMs += info.elapsedMs!;
               this.runJournal.tool(progress.runId, pendingToolCount > 0);
               progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress();
             },
             onAgentUpdate: agent => { progress.agent(agent); publishProgress(); },
             onStatus: (status) => {
+              progress.status(status);
               const active = this.activeRuns.get(conversationId);
               if (active) active.status = status;
               sendRunEvent('chat.status', { conversationId, status });

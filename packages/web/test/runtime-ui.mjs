@@ -49,7 +49,7 @@ try {
       });
       await page.locator('.chat-input').fill('테스트 작업');
       await page.getByRole('button', { name: '보내기', exact: true }).click();
-      await page.locator('.run-panel').getByText('도구로 작업 중', { exact: true }).waitFor();
+      await page.locator('.run-panel.phase-working').waitFor();
       await check('running');
       await page.locator('.run-panel summary').click();
       await page.getByRole('list', { name: '실제 작업 기록' }).waitFor();

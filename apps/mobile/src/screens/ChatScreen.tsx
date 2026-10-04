@@ -3,7 +3,7 @@ import { ChatFiles } from '../components/ChatFiles';
 import { RunActivity } from '../components/RunActivity';
 import { RunTimeline } from '../components/RunTimeline';
 import { ToolHistory } from '../components/ToolHistory';
-import { terminalRunUpdate } from '../../../../packages/shared/src/run-presentation';
+import { mergeToolActivity, terminalRunUpdate } from '../../../../packages/shared/src/run-presentation';
 import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
 import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
@@ -483,21 +483,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         if ((data as { conversationId?: string }).conversationId !== activeId.current) return;
         const info = data as ToolEvent;
         flushDelta();
+        const event = { key: `${info.name}#${++toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: info.status };
         setMessages((items) => {
           const last = items[items.length - 1];
           if (!last || last.role !== 'assistant') return items;
-          let tools = last.tools;
-          if (info.status === 'start') {
-            toolCounter.current += 1;
-            tools = [...tools.slice(-63), { key: `${info.name}#${toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: 'start' }];
-          } else {
-            const idx = [...tools].reverse().findIndex((tool) => (info.callId ? tool.callId === info.callId : tool.name === info.name) && tool.status === 'start');
-            if (idx >= 0) {
-              const realIdx = tools.length - 1 - idx;
-              tools = tools.map((tool, index) => index === realIdx ? { ...tool, status: info.status } : tool);
-            }
-          }
-          return [...items.slice(0, -1), { ...last, tools }];
+          return [...items.slice(0, -1), { ...last, tools: mergeToolActivity(last.tools, event) }];
         });
         scrollIfFollowing();
       }),

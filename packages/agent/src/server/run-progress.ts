@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isObservationLimitedStatus } from '@mr-robot/shared';
 import type { ChatRunActivity, ChatRunPhase, ChatRunState, CoordinationAgent } from '@mr-robot/shared';
 
 const TERMINAL = new Set<ChatRunPhase>(['completed', 'failed', 'cancelled']);
@@ -12,6 +13,7 @@ export class RunProgress {
   private activity: ChatRunActivity[] = [];
   private activityTruncated = false;
   private activityHadErrors = false;
+  private observationLimited = false;
   private partialText = '';
   private partialTextTruncated = false;
   private firstTextAt?: number;
@@ -46,6 +48,11 @@ export class RunProgress {
   firstTextLatencyMs(): number | undefined {
     return this.firstTextAt === undefined ? undefined : Math.max(0, this.firstTextAt - this.startedAt);
   }
+  status(status: string): void {
+    if (TERMINAL.has(this.phase) || this.observationLimited || !isObservationLimitedStatus(status)) return;
+    this.observationLimited = true;
+    this.updatedAt = this.now();
+  }
   tool(info: { name: string; status: 'start' | 'done' | 'error'; callId?: string }) {
     if (TERMINAL.has(this.phase) || this.phase === 'cancelling') return;
     this.transition('working');
@@ -54,11 +61,13 @@ export class RunProgress {
     this.activityHadErrors ||= info.status === 'error';
     const id = info.callId || info.name;
     if (info.status === 'start') {
+      if (info.callId && this.activity.some(item => item.id.slice(0, item.id.lastIndexOf(':')) === id)) return;
       this.activity.push({ id: `${id}:${++this.serial}`, label: info.name.slice(0, 100), state: 'running', startedAt: this.now() });
       this.activityTruncated ||= this.activity.length > 32;
       this.activity = this.activity.slice(-32);
     } else {
-      const item = this.activity.find(item => item.id.slice(0, item.id.lastIndexOf(':')) === id && item.state === 'running');
+      const item = this.activity.find(item => item.id.slice(0, item.id.lastIndexOf(':')) === id
+        && (item.state === 'running' || !!info.callId && info.status === 'error' && item.state === 'done'));
       if (item) { item.state = info.status; item.finishedAt = this.now(); }
     }
   }
@@ -73,9 +82,10 @@ export class RunProgress {
     });
     this.updatedAt = this.now();
   }
-  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'activityTruncated' | 'activityHadErrors' | 'partialText' | 'partialTextTruncated' | 'agents'> {
+  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'activityTruncated' | 'activityHadErrors' | 'observationLimited' | 'partialText' | 'partialTextTruncated' | 'agents'> {
     return { runId: this.runId, phase: this.phase, updatedAt: this.updatedAt,
       activity: this.activity.map(item => ({ ...item })), activityTruncated: this.activityTruncated, activityHadErrors: this.activityHadErrors,
+      observationLimited: this.observationLimited,
       partialText: this.partialText, partialTextTruncated: this.partialTextTruncated,
       agents: [...this.agents.values()].map(agent => ({ ...agent, usage: { ...agent.usage } })) };
   }

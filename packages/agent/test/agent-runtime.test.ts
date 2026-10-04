@@ -104,3 +104,37 @@ test('untruncated runs expose known false flags and terminal incomplete tools re
   run.tool({ name: 'read_file', callId: 'late', status: 'error' });
   assert.deepEqual(run.snapshot(), ended);
 });
+
+test('observation limitation is exact, run-local and sticky without changing phase or errors', () => {
+  const marker = '도구 관측 제한 · 이 연결에서는 일부 코드 실행이 집계되지 않을 수 있습니다.';
+  const run = new RunProgress();
+  assert.equal(run.snapshot().observationLimited, false);
+  run.status(`${marker} extra`);
+  assert.equal(run.snapshot().observationLimited, false);
+  run.transition('approval');
+  run.status(marker); run.status('working');
+  assert.equal(run.snapshot().phase, 'approval');
+  assert.equal(run.snapshot().observationLimited, true);
+  assert.equal(run.snapshot().activityHadErrors, false);
+  assert.equal(run.snapshot().activityTruncated, false);
+  run.transition('failed');
+  assert.equal(run.snapshot().observationLimited, true);
+  const terminal = run.snapshot(); run.status(marker);
+  assert.deepEqual(run.snapshot(), terminal);
+  assert.equal(new RunProgress().snapshot().observationLimited, false);
+});
+
+test('explicit same-call failure corrects a completed row without matching unrelated or legacy calls', () => {
+  const run = new RunProgress();
+  run.tool({ name: 'native_custom_tool', callId: 'returned', status: 'start' });
+  run.tool({ name: 'native_custom_tool', callId: 'returned', status: 'done' });
+  run.tool({ name: 'native_custom_tool', callId: 'running', status: 'start' });
+  run.tool({ name: 'native_custom_tool', callId: 'returned', status: 'error' });
+  run.tool({ name: 'native_custom_tool', callId: 'returned', status: 'done' });
+  run.tool({ name: 'native_custom_tool', callId: 'returned', status: 'start' });
+  assert.deepEqual(run.snapshot().activity!.map(item => item.state), ['error', 'running']);
+  assert.equal(run.snapshot().activityHadErrors, true);
+  run.tool({ name: 'legacy_tool', status: 'start' }); run.tool({ name: 'legacy_tool', status: 'done' });
+  run.tool({ name: 'legacy_tool', status: 'error' });
+  assert.equal(run.snapshot().activity!.at(-1)!.state, 'done');
+});
