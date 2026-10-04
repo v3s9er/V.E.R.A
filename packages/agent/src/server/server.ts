@@ -31,6 +31,7 @@ import type {
   DependencyInstallResult,
   WorkspaceInfo,
   ChatRunState,
+  ChatExecutionConfig,
   ChatUsage,
   SyncMergeResult,
 } from '@mr-robot/shared';
@@ -57,6 +58,7 @@ import { createDiscordPlugin } from '../plugins/discord.js';
 import { createLidDisplayPlugin } from '../plugins/lid-display.js';
 import { assertDiscordModelAllowed, parseDiscordModelCeiling } from '../plugins/discord-model-policy.js';
 import { createDockerPlugin } from '../plugins/docker.js';
+import { createManagedSandboxPlugin } from '../plugins/managed-sandbox.js';
 import { createCtfPlugin } from '../plugins/ctf.js';
 import { createMcpPlugin } from '../plugins/mcp.js';
 import { createVoicePlugin } from '../plugins/voice.js';
@@ -70,7 +72,7 @@ import { DependencyManager } from '../dependencies.js';
 import { ChatSession } from './chat.js';
 import { RunProgress } from './run-progress.js';
 import { RunJournal } from './run-journal.js';
-import { projectRunConflicts } from './project-runs.js';
+import { ProjectRunQueue } from './project-run-queue.js';
 import { resolveProjectWorkspace } from '@mr-robot/shared';
 import { ScreenStreamController } from './stream.js';
 import { WsHub, WsClient, WsUpgradeTickets, canUseAuditOnly, type AuthContext, type RpcHandler } from './ws.js';
@@ -92,7 +94,15 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.7.1';
+function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
+  return JSON.stringify({
+    providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
+    routingPresetId: value?.routingPresetId ?? null, reasoningEffort: value?.reasoningEffort ?? 'auto',
+    daybreakEnabled: value?.daybreakEnabled === true, permissionMode: value?.permissionMode ?? 'ask',
+    tokenPolicy: value?.tokenPolicy ?? 'adaptive',
+  });
+}
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
 const REMOTE_HANDOFF_TTL_MINUTES = 5;
 const REMOTE_HANDOFF_TTL_MAX_MINUTES = 24 * 60;
@@ -776,6 +786,8 @@ export class AgentServer {
   private boundHost = '127.0.0.1';
   private boundPort = 0;
   private busyConversations = new Set<string>();
+  private readonly projectRunQueue = new ProjectRunQueue();
+  private readonly configuringConversations = new Set<string>();
   private readonly runJournal: RunJournal;
   private activeRuns = new Map<string, {
     session: ChatSession;
@@ -786,6 +798,10 @@ export class AgentServer {
     ownerLinkId?: string;
     permissionMode: PermissionMode;
     workspaceId?: string;
+    effectiveConfig: ChatExecutionConfig;
+    savedConfig: string;
+    queued: boolean;
+    settled: Promise<void>;
   }>();
   private busSubscriptions: Array<() => void> = [];
 
@@ -1396,6 +1412,7 @@ export class AgentServer {
       isAdmin: auth?.isAdmin === true,
       deviceCapabilities,
       workspaceRoot,
+      scopeKey: auth?.isAdmin ? `plugin-rpc:administrator:${workspaceId ?? 'none'}` : auth?.linkId ? `plugin-rpc:device:${auth.linkId}:${workspaceId ?? 'none'}` : undefined,
       destructiveApproved: auth?.isAdmin === true || !this.plugins.isDestructive(name) || permissionMode === 'full' || narrowCapabilityAllowsWrite,
       approvalSource: this.plugins.isDestructive(name) ? 'policy' : 'not-required',
     });
@@ -1904,6 +1921,7 @@ export class AgentServer {
     await this.plugins.loadBuiltin(this.remoteLinkPlugin);
     await this.plugins.loadBuiltin(createTailscalePlugin());
     await this.plugins.loadBuiltin(createDockerPlugin());
+    await this.plugins.loadBuiltin(createManagedSandboxPlugin());
     await this.plugins.loadBuiltin(createCtfPlugin());
     await this.plugins.loadBuiltin(createMcpPlugin());
     await this.plugins.loadBuiltin(createVoicePlugin());
@@ -2376,7 +2394,9 @@ export class AgentServer {
     h.set('conversations.update', (params, client) => {
       assertContentWrite(client);
       const body = p(params);
-      if (this.busyConversations.has(str(body.id)) && body.daybreakEnabled !== undefined) throw new Error('작업을 마친 뒤 Daybreak 옵션을 변경하세요.');
+      if (this.configuringConversations.has(str(body.id))) throw new Error('이 대화의 실행 설정을 적용 중입니다. 잠시 후 다시 시도하세요.');
+      const activeRun = this.activeRuns.get(str(body.id));
+      if (activeRun) assertRunControl(client, activeRun);
       if (body.workspaceId !== undefined) {
         if (this.busyConversations.has(str(body.id))) throw new Error('작업 중에는 프로젝트를 바꿀 수 없습니다.');
         if (body.workspaceId && !this.config.workspaces.some(w => w.id === body.workspaceId)) throw new Error('프로젝트를 찾을 수 없습니다.');
@@ -2403,6 +2423,7 @@ export class AgentServer {
     });
     h.set('conversations.delete', (params, client) => {
       assertContentWrite(client);
+      if (this.busyConversations.has(str(p(params).id)) || this.configuringConversations.has(str(p(params).id))) throw new Error('작업을 중지한 뒤 대화를 삭제하세요.');
       const ok = this.conversations.delete(str(p(params).id));
       this.bus.emit('conversations.changed', this.conversations.list());
       return { ok };
@@ -2492,9 +2513,11 @@ export class AgentServer {
       // Validate attacker-controlled policy input and cheap busy conditions
       // before consuming an admission-window start.
       requestedTokenPolicy(body.tokenPolicy);
-      const session = client.state.chat;
-      if (session.busy) throw new Error('chat already running');
-      const requestedConversationId = str(body.conversationId) || session.conversationId;
+      // A connection can own several conversations; cancellation/approvals must
+      // belong to the run, never a shared per-socket busy flag.
+      const session = new ChatSession();
+      const requestedConversationId = str(body.conversationId) || client.state.chat.conversationId;
+      if (requestedConversationId && this.configuringConversations.has(requestedConversationId)) throw new Error('이 대화의 실행 설정을 적용 중입니다. 잠시 후 다시 시작하세요.');
       // Never silently replace an explicit stale ticket binding with a new ID.
       // The caller must repair/persist its binding before issuing a model run.
       if (requestedConversationId && !this.conversations.get(requestedConversationId)) throw new Error('conversation not found');
@@ -2522,6 +2545,7 @@ export class AgentServer {
       }
       if (this.busyConversations.has(conversationId)) throw new Error('conversation is already running on another client');
       session.conversationId = conversationId;
+      client.state.chat.conversationId = conversationId;
       const conversation = this.conversations.get(conversationId) as ConversationDetail;
       const discordIsolation = client.state.auth?.trustedDiscord === true && (body.discordIsolation === 'isolated' || body.discordIsolation === 'search');
       const isolation = discordIsolation ? createDiscordIsolation(conversationId, body.discordIsolation === 'search' || this.config.settings.safety.mode === 'read-only', body.discordAttachmentIds) : undefined;
@@ -2547,9 +2571,6 @@ export class AgentServer {
         conversation.tokenPolicy,
       );
       const runWorkspaceId = isolation ? undefined : workspace?.id;
-      if (projectRunConflicts(this.activeRuns.values(), { workspaceId: runWorkspaceId, permissionMode: effectivePermissionMode })) {
-        throw new Error('이 프로젝트에서 다른 작업이 실행 중입니다. 해당 대화에 지시를 추가하거나 작업을 마친 뒤 시작하세요. 서로 다른 프로젝트는 동시에 사용할 수 있습니다.');
-      }
       this.busyConversations.add(conversationId);
       session.begin();
       const runStartedAt = Date.now();
@@ -2574,6 +2595,17 @@ export class AgentServer {
         try { this.telemetry.record(trace); }
         catch (error) { this.logger.error(`failed to persist chat telemetry: ${error instanceof Error ? error.message : String(error)}`); }
       };
+      let markSettled!: () => void;
+      const settled = new Promise<void>(resolve => { markSettled = resolve; });
+      const effectiveConfig: ChatExecutionConfig = {
+        providerId: routingPresetId ? undefined : typeof body.providerId === 'string' ? body.providerId : conversation.providerId,
+        providerModel: routingPresetId ? undefined : typeof body.providerModel === 'string' ? body.providerModel : conversation.providerModel,
+        routingPresetId,
+        reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : conversation.reasoningEffort,
+        daybreakEnabled: conversation.daybreakEnabled === true,
+        permissionMode: effectivePermissionMode,
+        tokenPolicy: effectiveTokenPolicy,
+      };
       this.activeRuns.set(conversationId, {
         session,
         progress,
@@ -2583,6 +2615,7 @@ export class AgentServer {
         ownerLinkId: client.state.auth?.linkId,
         permissionMode: effectivePermissionMode,
         workspaceId: runWorkspaceId,
+        effectiveConfig, savedConfig: executionConfigKey(conversation), queued: false, settled,
       });
       const sendRunEvent = (event: string, data: unknown): void => {
         const run = this.activeRuns.get(conversationId);
@@ -2591,9 +2624,27 @@ export class AgentServer {
           if (target.state.authed && canControlRun(target, run)) target.sendEvent(event, { ...(data as object), runId: progress.runId });
         }
       };
-      const publishProgress = () => sendRunEvent('chat.progress', { conversationId, startedAt: progress.startedAt, ...progress.snapshot(), partialText: undefined });
+      const publishProgress = () => sendRunEvent('chat.progress', {
+        conversationId, startedAt: progress.startedAt, effectiveConfig,
+        queued: this.activeRuns.get(conversationId)?.queued,
+        pendingConfig: executionConfigKey(this.conversations.executionConfig(conversationId)) !== executionConfigKey(conversation),
+        ...progress.snapshot(), partialText: undefined,
+      });
       publishProgress();
+      let releaseProject: (() => void) | undefined;
       try {
+        releaseProject = await this.projectRunQueue.acquire({ workspaceId: runWorkspaceId, permissionMode: effectivePermissionMode }, session.signal(), () => {
+          const run = this.activeRuns.get(conversationId)!;
+          run.queued = true;
+          run.status = '같은 프로젝트의 선행 작업을 기다리는 중';
+          sendRunEvent('chat.status', { conversationId, status: run.status });
+          publishProgress();
+        });
+        session.signal()?.throwIfAborted();
+        const admittedRun = this.activeRuns.get(conversationId)!;
+        admittedRun.queued = false;
+        admittedRun.status = '시작 중';
+        publishProgress();
         const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const history = this.conversations.turns(conversationId);
@@ -2669,10 +2720,10 @@ export class AgentServer {
           },
           extraTools,
           {
-            providerId: routingPresetId ? undefined : typeof body.providerId === 'string' ? body.providerId : conversation.providerId,
-            providerModel: routingPresetId ? undefined : typeof body.providerModel === 'string' ? body.providerModel : conversation.providerModel,
-            reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : conversation.reasoningEffort,
-            daybreakEnabled: conversation.daybreakEnabled === true,
+            providerId: effectiveConfig.providerId ?? undefined,
+            providerModel: effectiveConfig.providerModel ?? undefined,
+            reasoningEffort: effectiveConfig.reasoningEffort,
+            daybreakEnabled: effectiveConfig.daybreakEnabled,
             context: retained,
             knowledgeLookup: !hasKnowledge ? undefined : async (query: string) => {
               session.signal()?.throwIfAborted();
@@ -2726,6 +2777,18 @@ export class AgentServer {
         const message = session.cancellationMessage() ?? (session.signal()?.aborted || /^작업이 중지되었습니다\.?$/i.test(rawMessage.trim())
           ? '작업이 중지되었습니다.'
           : rawMessage);
+        if (session.isReconfiguring() && !usagePersisted) {
+          try {
+            const partial = progress.snapshot().partialText;
+            this.conversations.appendResult(conversationId, [
+              ...this.conversations.turns(conversationId),
+              { role: 'user', content: text },
+              { role: 'assistant', content: [partial ? `[중단된 부분 응답 · 완료 결과가 아님]\n${partial}` : '', message].filter(Boolean).join('\n\n') },
+            ], chargedUsage ?? { promptTokens: 0, completionTokens: 0 }, { operationId: progress.runId });
+            usagePersisted = true;
+            this.bus.emit('conversations.changed', this.conversations.list());
+          } catch { this.logger.error('설정 변경으로 중단된 대화 기록을 저장하지 못했습니다. 자동 재실행하지 않습니다.'); }
+        }
         if (!usagePersisted && hasRecordedUsage(chargedUsage)) {
           try {
             this.conversations.appendUsage(conversationId, chargedUsage);
@@ -2757,8 +2820,60 @@ export class AgentServer {
         session.end();
         this.busyConversations.delete(conversationId);
         this.activeRuns.delete(conversationId);
+        releaseProject?.();
+        markSettled();
       }
       })().finally(() => admission.finish(chargedUsage));
+    });
+    h.set('chat.configure', async (params, client) => {
+      assertContentWrite(client);
+      const body = p(params);
+      const id = str(body.conversationId);
+      if (!id || !this.conversations.get(id)) throw new Error('conversation not found');
+      if (this.configuringConversations.has(id)) throw new Error('이 대화의 실행 설정을 적용 중입니다.');
+      const run = this.activeRuns.get(id);
+      if (run) assertRunControl(client, run);
+      if (body.expectedRunId !== undefined && (!run || body.expectedRunId !== run.progress.runId)) throw new Error('실행 중인 작업이 변경되었습니다. 상태를 새로 확인하세요.');
+      if (body.apply !== 'next-run' && body.apply !== 'stop-current') throw new Error('설정 적용 방식을 선택하세요.');
+      if (body.apply === 'stop-current' && run && body.expectedRunId !== run.progress.runId) throw new Error('중지할 작업의 실행 ID를 확인하세요.');
+      if (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch)) throw new Error('실행 설정 형식이 올바르지 않습니다.');
+      const patch = p(body.patch);
+      const allowed = new Set(['providerId', 'providerModel', 'routingPresetId', 'reasoningEffort', 'permissionMode', 'daybreakEnabled', 'tokenPolicy']);
+      if (Object.keys(patch).some(key => !allowed.has(key))) throw new Error('지원하지 않는 실행 설정입니다.');
+      for (const key of ['providerId', 'providerModel', 'routingPresetId']) {
+        if (patch[key] !== undefined && patch[key] !== null && (typeof patch[key] !== 'string' || (patch[key] as string).length > 512)) throw new Error('모델 설정 형식이 올바르지 않습니다.');
+      }
+      if (patch.reasoningEffort !== undefined && !['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(String(patch.reasoningEffort))) throw new Error('추론 설정이 올바르지 않습니다.');
+      if (patch.permissionMode !== undefined && !['read-only', 'ask', 'workspace', 'full'].includes(String(patch.permissionMode))) throw new Error('권한 설정이 올바르지 않습니다.');
+      if (patch.daybreakEnabled !== undefined && typeof patch.daybreakEnabled !== 'boolean') throw new Error('Daybreak 설정이 올바르지 않습니다.');
+      requestedTokenPolicy(patch.tokenPolicy);
+      if (body.apply === 'stop-current' && run) {
+        this.configuringConversations.add(id);
+        run.progress.transition('cancelling');
+        run.session.cancel('reconfigure');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            run.settled,
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('작업 중지를 아직 확인하지 못했습니다. 새 설정으로 작업을 재실행하지 않았습니다.')), 15_000); }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+          this.configuringConversations.delete(id);
+        }
+      }
+      // No automatic prompt replay: the cancelled task may already have written
+      // files or sent a message. The next user turn explicitly continues it.
+      const conversation = await h.get('conversations.update')!({ ...patch, id }, client);
+      const active = this.activeRuns.get(id);
+      const snapshot: ChatRunState | undefined = active ? {
+        conversationId: id, running: true, startedAt: active.startedAt, status: active.status,
+        steeringQueued: active.session.steeringQueued, ...active.progress.snapshot(),
+        effectiveConfig: { ...active.effectiveConfig }, queued: active.queued,
+        pendingConfig: active.savedConfig !== executionConfigKey(this.conversations.executionConfig(id)),
+      } : undefined;
+      if (snapshot) for (const target of this.hub?.clients ?? []) if (target.state.authed && canControlRun(target, active!)) target.sendEvent('chat.progress', snapshot);
+      return { conversation, application: body.apply === 'stop-current' && run ? 'stopped' : snapshot?.pendingConfig ? 'pending' : 'saved', run: snapshot };
     });
     h.set('chat.cancel', (params, client) => {
       const reason = client.state.auth?.trustedDiscord === true && ['discord-disconnected', 'discord-authority', 'discord-transport'].includes(str(p(params).reason))
@@ -2791,6 +2906,8 @@ export class AgentServer {
       .filter(([, run]) => canControlRun(client, run))
       .map(([conversationId, run]) => ({
         conversationId, running: true, startedAt: run.startedAt, status: run.status, steeringQueued: run.session.steeringQueued, ...run.progress.snapshot(),
+        effectiveConfig: { ...run.effectiveConfig }, queued: run.queued,
+        pendingConfig: run.savedConfig !== executionConfigKey(this.conversations.executionConfig(conversationId)),
       })));
     h.set('chat.pendingConfirm', (params, client) => {
       const conversationId = str(p(params).conversationId);

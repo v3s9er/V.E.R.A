@@ -63,6 +63,7 @@ export function ProfileMenu({
     {embedded && <div className="profile-shortcuts" aria-label="빠른 화면 이동">{SHORTCUTS.map((item) => <button key={item.key} type="button" title={LABELS[item.key]} aria-current={view === item.key ? 'page' : undefined} onClick={() => onChange(item.key)}><span>{item.icon}</span><small>{item.label}</small></button>)}</div>}
     {open && <div ref={popover} id={menuId} className="profile-popover" role="menu" aria-label="프로필 및 실행 PC">
       <div className="profile-popover-title">V.E.R.A</div>
+      <div className="profile-section-label" title="현재 표시 중인 화면 번들의 식별자입니다. 연결한 PC 에이전트 버전과 다를 수 있습니다.">화면 {typeof __VERA_CLIENT_VERSION__ === 'string' ? __VERA_CLIENT_VERSION__ : '개발'} · {typeof __VERA_CLIENT_BUILD__ === 'string' ? __VERA_CLIENT_BUILD__ : '미리보기'}</div>
       {(Object.keys(LABELS) as ViewKey[]).map((key) => key === view ? null :
         <button key={key} type="button" role="menuitem" className="profile-action" onClick={() => { onChange(key); setOpen(false); }}>{LABELS[key]}</button>)}
       {pcs.length > 1 && <div className="profile-section">
@@ -75,7 +76,7 @@ export function ProfileMenu({
         : <button type="button" role="menuitem" className="profile-action danger" disabled={switchingBlocked} title={switchingBlocked ? '작업 중에는 연결을 변경할 수 없습니다.' : undefined} onClick={() => { if (switchingBlocked) { onBlockedSwitch?.(); return; } onDisconnect(); setOpen(false); }}>{standalone ? '로컬 PC로 돌아가기' : '연결 관리'}</button>}
     </div>}
     <button ref={trigger} type="button" className="profile-trigger" onClick={() => setOpen((value) => !value)} aria-label="프로필 및 실행 PC 메뉴" aria-haspopup="menu" aria-controls={menuId} aria-expanded={open}>
-      <span className="profile-avatar">N</span>
+      <span className="profile-avatar">V</span>
       <span className="profile-copy"><b>{deviceName || 'V.E.R.A'}</b><small><span className={`status-dot ${connected ? 'ok' : 'off'}`} />{connected ? (desktopLocal ? '로컬 에이전트 · 준비됨' : '연결됨') : '연결 끊김'}</small></span>
       <span className="profile-more">•••</span>
     </button>

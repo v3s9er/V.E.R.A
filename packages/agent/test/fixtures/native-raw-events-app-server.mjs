@@ -21,6 +21,20 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (message.method !== 'turn/start') return;
   if (mode === 'unsupported' && starts !== 2) throw Error('unsupported opt-in needs one pre-turn fallback');
   const turnId = `turn-${++turnNumber}`, call = `exec-${turnNumber}`;
+  if (mode.startsWith('host-')) {
+    // Host labels are carried only by ordinary correlated item events.
+    for (const [index, tool] of ['browser_open', 'unregistered'].entries()) {
+      for (const method of ['item/started', 'item/completed']) send({ method, params: {
+        threadId: mode === 'host-other-thread' ? 'other-thread' : thread,
+        turnId: mode === 'host-other-turn' ? 'other-turn' : turnId,
+        item: { id: `host-${index}`, type: 'dynamicToolCall', tool, arguments: 'PRIVATE_ARGUMENTS', contentItems: ['PRIVATE_RESULT'] },
+      } });
+    }
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: 'item/completed', params: { threadId: thread, turnId, item: { id: `answer-${turnNumber}`, type: 'agentMessage', phase: 'final_answer', text: 'host fixture answer' } } });
+    send({ method: 'turn/completed', params: { threadId: thread, turn: { id: turnId, status: 'completed' } } });
+    return;
+  }
   if (rawEnabled) {
     if (turnNumber > 1) raw('turn-1', { type: 'custom_tool_call', call_id: 'stale', name: 'exec' });
     raw(turnId, { type: 'reasoning' });

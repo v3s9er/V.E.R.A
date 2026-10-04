@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
+import type { ChatConfigureResult, ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
-import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership, reasoningEffortsForModel } from '@mr-robot/shared';
+import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership, ConversationSaveBarrier, reasoningEffortsForModel, conversationDisplayTitle, groupProjectConversations, parseCollapsedProjects } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
@@ -15,6 +15,7 @@ import { RunActivityPanel } from '../components/RunActivityPanel.js';
 import { RunTimeline } from '../components/RunTimeline.js';
 import { activityLabel, mergeToolActivity, runPresentation, terminalRunUpdate } from '@mr-robot/shared';
 import { ModelPicker } from '../components/ModelPicker.js';
+import './ConversationNavigation.css';
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
 interface RouteInfo { providerLabel: string; model: string; role: string; effort: ReasoningEffort; reason: string; advisor?: { providerLabel: string; model: string } }
@@ -141,6 +142,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [space, setSpace] = useState<ConversationSpace>('personal');
   const spaceRef = useRef<ConversationSpace>('personal');
   const loadRequest = useRef(0);
+  const creatingConversation = useRef(false);
+  const navigationPendingRef = useRef(false);
+  const [navigationPending, setNavigationPending] = useState(false);
   spaceRef.current = space;
   const [messages, setMessages] = useState<UiMsg[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -161,7 +165,20 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [input, setInput] = useState('');
   const inputRef = useRef(input); inputRef.current = input;
   const drafts = useRef(new Map<string, string>());
+  const collapseKey = `vera:collapsed-projects:${activePc?.id ?? 'local'}`;
+  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
+    try { return parseCollapsedProjects(localStorage.getItem(collapseKey)); } catch { return []; }
+  });
+  useEffect(() => {
+    try { setCollapsedProjects(parseCollapsedProjects(localStorage.getItem(collapseKey))); } catch { setCollapsedProjects([]); }
+  }, [collapseKey]);
+  const toggleProjectGroup = (id: string): void => setCollapsedProjects(current => {
+    const next = current.includes(id) ? current.filter(item => item !== id) : [...current, id];
+    try { localStorage.setItem(collapseKey, JSON.stringify(next)); } catch { /* optional UI preference */ }
+    return next;
+  });
   const [runningIds, setRunningIds] = useState<string[]>([]);
+  const [queuedIds, setQueuedIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [runProgress, setRunProgress] = useState<Partial<ChatRunState>>({});
   const [status, setStatus] = useState('');
@@ -183,7 +200,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [composerError, setComposerError] = useState('');
   const [showComposerSettings, setShowComposerSettings] = useState(false);
-  const [executionConfigSaving, setExecutionConfigSaving] = useState(false);
+  const [executionConfigSavingIds, setExecutionConfigSavingIds] = useState<string[]>([]);
+  const executionConfigSaving = Boolean(selected && executionConfigSavingIds.includes(selected.id));
   const [voiceAck, setVoiceAck] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(160);
@@ -205,7 +223,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const selectedId = useRef<string | null>(null);
   const selectedRef = useRef<ConversationDetail | null>(null);
   const busyRef = useRef(false);
-  const executionConfigSavingRef = useRef(false);
+  const executionConfigSavingRef = useRef(new ConversationSaveBarrier());
   const runningConversationRef = useRef<string | null>(null);
   const requestOwnership = useRef(new ChatRequestOwnership());
   const cancellationWatches = useRef(new Map<string, AbortController>());
@@ -275,7 +293,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const executeCommand = useCallback(async (rawText: string): Promise<void> => {
     const text = rawText.trim();
     if (!text) return;
-    if (executionConfigSavingRef.current) {
+    if (navigationPendingRef.current) return;
+    if (selectedId.current && executionConfigSavingRef.current.has(selectedId.current)) {
       setComposerError(EXECUTION_CONFIG_SAVE_MESSAGE);
       return;
     }
@@ -310,6 +329,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       return;
     }
 
+    if (requestOwnership.current.has(conversation.id)) return;
     busyRef.current = true;
     const requestToken = requestOwnership.current.begin(conversation.id);
     cancellationWatches.current.get(conversation.id)?.abort();
@@ -403,6 +423,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
     const request = ++loadRequest.current;
+    navigationPendingRef.current = true; setNavigationPending(true);
+    try {
+    await executionConfigSavingRef.current.wait(id);
+    if (request !== loadRequest.current) return;
     historyLoad.current = null;
     historyAnchor.current = null;
     setLoadingHistory(false);
@@ -414,7 +438,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     ]);
     const selectedRun = runs?.find((run) => run.conversationId === id && run.running);
     if (!inConversationSpace(detail, spaceRef.current)) return;
-    const controlledRun = selectedRun;
+    const controlledRun = selectedRun ?? (requestOwnership.current.has(id) ? { conversationId: id, running: true, phase: 'starting' as const, steeringQueued: 0, status: '시작 확인 중…' } : undefined);
     const confirmations = await Promise.all((runs ?? []).filter(run => run.conversationId === id).map((run) => (
       client.call('chat.pendingConfirm', { conversationId: run.conversationId }, 5000)
         .catch(() => null) as Promise<ChatConfirmRequest | null>
@@ -425,9 +449,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         drafts.current.delete(selectedId.current); drafts.current.set(selectedId.current, inputRef.current);
         if (drafts.current.size > 30) drafts.current.delete(drafts.current.keys().next().value!);
       }
-      setInput(drafts.current.get(id) ?? '');
+      inputRef.current = drafts.current.get(id) ?? ''; setInput(inputRef.current);
     }
-    if (runs) setRunningIds(runs.filter(run => run.running).map(run => run.conversationId));
+    if (runs) {
+      setRunningIds(runs.filter(run => run.running).map(run => run.conversationId));
+      setQueuedIds(runs.filter(run => run.running && run.queued).map(run => run.conversationId));
+    }
     selectedId.current = id;
     selectedRef.current = detail;
     setSelected(detail);
@@ -444,6 +471,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     setBusy(runs === null || Boolean(controlledRun));
     setStatus(runs === null ? 'PC 실행 상태 확인 필요' : controlledRun?.status ?? '');
     setConfirm(confirmations.find((item): item is ChatConfirmRequest => item !== null) ?? null);
+    } catch (error) {
+      if (request === loadRequest.current) setComposerError(error instanceof Error ? error.message : '대화를 불러오지 못했습니다.');
+    } finally {
+      if (request === loadRequest.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+    }
   }, [client]);
 
   const refresh = useCallback(async (preferredId?: string): Promise<void> => {
@@ -465,13 +497,19 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const target = selectConversationInSpace(projectList, space, preferredId ?? selectedId.current);
     if (target) await loadConversation(target);
     else if (!showArchived && space === 'personal') {
-      const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
-      if (spaceRef.current !== space) return;
-      setConversations([created, ...visible]);
-      selectedId.current = created.id;
-      selectedRef.current = created;
-      setSelected(created);
-      setMessages([]);
+      if (creatingConversation.current) return;
+      creatingConversation.current = true;
+      const generation = ++loadRequest.current;
+      navigationPendingRef.current = true; setNavigationPending(true);
+      try {
+        const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
+        if (spaceRef.current !== space || generation !== loadRequest.current) return;
+        setConversations([created, ...visible]);
+        await loadConversation(created.id);
+      } finally {
+        creatingConversation.current = false;
+        if (generation === loadRequest.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+      }
     } else {
       selectedId.current = null;
       selectedRef.current = null;
@@ -535,11 +573,20 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     });
     const offProgress = client.on('chat.progress', data => {
       const event = data as Partial<ChatRunState>;
+      if (event.conversationId && (event.queued !== undefined || ['completed', 'failed', 'cancelled'].includes(event.phase ?? ''))) setQueuedIds(ids => {
+        const remaining = ids.filter(id => id !== event.conversationId);
+        return event.queued && !['completed', 'failed', 'cancelled'].includes(event.phase ?? '') ? [...remaining, event.conversationId!] : remaining;
+      });
       if (event.conversationId) setRunningIds(ids => {
         const remaining = ids.filter(id => id !== event.conversationId);
         return ['completed', 'failed', 'cancelled'].includes(event.phase ?? '') ? remaining : [...remaining, event.conversationId!].slice(-200);
       });
-      if (isCurrent(data)) setRunProgress(current => ({ ...current, ...(data as Partial<ChatRunState>) }));
+      if (isCurrent(data)) {
+        setRunProgress(current => ({ ...current, ...(data as Partial<ChatRunState>) }));
+        if (!['completed', 'failed', 'cancelled'].includes(event.phase ?? '')) {
+          busyRef.current = true; runningConversationRef.current = event.conversationId ?? null; setBusy(true);
+        }
+      }
     });
     const offDone = client.on('chat.done', (data) => {
       flushDelta();
@@ -550,6 +597,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         cancellationWatches.current.delete(eventConversationId);
       }
       setRunningIds(ids => ids.filter(id => id !== eventConversationId));
+      setQueuedIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
         busyRef.current = false;
@@ -573,6 +621,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         cancellationWatches.current.delete(eventConversationId);
       }
       setRunningIds(ids => ids.filter(id => id !== eventConversationId));
+      setQueuedIds(ids => ids.filter(id => id !== eventConversationId));
       if (runningConversationRef.current === eventConversationId) {
         runningConversationRef.current = null;
         busyRef.current = false;
@@ -699,11 +748,20 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   }, [conversationMenu]);
 
   const createConversation = async (): Promise<void> => {
+    if (creatingConversation.current) return;
+    creatingConversation.current = true;
+    const request = ++loadRequest.current;
+    navigationPendingRef.current = true; setNavigationPending(true);
     try {
       const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
       setConversations((list) => [created, ...list.filter(c => c.id !== created.id)]);
+      if (request !== loadRequest.current) return;
       await loadConversation(created.id); setShowArchived(false);
-    } catch (error) { setComposerError(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { if (request === loadRequest.current) setComposerError(error instanceof Error ? error.message : String(error)); }
+    finally {
+      creatingConversation.current = false;
+      if (request === loadRequest.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+    }
   };
   const selectProject = async (id: string): Promise<void> => {
     projectScopeRef.current = id; setProjectScope(id); setConversationMenu(null);
@@ -714,13 +772,18 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       else { selectedId.current = null; selectedRef.current = null; setSelected(null); setMessages([]); }
     } catch (error) { setComposerError(error instanceof Error ? error.message : String(error)); }
   };
-  const updateConversation = (patch: Record<string, unknown>, onError?: () => void, onSuccess?: (detail: ConversationDetail) => void): Promise<void> => {
+  const configureExecution = async (id: string, patch: ExecutionConfigPatch, apply: 'next-run' | 'stop-current' = 'next-run'): Promise<ConversationDetail> => {
+    const result = await client.call('chat.configure', { conversationId: id, patch, apply, ...(apply === 'stop-current' ? { expectedRunId: runProgress.runId } : {}) }, apply === 'stop-current' ? 90_000 : 15_000) as ChatConfigureResult;
+    if (selectedId.current === id && result.run) setRunProgress(result.run);
+    return result.conversation;
+  };
+  const updateConversation = (patch: Record<string, unknown>, onError?: () => void, onSuccess?: (detail: ConversationDetail) => void, execution = false): Promise<void> => {
     const target = selectedRef.current;
     if (!target) return Promise.resolve();
     const task = conversationUpdateQueue.current
       .catch(() => undefined)
       .then(async () => {
-        const detail = await client.call('conversations.update', { id: target.id, ...patch }) as ConversationDetail;
+        const detail = execution ? await configureExecution(target.id, patch as ExecutionConfigPatch) : await client.call('conversations.update', { id: target.id, ...patch }) as ConversationDetail;
         if (selectedId.current === detail.id) {
           selectedRef.current = detail;
           setSelected(detail);
@@ -729,7 +792,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         onSuccess?.(detail);
       });
     const safeTask = task.catch((error) => {
-      setComposerError(error instanceof Error ? error.message : String(error));
+      if (selectedId.current === target.id) setComposerError(error instanceof Error ? error.message : String(error));
       onError?.();
     });
     conversationUpdateQueue.current = safeTask;
@@ -737,7 +800,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   };
   const updateExecutionConfig = (patch: ExecutionConfigPatch): Promise<void> => {
     const target = selectedRef.current;
-    if (!target || busyRef.current || executionConfigSavingRef.current || target.status === 'archived') return Promise.resolve();
+    if (!target || navigationPendingRef.current || executionConfigSavingRef.current.has(target.id) || target.status === 'archived') return Promise.resolve();
+    if (busyRef.current && patch.workspaceId !== undefined) return Promise.resolve();
 
     const keys = Object.keys(patch) as Array<keyof ExecutionConfigPatch>;
     if (keys.length === 0 || keys.every((key) => Object.is(target[key], patch[key]))) return Promise.resolve();
@@ -749,8 +813,8 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
     // Set the ref before React can render again so a second selector event or
     // send action cannot overtake this queued persistence request.
-    executionConfigSavingRef.current = true;
-    setExecutionConfigSaving(true);
+    executionConfigSavingRef.current.add(target.id);
+    setExecutionConfigSavingIds(ids => [...ids, target.id]);
     setComposerError('');
     selectedRef.current = optimistic;
     setSelected(optimistic);
@@ -781,13 +845,29 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       // The sidebar is repaired even if the user switched conversations.
       setConversations((list) => list.map(rollbackMatchingFields));
     }, (detail) => {
-      if (patch.permissionMode && detail.permissionMode !== patch.permissionMode) {
+      if (selectedId.current === target.id && patch.permissionMode && detail.permissionMode !== patch.permissionMode) {
         setComposerError(`요청한 권한은 이 PC의 전체 액세스 정책 또는 연결 기기 상한을 넘습니다. 실제 적용 권한은 '${ACCESS.find((item) => item.value === detail.permissionMode)?.label ?? detail.permissionMode}'입니다. PC 앱의 설정 → 권한 및 안전/모바일 연결에서 상한을 한 번 조정하세요.`);
       }
-    }).finally(() => {
-      executionConfigSavingRef.current = false;
-      if (mountedRef.current) setExecutionConfigSaving(false);
+    }, patch.workspaceId === undefined).finally(() => {
+      executionConfigSavingRef.current.delete(target.id);
+      if (mountedRef.current) setExecutionConfigSavingIds(ids => ids.filter(id => id !== target.id));
     });
+  };
+  const stopAndApplyConfiguration = async (): Promise<void> => {
+    const target = selectedRef.current;
+    if (!target || !busyRef.current || !runProgress.runId || executionConfigSavingRef.current.has(target.id)) return;
+    executionConfigSavingRef.current.add(target.id); setExecutionConfigSavingIds(ids => [...ids, target.id]);
+    let detail: ConversationDetail;
+    try {
+      detail = await configureExecution(target.id, {}, 'stop-current');
+    } catch (error) { if (selectedId.current === target.id) setComposerError(error instanceof Error ? error.message : String(error)); return; }
+    finally { executionConfigSavingRef.current.delete(target.id); setExecutionConfigSavingIds(ids => ids.filter(id => id !== target.id)); }
+    setConversations(list => list.map(item => item.id === detail.id ? detail : item));
+    if (selectedId.current === target.id) {
+      selectedRef.current = detail; setSelected(detail);
+      await loadConversation(target.id);
+      if (selectedId.current === target.id) setComposerError('작업을 중지하고 설정을 적용했습니다. 이어갈 요청을 직접 보내세요. 이전 요청은 자동으로 재실행하지 않습니다.');
+    }
   };
   const setReasoningEffort = (reasoningEffort: ReasoningEffort): void => {
     const target = selectedRef.current;
@@ -938,12 +1018,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
 
   const send = async (): Promise<void> => {
     const text = input.trim();
-    if (!text) return;
-    if (executionConfigSavingRef.current) {
+    if (!text || navigationPendingRef.current) return;
+    if (selectedId.current && executionConfigSavingRef.current.has(selectedId.current)) {
       setComposerError(EXECUTION_CONFIG_SAVE_MESSAGE);
       return;
     }
-    setInput('');
+    inputRef.current = ''; setInput('');
+    if (selectedId.current) drafts.current.delete(selectedId.current);
     await executeCommand(text);
   };
   const cancelRun = async (): Promise<void> => {
@@ -1007,10 +1088,11 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     ? TOKEN_POLICIES.find((policy) => policy.value === (selected?.tokenPolicy ?? 'adaptive')) ?? TOKEN_POLICIES.find(p => p.value === 'adaptive')!
     : TOKEN_POLICIES.find(p => p.value === 'adaptive')!;
   const activeModeLabel = selectedPreset?.name ?? selected?.providerModel ?? selectedProvider?.model ?? selectedProvider?.label ?? '기본 단일 모델';
-  const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
+  const executionControlsDisabled = navigationPending || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
   const visibleConversations = conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope);
+  const conversationGroups = groupProjectConversations(workspaces, visibleConversations, projectScope);
   const currentHistory = historyPage?.id === selected?.id ? historyPage?.info : selected?.history;
   const rememberHistoryAnchor = (): void => {
     const scroll = scroller.current;
@@ -1071,7 +1153,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         {space === 'personal' && <ProjectNavigation projects={workspaces} conversations={conversations} active={projectScope} running={runningIds} onSelect={id => void selectProject(id)} onChanged={setWorkspaces} />}
         <div className="conversation-list-head">{space === 'personal' ? <Button onClick={() => void createConversation()}>＋ 새 대화</Button> : <span className="conversation-space-label">티켓 대화 기록</span>}<button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
         <div className="conversation-items">
-          {visibleConversations.map((c) => <div
+          {conversationGroups.map(group => <section className="conversation-project-group" key={group.id}>
+          <button type="button" className="conversation-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={!collapsedProjects.includes(group.id)} onClick={() => toggleProjectGroup(group.id)}>
+            <span aria-hidden="true">{collapsedProjects.includes(group.id) ? '▸' : '▾'}</span><b>{group.name}</b><small>{group.conversations.length}</small>
+            {group.conversations.some(c => runningIds.includes(c.id)) && <span className="conversation-running" aria-label="프로젝트 작업 진행 중">실행 중</span>}
+          </button>
+          {!collapsedProjects.includes(group.id) && group.conversations.map((c) => <div
             key={c.id}
             className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
             onContextMenu={(event) => {
@@ -1079,7 +1166,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               conversationMenuTriggerRef.current = event.currentTarget.querySelector<HTMLButtonElement>('.conversation-more');
               setConversationMenu({ conversation: c, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 214)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220)) });
             }}
-          ><button type="button" className="conversation-item-main" onClick={() => void loadConversation(c.id)}><span className="conversation-title">{c.pinned && <span className="conversation-pin">📌</span>}{c.title}</span><span className="conversation-meta">{new Date(c.updatedAt).toLocaleDateString()} · {c.messageCount}개 메시지</span></button><button
+          ><button type="button" className="conversation-item-main" data-conversation-id={c.id} onClick={() => void loadConversation(c.id)}><span className="conversation-title">{c.pinned && <span className="conversation-pin">📌</span>}{conversationDisplayTitle(c, Boolean(c.id === selected?.id ? input.trim() : drafts.current.get(c.id)?.trim()))}</span><span className="conversation-meta">{runningIds.includes(c.id) ? <span className="conversation-running">{queuedIds.includes(c.id) ? '대기 중' : '실행 중'}</span> : <>{new Date(c.updatedAt).toLocaleDateString()} · {c.messageCount}개 메시지</>}</span></button><button
             type="button"
             className="conversation-more"
             aria-label={`${c.title} 메뉴`}
@@ -1093,6 +1180,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
             }}
           >•••</button></div>)}
+          </section>)}
           {visibleConversations.length === 0 && (busy ? <RunTimeline run={{ ...runProgress, status }} busy={busy} executionMode={selectedExecutionMode} compact /> : <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '이 프로젝트의 대화가 없습니다.'}</div>)}
         </div>
         {profile}
@@ -1120,7 +1208,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {contextOpen && <section className="chat-context-panel" aria-label="대화 컨텍스트 설정">
             <div className="context-panel-head"><div><b>이 대화의 실행 컨텍스트</b><span>모델이 볼 작업 범위와 실행 권한을 대화별로 저장합니다.</span></div><button type="button" onClick={() => setContextOpen(false)} aria-label="컨텍스트 닫기">×</button></div>
             <div className="context-settings-grid">
-              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled}>폴더 추가</Button></div></label>
+              <label className="context-field context-workspace"><span>작업 폴더</span><div><Select aria-label="작업 폴더" value={selected.workspaceId ?? workspaces.find((item) => item.isDefault)?.id ?? ''} onChange={(event) => void updateExecutionConfig({ workspaceId: event.target.value || null })} disabled={executionControlsDisabled || busy}><option value="">작업 폴더 없음</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.isDefault ? '기본 · ' : ''}{workspace.name}</option>)}</Select><Button variant="ghost" onClick={() => void addWorkspace()} disabled={executionControlsDisabled || busy}>폴더 추가</Button></div></label>
             </div>
             <p className="context-help">{selectedTokenPolicy.detail} 실제 사용량은 대화 기록과 설정의 텔레메트리에서 확인할 수 있습니다.</p>
             <div className="context-panel-actions"><span>{selectedWorkspace ? selectedWorkspace.path : '작업 폴더를 지정하면 Codex·Claude가 해당 프로젝트에서 네이티브 에이전트로 실행됩니다.'}</span><Button variant="ghost" onClick={() => void archive()} disabled={busy}>{selected.status === 'archived' ? '대화 복원' : '보관함으로 이동'}</Button><Button variant="danger" onClick={() => void remove()} disabled={busy}>대화 삭제</Button></div>
@@ -1145,11 +1233,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel status={status} executionMode={selectedExecutionMode} phase={runProgress.phase} activity={runProgress.activity} activityTruncated={runProgress.activityTruncated} activityHadErrors={runProgress.activityHadErrors} observationLimited={runProgress.observationLimited} agents={runProgress.agents} startedAt={runProgress.startedAt} updatedAt={runProgress.updatedAt} busy={busy} />}
+          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel status={status} executionMode={selectedExecutionMode} phase={runProgress.phase} activity={runProgress.activity} activityTruncated={runProgress.activityTruncated} activityHadErrors={runProgress.activityHadErrors} observationLimited={runProgress.observationLimited} queued={runProgress.queued} agents={runProgress.agents} startedAt={runProgress.startedAt} updatedAt={runProgress.updatedAt} busy={busy} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}{selected && <button type="button" onClick={() => void loadConversation(selected.id).catch(() => setComposerError('상태를 다시 확인하지 못했습니다. 연결을 확인하세요.'))}>상태 다시 확인</button>}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}
-          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '추가 지시를 입력하세요. 진행 중인 작업은 유지됩니다.' : '무엇을 도와드릴까요?'} value={input} disabled={!selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send(); } }} />
+          {navigationPending && <div className="conversation-loading" role="status">대화를 여는 중… 다른 대화의 작업은 계속됩니다.</div>}
+          {busy && runProgress.pendingConfig && <div className="pending-execution-config" role="status"><span>다음 실행에 적용 · 현재 작업은 {runProgress.effectiveConfig?.providerModel ?? '기존 모델'} · {ACCESS.find(item => item.value === runProgress.effectiveConfig?.permissionMode)?.label ?? '기존 권한'} 유지</span><Button variant="ghost" disabled={executionConfigSaving || !runProgress.runId} onClick={() => void stopAndApplyConfiguration()}>중지하고 적용</Button></div>}
+          <textarea className="chat-input" aria-label="에이전트 명령" rows={2} placeholder={busy ? '추가 지시를 입력하세요. 진행 중인 작업은 유지됩니다.' : '무엇을 도와드릴까요?'} value={input} disabled={navigationPending || !selected || selected.status === 'archived'} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void send(); } }} />
           <div className="chat-actions">
             <div className="composer-options" aria-label="대화 실행 설정">
 {selected && <div className="composer-model-controls">
@@ -1162,14 +1252,14 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, next, providerModel ?? next?.model) });
               }} />
             </div>}
-              <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 액세스 권한을 변경할 수 없습니다.' : selectedAccess.detail}>
+              <label className="composer-select-control composer-access" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '변경은 다음 실행에 적용됩니다. 현재 권한을 종료하려면 중지하고 적용을 선택하세요.' : selectedAccess.detail}>
                 <span className="composer-control-icon" aria-hidden="true">◇</span>
                 <span className="composer-control-label">권한</span>
                 <Select className="composer-control-select" aria-label="입력창 액세스 권한" value={selectedAccess.value} onChange={(event) => void updateExecutionConfig({ permissionMode: event.target.value as PermissionMode })} disabled={executionControlsDisabled}>
                   {ACCESS.map((access) => { const locked = !permissionWithinCap(access.value, client.permissionCap); return <option key={access.value} value={access.value} disabled={locked}>{access.label}{locked ? ' · 잠김' : ''}</option>; })}
                 </Select>
               </label>
-              <label className="composer-select-control composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '작업 실행 중에는 추론 강도를 변경할 수 없습니다.' : '작업용 추론 강도 · 단순 인사·계산은 같은 모델의 낮은 추론으로 처리합니다.'}>
+              <label className="composer-select-control composer-reasoning" title={executionConfigSaving ? '실행 설정을 저장하는 중입니다.' : busy ? '변경은 다음 실행에 적용됩니다. 현재 작업은 유지됩니다.' : '작업용 추론 강도 · 단순 인사·계산은 같은 모델의 낮은 추론으로 처리합니다.'}>
                 <span className="composer-control-icon" aria-hidden="true">✦</span>
                 <span className="composer-control-label">추론</span>
                 <Select className="composer-control-select" aria-label="입력창 추론 강도" value={displayedReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={executionControlsDisabled}>

@@ -24,6 +24,48 @@ function call(req: NativeAgentRequest, mode = 'normal') {
   return pooledNativeCodex({ command: process.execPath, prefixArgs: [fixture], env: { ...process.env, MRROBOT_RAW_FIXTURE: mode }, providerId: 'fixture', model: 'fixture', req });
 }
 
+test('registered host operation names stay paired without exposing provider payloads or accepting unknown names', () => {
+  const events: NativeToolEvent[] = [], registered = ['browser_open', 'browser_close', 'invalid\nname'];
+  const tracker = new NativeToolEvents(event => events.push(event), () => 10, registered);
+  registered.push('late_registration');
+  const forbidden = () => assert.fail('host operation labels must never inspect private payloads');
+  tracker.accept('item/started', { id: 'browser-1', type: 'dynamicToolCall', tool: 'browser_open', get arguments() { return forbidden(); } });
+  tracker.accept('item/completed', { id: 'browser-1', type: 'dynamicToolCall', tool: 'browser_close', get contentItems() { return forbidden(); } });
+  tracker.accept('item/completed', { id: 'browser-1', type: 'dynamicToolCall', tool: 'unregistered', success: false });
+  tracker.accept('item/completed', { id: 'browser-1', type: 'dynamicToolCall', tool: 'browser_close', success: false });
+  for (const [index, tool] of ['unregistered', 'late_registration', 'invalid\nname', 'PRIVATE_SECRET', undefined].entries()) {
+    tracker.accept('item/completed', { id: `unknown-${index}`, type: 'dynamicToolCall', tool });
+  }
+  tracker.accept('item/completed', { id: 'ordinary', type: 'commandExecution', tool: 'browser_open' });
+  assert.deepEqual(events.slice(0, 3).map(event => [event.name, event.status]), [
+    ['browser_open', 'start'], ['browser_open', 'done'], ['browser_open', 'error'],
+  ]);
+  assert.equal(events[2].terminalCorrection, true);
+  assert.ok(events.slice(3, 13).every(event => event.name === 'native_host_tool'));
+  assert.deepEqual(events.slice(13).map(event => event.name), ['native_command', 'native_command']);
+  assert.ok(events.every(event => JSON.stringify(event.input) === '{}'));
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE_SECRET|invalid|late_registration|contentItems|arguments/);
+});
+
+for (const mode of ['host-tools', 'host-other-thread', 'host-other-turn']) test(`registered host names are exposed only after correlation: ${mode}`, () => workspace(async directory => {
+  const events: NativeToolEvent[] = [];
+  const req = { ...request(directory, event => events.push(event)), hostTools: {
+    tools: [{ name: 'browser_open', description: 'Synthetic registered tool', parameters: { type: 'object', properties: {} } }],
+    authorize: () => true,
+    execute: async () => { assert.fail('notification fixture does not execute a host tool'); },
+    dispose: () => {},
+  } };
+  if (mode === 'host-tools') {
+    await call(req, mode);
+    assert.deepEqual(events.map(event => [event.name, event.status]), [
+      ['browser_open', 'start'], ['browser_open', 'done'], ['native_host_tool', 'start'], ['native_host_tool', 'done'],
+    ]);
+  } else {
+    await assert.rejects(call(req, mode));
+    assert.deepEqual(events, []);
+  }
+}));
+
 test('raw exec observations are correlated, deduplicated and do not double-count usage snapshots', () => workspace(async directory => {
   const events: NativeToolEvent[] = [], statuses: string[] = [];
   const first = request(directory, event => events.push(event)); first.onStatus = status => statuses.push(status);

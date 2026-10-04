@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { clientBuildIdentity } from '../build-identity.mjs';
+
+test('client source identity is deterministic, responds to frontend/shared changes, and excludes private runtime data', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'vera-client-identity-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, 'web');
+  for (const path of ['web/src', 'web/public', 'shared/src']) mkdirSync(join(root, path), { recursive: true });
+  for (const path of ['index.html', 'vite.config.ts', 'build-identity.mjs', 'src/App.tsx', 'public/icon.svg']) writeFileSync(join(directory, path), `synthetic ${path}`);
+  writeFileSync(join(directory, 'package.json'), '{"version":"1.2.3"}');
+  writeFileSync(join(root, 'shared/package.json'), '{"name":"synthetic-shared"}');
+  writeFileSync(join(root, 'shared/src/index.ts'), 'synthetic shared');
+  const first = clientBuildIdentity(directory);
+  assert.equal(first.version, '1.2.3');
+  assert.match(first.build, /^[a-f0-9]{12}$/);
+  assert.deepEqual(clientBuildIdentity(directory), first);
+  writeFileSync(join(directory, '.env'), 'SYNTHETIC_PRIVATE_MARKER');
+  mkdirSync(join(directory, 'dist'));
+  writeFileSync(join(directory, 'dist/stale.js'), 'synthetic stale output');
+  assert.deepEqual(clientBuildIdentity(directory), first);
+  writeFileSync(join(directory, 'src/App.tsx'), 'synthetic updated frontend');
+  const second = clientBuildIdentity(directory);
+  assert.notEqual(second.build, first.build);
+  writeFileSync(join(root, 'shared/src/index.ts'), 'synthetic updated shared');
+  assert.notEqual(clientBuildIdentity(directory).build, second.build);
+  assert.deepEqual(Object.keys(first).sort(), ['build', 'version']);
+});

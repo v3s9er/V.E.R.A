@@ -22,15 +22,16 @@ export class DesktopRuntime {
   private idle?: NodeJS.Timeout;
   private retiring?: Promise<void>;
   private closing = false;
+  private readonly lifetime = new AbortController();
   constructor(private options: {
-    command?: string; args?: string[]; timeoutMs?: number; idleMs?: number;
+    command?: string; args?: string[]; timeoutMs?: number; idleMs?: number; retirementTimeoutMs?: number;
   } = {}) {}
 
   async request(owner: string, command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
     signal?.throwIfAborted();
     if (this.closing) throw new Error('화면 제어가 종료되었습니다.');
     if (this.pending) throw new Error('화면 조작이 진행 중입니다. 완료 후 다시 확인하세요.');
-    if (this.retiring) await this.retiring;
+    if (this.retiring) await this.waitForRetirement(signal);
     signal?.throwIfAborted();
     // Recheck after awaiting retirement: two callers must not share the slot.
     if (this.closing || this.pending) throw new Error('화면 제어 실행 슬롯을 사용할 수 없습니다.');
@@ -47,6 +48,33 @@ export class DesktopRuntime {
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) { abort(); return; }
       child.stdin.write(payload + '\n', error => { if (error && this.child === child) this.fail(new Error('화면 도구 연결이 종료되었습니다.')); });
+    });
+  }
+
+  private async waitForRetirement(signal?: AbortSignal): Promise<void> {
+    const retiring = this.retiring;
+    if (!retiring) return;
+    await new Promise<void>((resolveExit, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        this.lifetime.signal.removeEventListener('abort', disposed);
+        if (error) reject(error); else resolveExit();
+      };
+      const abort = () => finish(new Error('화면 작업이 중지되었습니다. 이전 프로세스 종료 확인은 계속 유지됩니다.'));
+      const disposed = () => finish(new Error('화면 제어가 종료되었습니다.'));
+      const timer = setTimeout(() => finish(new Error('이전 화면 제어 프로세스의 종료를 확인하지 못했습니다. 안전을 위해 새 프로세스를 시작하지 않습니다.')),
+        this.options.retirementTimeoutMs ?? 5_000);
+      signal?.addEventListener('abort', abort, { once: true });
+      this.lifetime.signal.addEventListener('abort', disposed, { once: true });
+      if (signal?.aborted) abort();
+      else if (this.closing) disposed();
+      // A deadline/cancel settles this request only. Keep the original barrier
+      // until a real close event proves that the old helper cannot emit input.
+      void retiring.then(() => finish());
     });
   }
 
@@ -97,9 +125,9 @@ export class DesktopRuntime {
     // Do not start a replacement while an old process could still emit input.
     this.retiring = new Promise<void>(resolveExit => {
       child.once('close', () => { this.retiring = undefined; resolveExit(); });
-      child.kill();
+      try { child.kill(); } catch { /* unconfirmed exit keeps the retirement barrier */ }
     });
   }
-  dispose() { this.closing = true; this.fail(new Error('화면 제어가 종료되었습니다.')); }
+  dispose() { this.closing = true; this.lifetime.abort(); this.fail(new Error('화면 제어가 종료되었습니다.')); }
   reset() { this.fail(new Error('화면 제어 연결이 재설정되었습니다.')); }
 }

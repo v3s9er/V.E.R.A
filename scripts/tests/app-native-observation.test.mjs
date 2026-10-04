@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createPackage } from '@electron/asar';
 import { parseOptions, sanitizeToolEvent, summarizeTools, evaluateCase, sha256, allowedScratchChanges, scratchSnapshot, bounded, launchSpec } from './app-native-observation.smoke.mjs';
+import { createBrowserFixture, browserSmokeToolAllowed } from './app-browser-fixture.mjs';
 
 const args = ['--app-path', 'fixture-stage', '--model', 'gpt-6-sol'];
 const pair = (name = 'native_custom_tool', callId = 'call-1') => [{ atMs: 1, name, callId, status: 'start' }, { atMs: 2, name, callId, status: 'done', elapsedMs: 1 }];
@@ -29,6 +30,39 @@ test('argument whitelist, duplicates and bounded deadlines fail closed', () => {
   assert.throws(() => parseOptions([...args, '--model', 'gpt-6-sol']), /invalid_arguments/);
   for (const duration of ['0', 'NaN', '300001', '900000', '1.5']) assert.throws(() => parseOptions([...args, '--deadline-ms', duration]), /invalid_deadline/);
   assert.equal(parseOptions([...args, '--deadline-ms', '300000']).deadlineMs, 300000);
+});
+
+test('browser case is opt-in, cannot grant account consent, and requires independent browser effects', () => {
+  assert.equal(parseOptions(args).browserCase, false);
+  const enabled = parseOptions([...args, '--browser-case', 'yes']);
+  assert.equal(enabled.browserCase, true); assert.equal(enabled.allow, false);
+  assert.throws(() => parseOptions([...args, '--browser-case', 'true']), /invalid_browser/);
+  const events = ['browser_open', 'browser_observe', 'browser_type', 'browser_click', 'browser_close'].flatMap((name, i) => pair(name, `browser-${i}`));
+  const complete = { ...facts(), effectivePermission: 'full', fixtureSubmissionVerified: true, toolEvents: events, telemetryToolCalls: 5 };
+  assert.equal(evaluateCase('owned-browser', complete).passed, true);
+  for (const patch of [{ fixtureSubmissionVerified: false }, { expectedAnswer: false }, { helperCount: 1 }, { effectivePermission: 'workspace' }, { nativeTransport: false }, { telemetryToolCalls: 4 }]) {
+    assert.equal(evaluateCase('owned-browser', { ...complete, ...patch }).passed, false);
+  }
+  assert.equal(evaluateCase('owned-browser', { ...complete, toolEvents: events.filter(e => e.name !== 'browser_close'), telemetryToolCalls: 4 }).passed, false);
+  assert.equal(evaluateCase('owned-browser', { ...complete, toolEvents: [...events, ...pair('native_command', 'unexpected')], telemetryToolCalls: 6 }).passed, false);
+  assert.equal(browserSmokeToolAllowed('native_custom_tool'), true, 'native code-mode carrier may call registered browser tools');
+  assert.equal(browserSmokeToolAllowed('shell_exec'), false);
+});
+
+test('owned loopback fixture withholds its random receipt until one correct bounded submission', async () => {
+  const fixture = await createBrowserFixture();
+  try {
+    assert.equal(new URL(fixture.url).hostname, '127.0.0.1');
+    const html = await (await fetch(fixture.url)).text();
+    assert.equal(html.includes(fixture.expected.slice('BROWSER_OK='.length)), false);
+    assert.equal(fixture.verified(), false);
+    const response = await fetch(fixture.url + '/submit', { method: 'POST', body: fixture.value });
+    assert.equal(response.status, 200);
+    assert.equal(`BROWSER_OK=${(await response.json()).receipt}`, fixture.expected);
+    assert.equal(fixture.verified(), true);
+    assert.equal((await fetch(fixture.url + '/submit', { method: 'POST', body: fixture.value })).status, 400);
+    assert.equal(fixture.verified(), false, 'duplicate submission cannot pass');
+  } finally { await fixture.close(); }
 });
 
 test('installed code and staged code both use development Electron, never the packaged OS-integrated executable', () => {
@@ -148,10 +182,11 @@ test('plan-only CLI reads a staged fixture without creating profile/evidence or 
 test('installed preflight rejects old or mismatched startup archives before any launch, even with inference consent', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'vera-native-plan-test-'));
   try {
-    for (const variant of ['old-version', 'wrong-package', 'wrong-entry', 'missing-entry', 'mismatched-main', 'mismatched-branding', 'reviewed']) {
+    for (const variant of ['old-version', 'wrong-package', 'wrong-entry', 'missing-entry', 'mismatched-main', 'mismatched-branding', 'reviewed', 'reviewed-renamed']) {
       const app = join(directory, variant), source = join(app, 'archive-source'), evidence = join(app, 'must-not-exist');
       mkdirSync(source, { recursive: true }); mkdirSync(join(app, 'resources'));
-      const executable = join(app, 'Mr.Robot.exe');
+      const reviewedVariant = variant === 'reviewed' || variant === 'reviewed-renamed';
+      const executable = join(app, variant === 'reviewed-renamed' ? 'V.E.R.A.exe' : 'Mr.Robot.exe');
       // Not executable: a successful negative test proves prelaunch rejection.
       writeFileSync(executable, 'fixture-not-an-executable');
       writeFileSync(join(source, 'package.json'), JSON.stringify({ name: variant === 'wrong-package' ? 'other-app' : 'mr-robot-desktop', version: variant === 'old-version' ? '0.6.17' : '0.7.0', main: variant === 'missing-entry' ? undefined : variant === 'wrong-entry' ? 'other.mjs' : 'main.mjs' }));
@@ -161,10 +196,10 @@ test('installed preflight rejects old or mismatched startup archives before any 
       }
       await createPackage(source, join(app, 'resources', 'app.asar'));
       const argv = [fileURLToPath(new URL('./app-native-observation.smoke.mjs', import.meta.url)), '--app-path', executable, '--model', 'gpt-6-sol', '--out-dir', evidence];
-      if (variant !== 'reviewed') argv.push('--allow-account-usage', 'yes');
+      if (!reviewedVariant) argv.push('--allow-account-usage', 'yes');
       const run = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15000, windowsHide: true });
-      assert.equal(run.status, variant === 'reviewed' ? 0 : 1, run.stderr);
-      if (variant !== 'reviewed') assert.match(run.stderr, /unsupported_installed_version|unreviewed_installed_startup|unreviewed_installed_entrypoint/);
+      assert.equal(run.status, reviewedVariant ? 0 : 1, run.stderr);
+      if (!reviewedVariant) assert.match(run.stderr, /unsupported_installed_version|unreviewed_installed_startup|unreviewed_installed_entrypoint/);
       else assert.equal(JSON.parse(run.stdout.trim()).inference, false);
       assert.equal(existsSync(evidence), false, 'preflight must happen before output/profile creation');
     }

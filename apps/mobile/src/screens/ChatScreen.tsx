@@ -6,11 +6,11 @@ import { ToolHistory } from '../components/ToolHistory';
 import { mergeToolActivity, terminalRunUpdate } from '../../../../packages/shared/src/run-presentation';
 import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
-import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
+import { resolveProjectWorkspace, conversationDisplayTitle, groupProjectConversations, parseCollapsedProjects } from '../../../../packages/shared/src/projects';
 import { supportsDaybreak, visibleModelChoices } from '../../../../packages/shared/src/daybreak';
-import { watchChatSettlement, ChatRequestOwnership } from '../../../../packages/shared/src/chat-lifecycle';
+import { watchChatSettlement, ChatRequestOwnership, ConversationSaveBarrier } from '../../../../packages/shared/src/chat-lifecycle';
 import { reasoningEffortsForModel } from '../../../../packages/shared/src/model-capabilities';
-import type { ProviderModelCatalog } from '../../../../packages/shared/src/protocol';
+import type { ChatExecutionConfig, ProviderModelCatalog } from '../../../../packages/shared/src/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -31,6 +31,7 @@ import type { KeyboardEvent, NativeScrollEvent, NativeSyntheticEvent } from 'rea
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { MrRobotClient } from '../rpc';
 import type { ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, SavedPc, ToolEvent, WorkspaceInfo } from '../types';
 import { colors, radius } from '../theme';
@@ -72,6 +73,7 @@ const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] => {
 };
 
 const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'workspace', 'full'];
+const PERMISSION_LABELS: Record<PermissionMode, string> = { 'read-only': '읽기 전용', ask: '변경 전 확인', workspace: '작업 폴더 허용', full: '전체 허용' };
 
 function permissionWithinCap(mode: PermissionMode, cap: PermissionMode): boolean {
   return PERMISSION_ORDER.indexOf(mode) <= PERMISSION_ORDER.indexOf(cap);
@@ -114,6 +116,18 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [input, setInput] = useState('');
   const inputRef = useRef(input); inputRef.current = input;
   const drafts = useRef(new Map<string, string>());
+  const [collapsedProjects, setCollapsedProjects] = useState<string[]>([]);
+  const collapseKey = `vera:collapsed-projects:${pc.id}`;
+  useEffect(() => {
+    let active = true;
+    void AsyncStorage.getItem(collapseKey).then(value => { if (active) setCollapsedProjects(parseCollapsedProjects(value)); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [collapseKey]);
+  const toggleProjectGroup = (id: string): void => setCollapsedProjects(current => {
+    const next = current.includes(id) ? current.filter(item => item !== id) : [...current, id];
+    void AsyncStorage.setItem(collapseKey, JSON.stringify(next)).catch(() => undefined);
+    return next;
+  });
   const [runs, setRuns] = useState<Record<string, ChatRunState & { cancelling?: boolean }>>({});
   const [confirm, setConfirm] = useState<ChatConfirmRequest | null>(null);
   const [showModels, setShowModels] = useState(false);
@@ -132,12 +146,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [projectScope, setProjectScope] = useState('*');
   const [showProjects, setShowProjects] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [savingReasoning, setSavingReasoning] = useState(false);
-  const [savingConfiguration, setSavingConfiguration] = useState(false);
+  const [savingReasoningIds, setSavingReasoningIds] = useState<string[]>([]);
+  const savingReasoning = Boolean(conversation && savingReasoningIds.includes(conversation.id));
+  const [savingConfigurationIds, setSavingConfigurationIds] = useState<string[]>([]);
+  const savingConfiguration = Boolean(conversation && savingConfigurationIds.includes(conversation.id));
   const [reasoningSaveFailed, setReasoningSaveFailed] = useState(false);
   const [configurationSaveFailed, setConfigurationSaveFailed] = useState(false);
   const [permissionNotice, setPermissionNotice] = useState('');
-  const configurationSaveInFlightRef = useRef(false);
+  const configurationSaveInFlightRef = useRef(new ConversationSaveBarrier());
   const conversationRef = useRef<ConversationDetail | null>(null);
   const uploadTaskRef = useRef<{ cancelAsync(): Promise<void> } | null>(null);
   const uploadStopReason = useRef<'user' | 'timeout' | null>(null);
@@ -150,6 +166,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const toolCounter = useRef(0);
   const activeId = useRef<string | null>(null);
   const loadGeneration = useRef(0);
+  const creatingConversation = useRef(false);
+  const navigationPendingRef = useRef(false);
+  const [navigationPending, setNavigationPending] = useState(false);
   const pendingDelta = useRef('');
   const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancellationWatches = useRef(new Map<string, AbortController>());
@@ -279,20 +298,21 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       : effectiveDevicePermissionMode === 'full'
         ? '전체'
         : '확인';
-  const reasoningLocked = !conversation || busy || savingConfiguration;
-  const configurationLocked = busy || savingConfiguration;
+  const reasoningLocked = !conversation || navigationPending || savingConfiguration;
+  const configurationLocked = navigationPending || savingConfiguration;
 
   const beginConfigurationSave = (): boolean => {
-    if (configurationSaveInFlightRef.current) return false;
-    configurationSaveInFlightRef.current = true;
-    setSavingConfiguration(true);
+    const id = conversationRef.current?.id;
+    if (!id || navigationPendingRef.current || configurationSaveInFlightRef.current.has(id)) return false;
+    configurationSaveInFlightRef.current.add(id);
+    setSavingConfigurationIds(ids => [...ids, id]);
     setConfigurationSaveFailed(false);
     return true;
   };
 
-  const finishConfigurationSave = (): void => {
-    configurationSaveInFlightRef.current = false;
-    if (mountedRef.current) setSavingConfiguration(false);
+  const finishConfigurationSave = (id: string): void => {
+    configurationSaveInFlightRef.current.delete(id);
+    if (mountedRef.current) setSavingConfigurationIds(ids => ids.filter(item => item !== id));
   };
 
   const applyConversationConfiguration = (id: string, patch: Partial<Pick<ConversationDetail,
@@ -304,8 +324,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const loadConversation = useCallback(async (id: string): Promise<void> => {
-    if (configurationSaveInFlightRef.current) return;
     const generation = ++loadGeneration.current;
+    navigationPendingRef.current = true; setNavigationPending(true);
+    try {
+    await configurationSaveInFlightRef.current.wait(id);
+    if (generation !== loadGeneration.current) return;
     historyLoad.current = null;
     setLoadingHistory(false);
     setHistoryError('');
@@ -314,10 +337,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         drafts.current.delete(activeId.current); drafts.current.set(activeId.current, inputRef.current);
         if (drafts.current.size > 30) drafts.current.delete(drafts.current.keys().next().value!);
       }
-      const draft = drafts.current.get(id) ?? '';
-      inputRef.current = draft; setInput(draft);
     }
-    activeId.current = id;
     setReasoningSaveFailed(false);
     setConfigurationSaveFailed(false);
     pendingDelta.current = '';
@@ -334,8 +354,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       ? await client.call('chat.pendingConfirm', { conversationId: id }, 5000).catch(() => null) as ChatConfirmRequest | null
       : null;
     if (generation !== loadGeneration.current) return;
+    if (activeId.current !== id) { inputRef.current = drafts.current.get(id) ?? ''; setInput(inputRef.current); }
+    activeId.current = id;
+    conversationRef.current = detail;
     setRuns((current) => ({ ...current, ...Object.fromEntries((runList ?? []).map((run) => [run.conversationId, run])),
-      [id]: active ?? { conversationId: id, running: runList === null, steeringQueued: 0, status: runList === null ? 'PC 실행 상태 확인 필요' : '' } }));
+      [id]: active ?? { conversationId: id, running: runList === null || requestOwnership.current.has(id), steeringQueued: 0, status: runList === null ? 'PC 실행 상태 확인 필요' : requestOwnership.current.has(id) ? '시작 확인 중…' : '' } }));
     setConfirm(current => pendingConfirm ?? (current?.conversationId === id ? null : current));
     setConversation(detail);
     setHistoryError(runList === null ? '실행 상태를 확인하지 못했습니다. 새 요청을 보내지 않았습니다. 연결을 확인하고 이 대화를 다시 선택하세요.' : recovery?.message ?? '');
@@ -348,20 +371,34 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       : restored);
     stickToBottom.current = true;
     setUnseenMessages(false);
+    } catch (error) {
+      if (generation === loadGeneration.current) setHistoryError(error instanceof Error ? error.message : '대화를 불러오지 못했습니다.');
+    } finally {
+      if (generation === loadGeneration.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+    }
   }, [client]);
 
   const refreshConversations = useCallback(async (): Promise<void> => {
+    const generation = loadGeneration.current;
     const list = await client.call('conversations.list', { status: 'active' }) as ConversationSummary[];
     setConversations(list);
+    if (generation !== loadGeneration.current) return;
     if (activeId.current && list.some((c) => c.id === activeId.current)) return;
     if (list[0]) await loadConversation(list[0].id);
     else {
-      const created = await client.call('conversations.create', {}) as ConversationDetail;
-      setConversations([created]);
-      activeId.current = created.id;
-      setConversation(created);
-      setReasoningSaveFailed(false);
-      setMessages([]);
+      if (creatingConversation.current) return;
+      creatingConversation.current = true;
+      const request = ++loadGeneration.current;
+      navigationPendingRef.current = true; setNavigationPending(true);
+      try {
+        const created = await client.call('conversations.create', {}) as ConversationDetail;
+        if (request !== loadGeneration.current) return;
+        setConversations([created]);
+        await loadConversation(created.id);
+      } finally {
+        creatingConversation.current = false;
+        if (request === loadGeneration.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+      }
     }
   }, [client, loadConversation]);
 
@@ -564,7 +601,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const send = async (): Promise<void> => {
     const text = input.trim();
     const currentConversation = conversationRef.current;
-    if (!text || !currentConversation || configurationSaveInFlightRef.current) return;
+    if (!text || !currentConversation || configurationSaveInFlightRef.current.has(currentConversation.id) || navigationPendingRef.current || activeId.current !== currentConversation.id) return;
     if (startingConversationRef.current === currentConversation.id) return;
     if (busy) {
       try {
@@ -577,10 +614,11 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       }
       return;
     }
+    if (requestOwnership.current.has(currentConversation.id)) return;
     startingConversationRef.current = currentConversation.id;
     const requestToken = requestOwnership.current.begin(currentConversation.id);
     setActivity([]);
-    setInput('');
+    inputRef.current = ''; setInput(''); drafts.current.delete(currentConversation.id);
     setRuns((current) => ({ ...current, [currentConversation.id]: { conversationId: currentConversation.id, running: true, steeringQueued: 0, status: '시작 중' } }));
     stickToBottom.current = true;
     setUnseenMessages(false);
@@ -634,42 +672,67 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const createConversation = async (projectId = projectScope): Promise<void> => {
-    if (configurationSaveInFlightRef.current) return;
-    const created = await client.call('conversations.create', { workspaceId: projectId === '*' ? undefined : projectId }) as ConversationDetail;
-    setConversations((list) => [created, ...list]);
-    activeId.current = created.id;
-    setConversation(created);
-    setReasoningSaveFailed(false);
-    setConfigurationSaveFailed(false);
-    setMessages([]);
-    setInput('');
+    if (creatingConversation.current) return;
+    creatingConversation.current = true;
+    const generation = ++loadGeneration.current;
+    navigationPendingRef.current = true; setNavigationPending(true);
+    try {
+      const created = await client.call('conversations.create', { workspaceId: projectId === '*' ? undefined : projectId }) as ConversationDetail;
+      setConversations(list => [created, ...list.filter(item => item.id !== created.id)]);
+      if (generation === loadGeneration.current) await loadConversation(created.id);
+    } catch (error) {
+      if (generation === loadGeneration.current) setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      creatingConversation.current = false;
+      if (generation === loadGeneration.current) { navigationPendingRef.current = false; setNavigationPending(false); }
+    }
   };
   const selectProject = async (id: string): Promise<void> => {
     setProjectScope(id); setShowProjects(false); setShowChatOptions(false);
     const target = conversations.find(c => id === '*' || c.workspaceId === id);
-    try { if (target) { setInput(''); await loadConversation(target.id); } else await createConversation(id); }
+    try { if (target) await loadConversation(target.id); else await createConversation(id); }
     catch (error) { setLoadError(error instanceof Error ? error.message : String(error)); }
+  };
+
+  const configureExecution = async (id: string, patch: Partial<ChatExecutionConfig>, apply: 'next-run' | 'stop-current' = 'next-run'): Promise<ConversationDetail> => {
+    const result = await client.call('chat.configure', { conversationId: id, patch, apply, ...(apply === 'stop-current' ? { expectedRunId: runs[id]?.runId } : {}) }, apply === 'stop-current' ? 90_000 : 15_000) as { conversation: ConversationDetail; run?: ChatRunState };
+    if (result.run) setRuns(current => ({ ...current, [id]: result.run! }));
+    return result.conversation;
+  };
+  const stopAndApplyConfiguration = async (): Promise<void> => {
+    const target = conversationRef.current;
+    if (!target || !runs[target.id]?.running || !runs[target.id]?.runId || !beginConfigurationSave()) return;
+    let updated: ConversationDetail;
+    try {
+      updated = await configureExecution(target.id, {}, 'stop-current');
+    } catch (error) { if (activeId.current === target.id) setHistoryError(error instanceof Error ? error.message : String(error)); return; }
+    finally { finishConfigurationSave(target.id); }
+    setConversations(list => list.map(item => item.id === target.id ? updated : item));
+    if (activeId.current === target.id) {
+      await loadConversation(target.id);
+      if (activeId.current === target.id) setHistoryError('작업을 중지하고 설정을 적용했습니다. 이어갈 요청을 직접 보내세요. 이전 요청은 자동으로 재실행하지 않습니다.');
+    }
   };
 
   const selectReasoningEffort = async (reasoningEffort: ReasoningEffort): Promise<void> => {
     const currentConversation = conversationRef.current;
-    if (!currentConversation || busy || !reasoningEfforts.includes(reasoningEffort) || currentConversation.reasoningEffort === reasoningEffort || !beginConfigurationSave()) return;
+    if (!currentConversation || !reasoningEfforts.includes(reasoningEffort) || currentConversation.reasoningEffort === reasoningEffort || !beginConfigurationSave()) return;
     const conversationId = currentConversation.id;
     const previousReasoningEffort = currentConversation.reasoningEffort;
-    setSavingReasoning(true);
+    setSavingReasoningIds(ids => [...ids, conversationId]);
     setReasoningSaveFailed(false);
     conversationRef.current = { ...currentConversation, reasoningEffort };
     setConversation((current) => current?.id === conversationId ? { ...current, reasoningEffort } : current);
     setConversations((list) => list.map((item) => item.id === conversationId ? { ...item, reasoningEffort } : item));
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, reasoningEffort }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { reasoningEffort });
       if (!mountedRef.current) return;
       if (activeId.current === conversationId) {
         if (conversationRef.current?.id === conversationId) conversationRef.current = { ...conversationRef.current, reasoningEffort: updated.reasoningEffort };
         setConversation((current) => current?.id === conversationId ? { ...current, reasoningEffort: updated.reasoningEffort } : current);
       }
       setConversations((list) => list.map((item) => item.id === conversationId ? { ...item, reasoningEffort: updated.reasoningEffort } : item));
-      setShowReasoning(false);
+      if (activeId.current === conversationId) setShowReasoning(false);
     } catch {
       if (!mountedRef.current) return;
       if (activeId.current === conversationId) {
@@ -686,13 +749,13 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         ? { ...item, reasoningEffort: previousReasoningEffort }
         : item));
     } finally {
-      if (mountedRef.current) setSavingReasoning(false);
-      finishConfigurationSave();
+      if (mountedRef.current) setSavingReasoningIds(ids => ids.filter(id => id !== conversationId));
+      finishConfigurationSave(conversationId);
     }
   };
 
   const openModelPicker = (): void => {
-    if (configurationSaveInFlightRef.current) return;
+    if (conversationRef.current && configurationSaveInFlightRef.current.has(conversationRef.current.id)) return;
     const selectedProvider = providers.find((provider) => provider.id === conversation?.providerId)
       ?? providers.find((provider) => provider.isDefault)
       ?? providers[0];
@@ -706,20 +769,19 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const selectModel = async (providerId?: string, providerModel?: string): Promise<void> => {
-    if (!conversation || busy || !beginConfigurationSave()) return;
+    if (!conversation || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providerId ? providers.find((item) => item.id === providerId) : defaultProvider;
     const supportedEfforts = reasoningEffortsFor(provider, providerModel ?? provider?.model);
     const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
-      const updated = await client.call('conversations.update', {
-        id: conversationId,
+      const updated = await configureExecution(conversationId, {
         providerId: providerId ?? null,
         providerModel: providerModel ?? null,
         routingPresetId: null,
         reasoningEffort,
         daybreakEnabled: supportsDaybreak(provider, providerModel ?? provider?.model) && conversation.daybreakEnabled === true,
-      }) as ConversationDetail;
+      });
       applyConversationConfiguration(conversationId, {
         providerId: updated.providerId,
         providerModel: updated.providerModel,
@@ -727,59 +789,62 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         reasoningEffort: updated.reasoningEffort,
         daybreakEnabled: updated.daybreakEnabled,
       });
+      if (activeId.current !== conversationId) return;
       setReasoningSaveFailed(false);
       setCommandMode(providerId ? 'scenario' : 'pc');
       setShowModels(false);
       setShowScenarios(false);
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
   const switchCommandMode = async (mode: 'pc' | 'scenario'): Promise<void> => {
-    if (!conversation || busy || configurationSaveInFlightRef.current) return;
+    if (!conversation || configurationSaveInFlightRef.current.has(conversation.id)) return;
     if (mode !== 'pc' || !conversation.routingPresetId) { setCommandMode(mode); return; }
     if (!beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
     const reasoningEffort = reasoningEffortsFor(provider, conversation.providerModel ?? provider?.model).includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: null, reasoningEffort }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { routingPresetId: null, reasoningEffort });
       applyConversationConfiguration(conversationId, {
         routingPresetId: updated.routingPresetId,
         reasoningEffort: updated.reasoningEffort,
       });
+      if (activeId.current !== conversationId) return;
       setReasoningSaveFailed(false);
       setCommandMode(mode);
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
   const selectScenario = async (routingPresetId?: string): Promise<void> => {
-    if (!conversation || busy || !beginConfigurationSave()) return;
+    if (!conversation || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
     const supportedEfforts = reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model);
     const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, routingPresetId: routingPresetId ?? null, reasoningEffort }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { routingPresetId: routingPresetId ?? null, reasoningEffort });
       applyConversationConfiguration(conversationId, {
         routingPresetId: updated.routingPresetId,
         reasoningEffort: updated.reasoningEffort,
       });
+      if (activeId.current !== conversationId) return;
       setCommandMode('scenario');
       setReasoningSaveFailed(false);
       setShowScenarios(false);
       if (!routingPresetId) setShowModels(true);
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
@@ -789,16 +854,17 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     try {
       const updated = await client.call('conversations.update', { id: conversationId, workspaceId: workspaceId ?? null }) as ConversationDetail;
       applyConversationConfiguration(conversationId, { workspaceId: updated.workspaceId });
+      if (activeId.current !== conversationId) return;
       setShowWorkspaces(false);
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
   const selectAccess = async (permissionMode: PermissionMode): Promise<void> => {
-    if (!conversation || busy) return;
+    if (!conversation) return;
     if (!permissionWithinCap(permissionMode, client.permissionCap)) {
       setPermissionNotice(`이 휴대폰은 ${client.permissionCap}까지 허용되어 있습니다. PC 앱의 원격 PC 관리에서 이 기기 권한을 먼저 높여 주세요.`);
       return;
@@ -806,8 +872,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     if (!beginConfigurationSave()) return;
     const conversationId = conversation.id;
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, permissionMode }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { permissionMode });
       applyConversationConfiguration(conversationId, { permissionMode: updated.permissionMode });
+      if (activeId.current !== conversationId) return;
       if (updated.permissionMode !== permissionMode) {
         setPermissionNotice(`PC의 전체 액세스 정책이 ${updated.permissionMode}로 제한했습니다. PC 앱의 원격 PC 관리 또는 액세스 설정에서 상한을 높여 주세요.`);
       } else {
@@ -815,23 +882,24 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         setShowAccess(false);
       }
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
   const selectTokenPolicy = async (tokenPolicy: ConversationTokenPolicy): Promise<void> => {
-    if (!client.canUseAuditOnly || !conversation || busy || !beginConfigurationSave()) return;
+    if (!client.canUseAuditOnly || !conversation || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, tokenPolicy }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { tokenPolicy });
       applyConversationConfiguration(conversationId, { tokenPolicy: updated.tokenPolicy });
+      if (activeId.current !== conversationId) return;
       setShowTokenPolicy(false);
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
-      finishConfigurationSave();
+      finishConfigurationSave(conversationId);
     }
   };
 
@@ -839,15 +907,16 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     if (!conversation || configurationLocked || !beginConfigurationSave()) return;
     const conversationId = conversation.id;
     try {
-      const updated = await client.call('conversations.update', { id: conversationId, daybreakEnabled: !conversation.daybreakEnabled }) as ConversationDetail;
+      const updated = await configureExecution(conversationId, { daybreakEnabled: !conversation.daybreakEnabled });
       applyConversationConfiguration(conversationId, { daybreakEnabled: updated.daybreakEnabled });
+      if (activeId.current !== conversationId) return;
     } catch {
-      if (mountedRef.current) setConfigurationSaveFailed(true);
-    } finally { finishConfigurationSave(); }
+      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
+    } finally { finishConfigurationSave(conversationId); }
   };
 
   const togglePin = async (target: ConversationSummary): Promise<void> => {
-    if (busy || configurationSaveInFlightRef.current) return;
+    if (busy || configurationSaveInFlightRef.current.has(target.id)) return;
     const updated = await client.call('conversations.update', { id: target.id, pinned: !target.pinned }) as ConversationDetail;
     if (conversation?.id === updated.id) setConversation(updated);
     await refreshConversations();
@@ -891,7 +960,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   };
 
   const archiveConversation = async (): Promise<void> => {
-    if (!conversation || busy || configurationSaveInFlightRef.current) return;
+    if (!conversation || busy || configurationSaveInFlightRef.current.has(conversation.id)) return;
     await client.call('conversations.update', { id: conversation.id, status: 'archived' });
     activeId.current = null;
     await refreshConversations();
@@ -1038,13 +1107,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       </TouchableOpacity>
     </View>
   ) : null;
+  const conversationGroups = groupProjectConversations(workspaces, conversations, projectScope);
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
       {!shortKeyboardViewport && <View style={styles.chatHeader}>
         <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="프로젝트 선택과 관리" onPress={() => { Keyboard.dismiss(); setShowProjects(true); }}><Text style={styles.toolBtnText}>▱</Text></TouchableOpacity>
         <TouchableOpacity style={styles.chatHeading} accessibilityRole="button" accessibilityLabel="대화 목록과 추가 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}>
-          <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversation?.title || '새 대화'} ⌄</Text>
+          <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversationDisplayTitle(conversation ?? {}, Boolean(input.trim()))} ⌄</Text>
           {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{pc.name} · {workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
         </TouchableOpacity>
         {onSelectExecutionPc && !keyboardVisible && <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="실행 PC 선택" onPress={onSelectExecutionPc}><Text style={styles.pcSelectIcon}>PC⌄</Text></TouchableOpacity>}
@@ -1115,6 +1185,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             disableFullscreenUI
             textAlignVertical="top"
             accessibilityLabel="PC 에이전트에게 보낼 명령"
+            editable={!navigationPending}
             onFocus={() => scheduleComposerKeyboardSync([0, 90, 240])}
             onContentSizeChange={() => scheduleComposerKeyboardSync([0, 80])}
           />
@@ -1161,6 +1232,8 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           </View>
           </View>
         </View>
+        {navigationPending && <Text style={styles.pendingConfigText} accessibilityLiveRegion="polite">대화를 여는 중… 다른 대화의 작업은 계속됩니다.</Text>}
+        {busy && activeRun?.pendingConfig && <View style={styles.pendingConfig} accessibilityLiveRegion="polite"><Text style={styles.pendingConfigText}>다음 실행에 적용 · 현재 {activeRun.effectiveConfig?.providerModel ?? '기존 모델'} · {activeRun.effectiveConfig?.permissionMode ? PERMISSION_LABELS[activeRun.effectiveConfig.permissionMode] : '기존 권한'} 유지</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel="중지하고 적용" style={styles.bigBtn} disabled={savingConfiguration || !activeRun.runId} onPress={() => void stopAndApplyConfiguration()}><Text style={styles.bigBtnText}>중지하고 적용</Text></TouchableOpacity></View>}
         {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
 
@@ -1171,14 +1244,20 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             <View style={styles.optionsHeading}><Text style={styles.modalTitle}>대화 설정</Text><TouchableOpacity accessibilityLabel="추가 설정 닫기" onPress={() => setShowChatOptions(false)} style={styles.composerIconBtn}><Text style={styles.toolBtnText}>×</Text></TouchableOpacity></View>
             <ScrollView keyboardShouldPersistTaps="handled" style={styles.optionsScroll}>
               <Text style={styles.optionsSection}>실행 환경</Text>
-              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowWorkspaces(true); }}><Text style={styles.optionsLabel}>작업 폴더</Text><Text style={styles.optionsValue} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || '선택 안 함'} ›</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked || busy} onPress={() => { setShowChatOptions(false); setShowWorkspaces(true); }}><Text style={styles.optionsLabel}>작업 폴더</Text><Text style={styles.optionsValue} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || '선택 안 함'} ›</Text></TouchableOpacity>
               <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowScenarios(true); }}><Text style={styles.optionsLabel}>모델 시나리오</Text><Text style={styles.optionsValue} numberOfLines={1}>{routingPresets.find(p => p.id === conversation?.routingPresetId)?.name || '단일 모델'} ›</Text></TouchableOpacity>
               <TouchableOpacity style={styles.optionsRow} accessibilityLabel="대화 토큰 정책" disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowTokenPolicy(true); }}><Text style={styles.optionsLabel}>질문 예산</Text><Text style={styles.optionsValue}>{QUESTION_LABELS[conversation?.tokenPolicy ?? 'adaptive']} ›</Text></TouchableOpacity>
               <Text style={styles.optionsSection}>현재 대화</Text>
-              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.optionsLabel}>{conversation?.pinned ? '대화 고정 해제' : '대화 고정'}</Text><Text style={styles.optionsValue}>⌖</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); void archiveConversation(); }}><Text style={styles.optionsLabel}>보관함으로 이동</Text><Text style={styles.optionsValue}>›</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked || busy} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.optionsLabel}>{conversation?.pinned ? '대화 고정 해제' : '대화 고정'}</Text><Text style={styles.optionsValue}>⌖</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked || busy} onPress={() => { setShowChatOptions(false); void archiveConversation(); }}><Text style={styles.optionsLabel}>보관함으로 이동</Text><Text style={styles.optionsValue}>›</Text></TouchableOpacity>
               <Text style={styles.optionsSection}>최근 대화</Text>
-              {conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope).map(c => <TouchableOpacity key={c.id} style={[styles.optionsRow, c.id === conversation?.id && styles.optionsRowOn]} disabled={savingConfiguration} onPress={() => { setShowChatOptions(false); void loadConversation(c.id); }}><Text style={styles.optionsLabel} numberOfLines={1}>{c.pinned ? '⌖ ' : ''}{c.title}</Text><Text style={styles.optionsValue}>{c.id === conversation?.id ? '✓' : '›'}</Text></TouchableOpacity>)}
+              {conversationGroups.map(group => <View key={group.id}>
+                <TouchableOpacity style={styles.optionsRow} accessibilityRole="button" accessibilityLabel={`${group.name} 대화 접기/펼치기`} accessibilityState={{ expanded: !collapsedProjects.includes(group.id) }} onPress={() => toggleProjectGroup(group.id)}>
+                  <Text style={styles.optionsLabel} numberOfLines={1}>{collapsedProjects.includes(group.id) ? '▸' : '▾'} {group.name} · {group.conversations.length}</Text>
+                  {group.conversations.some(c => runs[c.id]?.running) && <Text style={styles.runningBadge}>실행 중</Text>}
+                </TouchableOpacity>
+                {!collapsedProjects.includes(group.id) && group.conversations.map(c => <TouchableOpacity key={c.id} style={[styles.optionsRow, c.id === conversation?.id && styles.optionsRowOn]} onPress={() => { setShowChatOptions(false); void loadConversation(c.id); }}><Text style={styles.optionsLabel} numberOfLines={1}>{c.pinned ? '⌖ ' : ''}{conversationDisplayTitle(c, Boolean(c.id === conversation?.id ? input.trim() : drafts.current.get(c.id)?.trim()))}</Text><Text style={runs[c.id]?.running ? styles.runningBadge : styles.optionsValue}>{runs[c.id]?.running ? (runs[c.id]?.queued ? '대기 중' : '실행 중') : c.id === conversation?.id ? '✓' : '›'}</Text></TouchableOpacity>)}
+              </View>)}
             </ScrollView>
           </View>
         </View>
@@ -1189,6 +1268,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
             <View style={styles.modal}>
               <Text style={styles.modalTitle}>이 대화에서 사용할 모델</Text>
+              {busy && <Text style={styles.modalText}>변경은 다음 실행에 저장됩니다. 현재 작업은 중지하고 적용을 누를 때까지 기존 모델·권한으로 계속됩니다.</Text>}
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="모델 목록 새로고침" style={styles.bigBtn} disabled={refreshingModels} onPress={() => void refreshProviders(true).catch(() => setModelRefreshStatus('PC 연결을 확인하세요. 기존 모델 목록은 유지됩니다.'))}><Text style={styles.bigBtnText}>{refreshingModels ? '모델 목록 확인 중…' : '↻ 모델 목록 새로고침'}</Text></TouchableOpacity>
               {Boolean(modelRefreshStatus) && <Text accessibilityLiveRegion="polite" style={styles.accessCapText}>{modelRefreshStatus}</Text>}
               <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
@@ -1344,6 +1424,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
 }
 
 const styles = StyleSheet.create({
+  pendingConfig: { gap: 6, paddingHorizontal: 4, paddingVertical: 5 },
+  pendingConfigText: { color: colors.dim, fontSize: 11, lineHeight: 16 },
+  runningBadge: { color: colors.ok, fontSize: 11, marginLeft: 8 },
   modeBar: { flexDirection: 'row', gap: 6, paddingHorizontal: 10, paddingTop: 8 },
   modeBtn: { flex: 1, minHeight: 44, justifyContent: 'center', alignItems: 'center', paddingVertical: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.inputBg },
   modeBtnOn: { borderColor: colors.accent, backgroundColor: 'rgba(124,92,255,0.2)' },

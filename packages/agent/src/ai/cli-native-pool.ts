@@ -159,7 +159,7 @@ class NativeWorker {
         if (this.active) this.status(`${this.active.status.replace(/ · \d+초$/, '')} · ${Math.floor((Date.now() - startedAt) / 1000)}초`);
       }, 10_000);
       heartbeat.unref();
-      const toolEvents = new NativeToolEvents(req.onTool);
+      const toolEvents = new NativeToolEvents(req.onTool, Date.now, req.hostTools?.tools.map(tool => tool.name));
       this.active = { req, resolve, reject, abort, timer, heartbeat, startedAt, status: '', text: '', turn: '',
         baseline: this.checkpoint?.usage ?? emptyUsage(), total: this.checkpoint?.usage ?? emptyUsage(),
         usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Map(), streamed: new Map(), applied: [],

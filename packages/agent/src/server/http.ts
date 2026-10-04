@@ -23,6 +23,7 @@ import { authPrincipal, webSocketTicketBinding, WsUpgradeTicketAdmissionError, t
 import { isEncryptedTailnetTransport, isLoopback, isSecurePlainPeerTransport, isTailnetAddress, tailscaleInterfaceAddresses } from './transport.js';
 import { FileTransferAdmission, FileTransferAdmissionError, type FileTransferLease } from './transfer-admission.js';
 import { SecureFiles } from './secure-files.js';
+import { mountWebUi } from './web-static.js';
 import {
   CLOUDFLARE_ACCESS_BOOTSTRAP_COOKIE,
   CLOUDFLARE_ACCESS_BOOTSTRAP_PROBE,
@@ -1695,14 +1696,7 @@ export function createHttpApi(
 
   // Static web UI (built packages/web). SPA fallback for non-API GETs.
   if (webDir && existsSync(join(webDir, 'index.html'))) {
-    app.use(express.static(webDir));
-    app.use((req, res, next) => {
-      if (req.method === 'GET' && !req.path.startsWith('/api')) {
-        res.sendFile(join(webDir, 'index.html'));
-        return;
-      }
-      next();
-    });
+    mountWebUi(app, webDir);
   } else {
     app.get('/', (_req, res) => {
       res

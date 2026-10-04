@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type {
   ChatMessage,
   ChatUsage,
+  ChatExecutionConfig,
   ConversationCreateInput,
   ConversationDetail,
   ConversationStatus,
@@ -678,6 +679,16 @@ export class ConversationStore {
   get(id: string, options: TranscriptPageOptions = {}): ConversationDetail | undefined {
     const item = this.items.find((c) => c.id === id);
     return item ? this.detail(item, options) : undefined;
+  }
+
+  /** Run progress must not load transcript chunks just to compare settings. */
+  executionConfig(id: string): ChatExecutionConfig | undefined {
+    const item = this.items.find(c => c.id === id);
+    return item ? {
+      providerId: item.providerId, providerModel: item.providerModel, routingPresetId: item.routingPresetId,
+      reasoningEffort: item.reasoningEffort, daybreakEnabled: item.daybreakEnabled === true,
+      permissionMode: item.permissionMode ?? 'ask', tokenPolicy: item.tokenPolicy ?? 'adaptive',
+    } : undefined;
   }
 
   turns(id: string): Turn[] {

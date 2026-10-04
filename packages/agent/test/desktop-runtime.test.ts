@@ -45,6 +45,47 @@ test('disposed runtime cannot respawn while retiring', async () => {
   const r = runtime(); await r.request('a', 'ok', {}); r.dispose();
   await assert.rejects(r.request('a', 'ok', {}), /종료/);
 });
+
+test('cancellation settles while a previous desktop helper has not confirmed exit', async () => {
+  const r = runtime();
+  let confirmExit!: () => void;
+  (r as unknown as { retiring: Promise<void> }).retiring = new Promise(resolve => { confirmExit = resolve; });
+  const abort = new AbortController();
+  const pending = r.request('synthetic-owner', 'ok', {}, abort.signal);
+  abort.abort();
+  try {
+    const result = await Promise.race([pending.then(() => 'resolved', () => 'rejected'), new Promise(resolve => setTimeout(() => resolve('hung'), 100))]);
+    assert.equal(result, 'rejected', 'abort must not wait for a stuck helper retirement');
+  } finally { r.dispose(); confirmExit(); await pending.catch(() => {}); }
+});
+
+test('dispose settles requests waiting on helper retirement without claiming the helper exited', async () => {
+  const r = runtime();
+  let confirmExit!: () => void;
+  const retirement = new Promise<void>(resolve => { confirmExit = resolve; });
+  (r as unknown as { retiring: Promise<void> }).retiring = retirement;
+  const pending = r.request('synthetic-owner', 'ok', {});
+  r.dispose();
+  try {
+    const result = await Promise.race([pending.then(() => 'resolved', () => 'rejected'), new Promise(resolve => setTimeout(() => resolve('hung'), 100))]);
+    assert.equal(result, 'rejected', 'runtime disposal must cancel a waiting request');
+    assert.equal((r as unknown as { retiring: Promise<void> }).retiring, retirement, 'unconfirmed retirement remains a spawn barrier');
+  } finally { confirmExit(); await pending.catch(() => {}); }
+});
+
+test('retirement deadline rejects promptly but never clears an unconfirmed helper spawn barrier', async () => {
+  const r = new DesktopRuntime({ command: process.execPath, args: [fixture], retirementTimeoutMs: 20 });
+  let confirmExit!: () => void;
+  const retirement = new Promise<void>(resolve => { confirmExit = resolve; });
+  (r as unknown as { retiring: Promise<void> }).retiring = retirement;
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(r.request('synthetic-owner', 'ok', {}), /종료를 확인하지 못했습니다/);
+      assert.equal((r as unknown as { retiring: Promise<void> }).retiring, retirement);
+      assert.equal((r as unknown as { child?: unknown }).child, undefined, 'no replacement may spawn after timeout');
+    }
+  } finally { r.dispose(); confirmExit(); }
+});
 test('desktop lease spans calls, separates tickets and checks live authorization', async () => {
   let allowed = true;
   const coordinator = new DesktopCoordinator(runtime());

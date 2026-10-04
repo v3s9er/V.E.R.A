@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { extractFile } from '@electron/asar';
+import { createBrowserFixture, browserSmokeChecks, browserSmokeToolAllowed } from './app-browser-fixture.mjs';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const PROVIDER = 'functional-smoke-codex';
@@ -18,7 +19,7 @@ const pause = ms => new Promise(resolveWait => setTimeout(resolveWait, ms));
 
 export function parseOptions(argv) {
   const values = {};
-  const known = new Set(['app-path', 'model', 'expected-version', 'effort', 'out-dir', 'allow-account-usage', 'deadline-ms', 'same-conversation']);
+  const known = new Set(['app-path', 'model', 'expected-version', 'effort', 'out-dir', 'allow-account-usage', 'deadline-ms', 'same-conversation', 'browser-case']);
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     requireCheck(argv[i]?.startsWith('--') && known.has(key) && !Object.hasOwn(values, key) && typeof argv[i + 1] === 'string' && !argv[i + 1].startsWith('--'), 'invalid_arguments');
@@ -27,6 +28,7 @@ export function parseOptions(argv) {
   requireCheck(values.model === EXACT_MODEL && !!values['app-path'], 'exact_model_and_app_required');
   requireCheck(values['allow-account-usage'] === undefined || ['yes', 'no'].includes(values['allow-account-usage']), 'invalid_account_usage_flag');
   requireCheck(values['same-conversation'] === undefined || ['yes', 'no'].includes(values['same-conversation']), 'invalid_continuity_flag');
+  requireCheck(values['browser-case'] === undefined || ['yes', 'no'].includes(values['browser-case']), 'invalid_browser_flag');
   const deadlineMs = Number(values['deadline-ms'] ?? 180_000);
   requireCheck(Number.isInteger(deadlineMs) && deadlineMs >= 30_000 && deadlineMs <= 300_000, 'invalid_deadline');
   const effort = values.effort ?? 'high';
@@ -34,7 +36,7 @@ export function parseOptions(argv) {
   const allow = values['allow-account-usage'] === 'yes';
   requireCheck(!allow || !!values['out-dir'], 'fresh_output_directory_required');
   return { appPath: resolve(values['app-path']), model: EXACT_MODEL, expectedVersion: values['expected-version'] ?? '0.7.0', effort,
-    allow, deadlineMs, sameConversation: values['same-conversation'] === 'yes', outDir: values['out-dir'] ? resolve(values['out-dir']) : undefined };
+    allow, deadlineMs, sameConversation: values['same-conversation'] === 'yes', browserCase: values['browser-case'] === 'yes', outDir: values['out-dir'] ? resolve(values['out-dir']) : undefined };
 }
 
 export function inspectApp(appPath, expectedVersion = '0.7.0') {
@@ -46,7 +48,7 @@ export function inspectApp(appPath, expectedVersion = '0.7.0') {
     requireCheck(pkg.name === 'mr-robot-desktop', 'unexpected_app_package');
     return { kind: 'stage', entry: appPath, version: pkg.version, files: ['package.json', 'main.mjs', 'branding.mjs', 'agent.mjs', 'preload.cjs', 'web/index.html'].map(name => join(appPath, name)) };
   }
-  requireCheck(basename(appPath).toLowerCase() === 'mr.robot.exe', 'not_an_installed_app');
+  requireCheck(['mr.robot.exe', 'v.e.r.a.exe'].includes(basename(appPath).toLowerCase()), 'not_an_installed_app');
   const archive = join(dirname(appPath), 'resources', 'app.asar');
   requireCheck(existsSync(archive) && lstatSync(archive).isFile() && !lstatSync(archive).isSymbolicLink(), 'installed_archive_missing');
   // Do not start an older/unknown binary and only then discover that it ignored
@@ -105,6 +107,7 @@ export function evaluateCase(kind, facts) {
     checks.customExecObservation = facts.toolEvents.some(event => event.name === 'native_custom_tool' && event.status === 'start'
       && facts.toolEvents.some(done => done.name === event.name && done.callId === event.callId && done.status === 'done'));
   }
+  else if (kind === 'owned-browser') { delete checks.nativeObservation; Object.assign(checks, browserSmokeChecks(facts, facts.toolEvents)); }
   else { checks.exactlyOneHelper = facts.helperCount === 1; checks.helperCompleted = facts.completedHelpers === 1; checks.helperReadOnly = facts.effectivePermission === 'read-only'; }
   return { passed: Object.values(checks).every(value => value === true), checks, tools };
 }
@@ -150,18 +153,19 @@ export function bounded(promise, ms, code) {
 
 export async function main(argv) {
   if (argv.length === 1 && argv[0] === '--help') {
-    console.log('Functional native-observation smoke (not a quality benchmark).\nPlan only by default: --app-path STAGE_OR_INSTALLED_EXE --model gpt-6-sol\nExecute only after approval: add --allow-account-usage yes --out-dir NEW_DIRECTORY\nOptional: --expected-version 0.7.0 --effort high --deadline-ms 180000 --same-conversation yes');
+    console.log('Functional native-observation smoke (not a quality benchmark).\nPlan only by default: --app-path STAGE_OR_INSTALLED_EXE --model gpt-6-sol\nExecute only after approval: add --allow-account-usage yes --out-dir NEW_DIRECTORY\nOptional: --expected-version 0.7.1 --effort high --deadline-ms 180000 --same-conversation yes --browser-case yes');
     return;
   }
   const options = parseOptions(argv), input = inspectApp(options.appPath, options.expectedVersion);
   requireCheck(!input.version || input.version === options.expectedVersion, 'staged_version_mismatch');
-  const plan = { functionalSmoke: true, qualityBenchmark: false, inference: options.allow, cases: ['native-exec', 'read-only-helper'],
+  const plan = { functionalSmoke: true, qualityBenchmark: false, inference: options.allow, cases: ['native-exec', 'read-only-helper', ...(options.browserCase ? ['owned-browser'] : [])],
     exactModel: options.model, effort: options.effort, expectedVersion: options.expectedVersion, appKind: input.kind,
     shellMode: input.kind === 'installed' ? 'verified-installed-asar-in-development-electron' : 'stage-in-development-electron',
     appHashes: fileHashes(input.files), deadlinePerCaseMs: options.deadlineMs, sameConversation: options.sameConversation,
     limits: ['Fresh app home/profile/scratch only; no copied user config or tokens.', 'Development Electron loads verified stage/installed ASAR code; never executes installed EXE or tests packaged-shell login-item/update behavior.', 'Normal desktop local RPC -> chat.start; no direct provider shortcut or UI clicking.',
       'One run per case; no retries or model fallback. Native sandbox is not a guarantee against every possible external action.',
-      'Retain only safe observations and output hashes, never raw code, reasoning, tool input/output or account secrets.'] };
+      'Retain only safe observations and output hashes, never raw code, reasoning, tool input/output or account secrets.',
+      ...(options.browserCase ? ['Browser case alone temporarily uses full permission in the isolated app home; only the owned synthetic loopback page is in scope. It never attaches to existing browser profiles.'] : [])] };
   console.log(JSON.stringify({ event: 'plan', ...plan }));
   if (!options.allow) return plan;
   requireCheck(!existsSync(options.outDir), 'output_directory_exists');
@@ -181,10 +185,11 @@ export async function main(argv) {
     command: 'codex', baseUrl: '', apiKey: '', isDefault: true, source: 'subscription', costTier: 0 });
   config.updateRouting({ mode: 'quality', executionMode: 'single', roles: {}, escalationEnabled: false, maxPremiumCalls: 4,
     graph: { nodes: [{ id: 'master', kind: 'model', role: 'general', label: 'Functional smoke', x: 0, y: 0, providerId: PROVIDER, providerModel: options.model }], edges: [] } });
-  const guardedPaths = [...input.files, runtime, fileURLToPath(import.meta.url)], beforeHashes = fileHashes(guardedPaths);
+  const guardedPaths = [...input.files, runtime, fileURLToPath(import.meta.url), fileURLToPath(new URL('./app-browser-fixture.mjs', import.meta.url))], beforeHashes = fileHashes(guardedPaths);
   const report = { functionalSmoke: true, qualityBenchmark: false, shellMode: plan.shellMode, startedAt: new Date().toISOString(), model: options.model, effort: options.effort,
     ownedRoot, evidenceHashes: beforeHashes, preflight: {}, cases: [], complete: false, failure: null, activeRunsAfter: null };
   let app, page, call, active, current, conversationId;
+  let phase = 'launch';
   let streamed = '', eventFailure, startTime = 0, pendingEvents = Promise.resolve();
   const cancelOwned = async () => {
     if (!active || !call) return;
@@ -200,13 +205,18 @@ export async function main(argv) {
   try {
     app = await _electron.launch({ ...launchSpec(input, runtime, profile),
       env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !['ELECTRON_RUN_AS_NODE', 'MR_ROBOT_HOME'].includes(key))), MR_ROBOT_HOME: home }, timeout: 60_000 });
+    phase = 'verify-isolation';
     const actualPaths = await bounded(app.evaluate(({ app }) => ({ profile: app.getPath('userData'), home: process.env.MR_ROBOT_HOME, packaged: app.isPackaged })), 10_000, 'app_path_read_timeout');
     requireCheck(actualPaths.packaged === false, 'packaged_shell_not_allowed');
     requireCheck(resolve(actualPaths.profile).toLowerCase() === resolve(profile).toLowerCase() && resolve(actualPaths.home).toLowerCase() === resolve(home).toLowerCase(), 'profile_isolation_failed');
+    phase = 'first-window';
     page = await bounded(app.firstWindow(), 60_000, 'app_window_timeout');
+    phase = 'renderer-rpc-bridge';
     await page.waitForFunction(() => typeof window.mrRobotDesktop?.callLocalRpc === 'function', undefined, { timeout: 60_000 });
+    phase = 'renderer-composer';
     await page.locator('textarea').first().waitFor({ state: 'attached', timeout: 60_000 });
     call = (method, params = {}, timeoutMs = 30_000) => bounded(page.evaluate(({ method, params, timeoutMs }) => window.mrRobotDesktop.callLocalRpc(method, params, timeoutMs), { method, params, timeoutMs }), timeoutMs + 1000, 'controller_rpc_timeout');
+    phase = 'rpc-preflight';
     const status = await call('status');
     requireCheck(status.version === options.expectedVersion, 'app_version_mismatch');
     const settings = await call('settings.get');
@@ -215,6 +225,7 @@ export async function main(argv) {
     requireCheck((await call('chat.runs')).length === 0 && (await call('memory.list')).length === 0 && (await call('projects.list')).length === 0, 'app_home_not_empty');
     const providers = await call('providers.list');
     requireCheck(providers.length === 1 && providers[0].id === PROVIDER && providers[0].model === options.model, 'provider_isolation_failed');
+    phase = 'provider-catalog';
     const catalog = await call('providers.catalog', { id: PROVIDER, refresh: true }, 60_000);
     requireCheck(catalog.models?.includes(options.model) && catalog.modelCapabilities?.[options.model]?.supportedReasoningEfforts?.includes(options.effort), 'exact_model_capability_unavailable');
     report.preflight = { appVersion: status.version, developmentShell: true, isolatedProfile: true, isolatedWorkspacePermission: true, wizardVersion: 5, exactModelCapabilityVerified: true };
@@ -227,6 +238,7 @@ export async function main(argv) {
         if (event.event === 'chat.tool') {
           const safe = sanitizeToolEvent(data, atMs);
           if (!safe) eventFailure = 'invalid_tool_event';
+          else if (current.kind === 'owned-browser' && !browserSmokeToolAllowed(safe.name)) eventFailure = 'unexpected_browser_tool';
           else if (current.toolEvents.length + current.agentEvents.length < 4000) current.toolEvents.push(safe);
           else eventFailure = 'event_limit';
         }
@@ -251,8 +263,10 @@ export async function main(argv) {
       window.mrRobotDesktop.onLocalRpcEvent(event => { window.__nativeFunctionalPending = window.__nativeFunctionalPending.then(() => window.__nativeFunctionalEvent(event)); });
     }), 10_000, 'event_subscribe_timeout');
     const project = await call('projects.create', { name: 'Native functional smoke', path: scratch,
-      instructions: 'Functional tool-observation test. Use only named files in this fresh workspace. No internet, external directories, credentials, other conversations or processes. Only the explicitly requested artifact may be written. No quality benchmark claims.' });
+      instructions: 'Functional tool-observation test. Use only named files in this fresh workspace. No internet, external directories, credentials, other conversations or existing user processes. Only the explicitly requested artifact may be written. No quality benchmark claims.'
+        + (options.browserCase ? ' A separately and explicitly requested browser case may use only its owned synthetic loopback page and newly isolated browser context via browser tools; never existing profiles or direct HTTP/shell access.' : '') });
     for (const kind of ['native-exec', 'read-only-helper']) {
+      phase = kind;
       requireCheck(JSON.stringify(fileHashes(guardedPaths)) === JSON.stringify(beforeHashes), 'app_provenance_changed');
       requireCheck((await call('chat.runs')).length === 0, 'unexpected_active_run');
       const permissionMode = kind === 'native-exec' ? 'workspace' : 'read-only';
@@ -313,16 +327,68 @@ export async function main(argv) {
       }
       console.log(JSON.stringify({ event: 'case-complete', kind, passed: report.cases.at(-1).passed }));
     }
+    if (options.browserCase) {
+      phase = 'owned-browser';
+      const fixture = await createBrowserFixture();
+      const scratchBefore = scratchSnapshot(scratch);
+      const prompt = `This is an explicitly authorized functional browser test, not a web research task. Use only browser_open, browser_observe, browser_type, browser_click, browser_close on this owned loopback fixture: ${fixture.url}. Open it with Edge, explicitly observe it, replace the Synthetic value field with ${fixture.value}, then click Submit synthetic value exactly once. Observe the page after submission until TEST_RECEIPT appears (read-only observations may repeat). Close the owned browser. Reply only BROWSER_OK=<the receipt you observed>. No shell, native commands, files, helpers, downloads, logins, existing browser profiles, other URLs or account access. Do not use a direct HTTP client or fabricate a browser action.`;
+      const browserExecution = { workspaceId: project.id, providerId: PROVIDER, providerModel: options.model, routingPresetId: null,
+        reasoningEffort: options.effort, daybreakEnabled: false, permissionMode: 'full', tokenPolicy: 'audit-only' };
+      try {
+        requireCheck(JSON.stringify(fileHashes(guardedPaths)) === JSON.stringify(beforeHashes), 'app_provenance_changed');
+        requireCheck((await call('chat.runs')).length === 0, 'unexpected_active_run');
+        await call('settings.set', { safety: { ...settings.safety, mode: 'full', allowedRoots: [scratch] } });
+        const isolatedSafety = (await call('settings.get')).safety;
+        requireCheck(isolatedSafety.mode === 'full' && isolatedSafety.allowedRoots.length === 1 && resolve(isolatedSafety.allowedRoots[0]) === resolve(scratch), 'browser_isolated_policy_mismatch');
+        active = (await call('conversations.create', { title: 'Functional smoke owned browser', ...browserExecution })).id;
+        requireCheck((await call('conversations.get', { id: active })).permissionMode === 'full', 'browser_effective_policy_mismatch');
+        current = { kind: 'owned-browser', startedAt: new Date().toISOString(), inputSha256: fixture.inputSha256, promptSha256: sha256(prompt), toolEvents: [], agentEvents: [], passed: false };
+        report.cases.push(current); streamed = ''; eventFailure = undefined; startTime = performance.now();
+        const response = await bounded(call('chat.start', { conversationId: active, text: prompt, ...browserExecution }, options.deadlineMs + 15_000), options.deadlineMs, 'case_deadline');
+        await bounded(page.evaluate(() => window.__nativeFunctionalPending), 10_000, 'event_flush_timeout');
+        await bounded(pendingEvents, 10_000, 'controller_event_flush_timeout');
+        requireCheck(!eventFailure, eventFailure ?? 'event_failure');
+        const saved = await call('conversations.get', { id: active, limit: 20 });
+        const telemetryRows = await call('telemetry.list', { limit: 30 });
+        const telemetry = telemetryRows.filter(row => row.conversationId === active).sort((a, b) => (b.startedAt ?? b.at ?? 0) - (a.startedAt ?? a.at ?? 0))[0];
+        const facts = { productCompleted: response.ok === true,
+          exactModelAndEffort: response.route?.model === options.model && response.route?.effort === options.effort && telemetry?.model === options.model,
+          nativeTransport: telemetry?.transport?.some(row => row.transport === 'codex-native') === true,
+          savedAndStreamedFinalMatch: typeof response.text === 'string' && response.text === streamed && saved.messages?.some(row => row.role === 'assistant' && row.content === response.text),
+          expectedAnswer: typeof response.text === 'string' && response.text.trim() === fixture.expected,
+          inputUnchanged: true, allowedScratchChangesOnly: allowedScratchChanges('owned-browser', scratchBefore, scratchSnapshot(scratch)),
+          fixtureSubmissionVerified: fixture.verified(), effectivePermission: saved.permissionMode,
+          helperCount: new Set(current.agentEvents.map(event => event.agentId)).size, toolEvents: current.toolEvents, telemetryToolCalls: telemetry?.toolCalls };
+        Object.assign(current, evaluateCase('owned-browser', facts), { durationMs: Math.round(performance.now() - startTime), finalOutputSha256: typeof response.text === 'string' ? sha256(response.text) : null,
+          helperCount: facts.helperCount, telemetryToolCalls: Number.isFinite(telemetry?.toolCalls) ? telemetry.toolCalls : null,
+          tokenCounts: Object.fromEntries(['promptTokens', 'completionTokens', 'cachedPromptTokens'].map(key => [key, Number.isFinite(telemetry?.[key]) && telemetry[key] >= 0 ? telemetry[key] : null])), childTokensNotAddedAgain: true });
+        requireCheck(current.passed, 'functional_assertion_failed');
+        console.log(JSON.stringify({ event: 'case-complete', kind: 'owned-browser', passed: current.passed }));
+      } finally {
+        try { if (active) await cancelOwned(); }
+        finally {
+          active = undefined; current = undefined;
+          try { await bounded(fixture.close(), 5000, 'fixture_close_timeout'); }
+          finally { await call('settings.set', { safety: settings.safety }); }
+        }
+      }
+    }
     report.activeRunsAfter = (await call('chat.runs')).length;
     requireCheck(report.activeRunsAfter === 0, 'owned_runs_remain');
     requireCheck(JSON.stringify(fileHashes(guardedPaths)) === JSON.stringify(beforeHashes), 'app_provenance_changed');
     report.provenanceUnchanged = true; report.complete = true;
-  } catch (error) { report.failure = error instanceof SmokeFailure ? error.code : 'app_or_rpc_failure'; }
+  } catch (error) {
+    report.failure = error instanceof SmokeFailure ? error.code : 'app_or_rpc_failure';
+    // Stage labels and known error classes only; never persist messages or stacks,
+    // which can contain account, profile, RPC or model output data.
+    report.failurePhase = phase;
+    report.failureClass = ['Error', 'TimeoutError'].includes(error?.name) ? error.name : 'other';
+  }
   finally {
     if (active) await cancelOwned().catch(() => { report.cancellationUnconfirmed = true; });
     if (app) await bounded(app.close(), 30_000, 'app_close_timeout').catch(() => { report.appCloseUnconfirmed = true; });
     report.finishedAt = new Date().toISOString();
-    report.passed = report.complete && report.cases.length === 2 && report.cases.every(row => row.passed) && !report.cancellationUnconfirmed && !report.appCloseUnconfirmed;
+    report.passed = report.complete && report.cases.length === plan.cases.length && report.cases.every(row => row.passed) && !report.cancellationUnconfirmed && !report.appCloseUnconfirmed;
     saveJson(join(options.outDir, 'report.json'), report);
   }
   console.log(JSON.stringify({ event: 'result', complete: report.complete, passed: report.passed,

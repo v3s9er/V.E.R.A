@@ -177,6 +177,9 @@ export interface ChatRunState {
   startedAt?: number;
   status?: string;
   steeringQueued: number;
+  effectiveConfig?: import('../../../packages/shared/src/protocol').ChatExecutionConfig;
+  pendingConfig?: boolean;
+  queued?: boolean;
   runId?: string;
   phase?: 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
   updatedAt?: number;

@@ -107,10 +107,12 @@ if (desktopComposerInput < 0 || desktopReasoningControl < desktopComposerInput
   || !chat.includes('disabled={executionControlsDisabled}')) throw new Error('desktop reasoning selector is not accessible, composer-local, or locked during a run or settings save');
 if ((chat.match(/setReasoningEffort\(event\.target\.value as ReasoningEffort\)/g) ?? []).length !== 1
   || !chat.includes('selectedRef.current = optimistic')
-  || !chat.includes('executionConfigSavingRef.current = true')
+  || !chat.includes('executionConfigSavingRef.current.add(target.id)')
+  || !chat.includes('executionConfigSavingRef.current.delete(target.id)')
   || !chat.includes('rollbackMatchingFields')
   || !chat.includes('Object.is(currentRecord[key], patchRecord[key])')
-  || !chat.includes('if (executionConfigSavingRef.current)')) throw new Error('desktop execution settings do not share rollback-safe persistence and a synchronous send lock');
+  || !chat.includes('executionConfigSavingRef.current.has(selectedId.current)')
+  || !chat.includes("client.call('chat.configure'")) throw new Error('desktop execution settings do not share rollback-safe persistence and a synchronous per-conversation send lock');
 const desktopPermissionSelect = chat.indexOf('aria-label="입력창 액세스 권한"');
 const desktopTokenPolicySelect = chat.indexOf('aria-label="입력창 질문 토큰 예산"');
 if (desktopPermissionSelect < 0 || desktopTokenPolicySelect < desktopPermissionSelect
@@ -228,13 +230,14 @@ const mobileReasoningModal = mobileChat.indexOf('<Modal visible={showReasoning}'
 if (mobileInputBar < 0 || mobileReasoningControl < mobileInputBar || mobileReasoningModal < mobileReasoningControl
   || !mobileChat.includes('styles.composerToolbar, shortKeyboardViewport')
   || mobileChat.includes('cycleEffort')) throw new Error('mobile reasoning control is not a compact explicit selector at the keyboard-safe composer bottom');
-if (!mobileChat.includes("client.call('conversations.update', { id: conversationId, reasoningEffort })")
-  || !mobileChat.includes('const reasoningLocked = !conversation || busy || savingConfiguration')
-  || !mobileChat.includes('configurationSaveInFlightRef.current')
+if (!mobileChat.includes('configureExecution(conversationId, { reasoningEffort })')
+  || !mobileChat.includes('const reasoningLocked = !conversation || navigationPending || savingConfiguration')
+  || !mobileChat.includes('configurationSaveInFlightRef.current.has(currentConversation.id)')
   || !mobileChat.includes('beginConfigurationSave()')
-  || !mobileChat.includes('finishConfigurationSave()')
+  || !mobileChat.includes('finishConfigurationSave(conversationId)')
   || !mobileChat.includes('disabled={reasoningLocked}')
-  || !mobileChat.includes('accessibilityState={{ selected, disabled: savingConfiguration }}')) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or change during a run');
+  || !mobileChat.includes('accessibilityState={{ selected, disabled: savingConfiguration }}')
+  || !mobileChat.includes("apply: 'next-run' | 'stop-current' = 'next-run'")) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or mutate an active run');
 if (!mobileChat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')
   || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model)')
   || !mobileChat.includes('applyConversationConfiguration(conversationId')

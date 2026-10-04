@@ -411,12 +411,32 @@ export interface WorkspaceInfo {
   instructions?: string;
 }
 
+/** Settings captured at run admission. Conversation edits do not mutate them. */
+export interface ChatExecutionConfig {
+  providerId?: string | null;
+  providerModel?: string | null;
+  routingPresetId?: string | null;
+  reasoningEffort?: ReasoningEffort;
+  daybreakEnabled?: boolean;
+  permissionMode: PermissionMode;
+  tokenPolicy?: ConversationTokenPolicy;
+}
+
+export interface ChatConfigureResult {
+  conversation: ConversationDetail;
+  application: 'saved' | 'pending' | 'stopped';
+  run?: ChatRunState;
+}
+
 export interface ChatRunState {
   conversationId: string;
   running: boolean;
   startedAt?: number;
   status?: string;
   steeringQueued: number;
+  effectiveConfig?: ChatExecutionConfig;
+  pendingConfig?: boolean;
+  queued?: boolean;
   runId?: string;
   phase?: ChatRunPhase;
   updatedAt?: number;

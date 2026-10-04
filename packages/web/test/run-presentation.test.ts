@@ -3,6 +3,15 @@ import { test } from 'node:test';
 import { activityLabel, executionPresentation, isObservationLimitedStatus, mergeToolActivity, runPresentation, runTimeline, terminalRunUpdate, timelineStateLabel } from '../../shared/src/run-presentation.js';
 import type { CoordinationAgent } from '../../shared/src/coordination.js';
 
+test('project queue is observable waiting, never model execution or a terminal override', () => {
+  const queued = runPresentation({ phase: 'starting', queued: true, busy: true, status: 'PRIVATE_STATUS' });
+  assert.equal(queued.heading, '프로젝트 실행 대기');
+  assert.match(queued.detail, /앞선 작업/);
+  assert.ok(!queued.detail.includes('PRIVATE_STATUS'));
+  assert.equal(runPresentation({ phase: 'failed', queued: true, busy: false }).heading, '확인이 필요한 오류');
+  assert.equal(runPresentation({ phase: 'cancelling', queued: true, busy: true }).heading, '작업을 안전하게 중지하는 중');
+});
+
 const helper = (state: CoordinationAgent['state'], overrides: Partial<CoordinationAgent> = {}): CoordinationAgent => ({
   agentId: 'review', label: '프로젝트 검토', providerId: 'fixture', model: 'fixture-model', state,
   sequence: 1, turns: 1, status: 'PRIVATE_STATUS', usage: { promptTokens: 0, completionTokens: 0 }, ...overrides,

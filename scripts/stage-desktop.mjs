@@ -57,6 +57,7 @@ execFileSync(process.execPath, [
   '--target=node20',
   '--format=esm',
   '--external:electron',
+  '--external:playwright-core',
   `--outfile=${join(stage, 'agent.mjs')}`,
   `--banner:js=import { createRequire as __mrRobotCreateRequire } from 'node:module'; const require = __mrRobotCreateRequire(import.meta.url);`,
 ], { stdio: 'inherit' });
@@ -93,7 +94,7 @@ copyFileSync(join(root, 'apps', 'mobile', 'assets', 'icon.png'), join(stage, 'ic
 // main.mjs uses ws for native Cloudflare Access headers on WSS upgrades.
 // Copy the audited runtime dependency because the staged Electron app is
 // intentionally self-contained and does not run npm install at startup.
-const dependencies = Object.fromEntries(['ws', 'pngjs', 'tesseract.js', '@tesseract.js-data/eng'].map(name => [name, stageDependency(name)]));
+const dependencies = Object.fromEntries(['ws', 'pngjs', 'tesseract.js', '@tesseract.js-data/eng', 'playwright-core'].map(name => [name, stageDependency(name)]));
 const web = join(root, 'packages', 'web', 'dist');
 if (!existsSync(join(web, 'index.html'))) throw new Error('web build is missing; run npm run build first');
 copyTree(web, join(stage, 'web'));

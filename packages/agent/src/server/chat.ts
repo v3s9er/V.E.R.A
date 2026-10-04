@@ -16,6 +16,7 @@ interface PendingConfirm {
 const CONFIRM_TIMEOUT_MS = 120_000;
 const CANCEL_MESSAGES = {
   user: '작업이 중지되었습니다.',
+  reconfigure: '실행 설정 변경을 위해 작업을 중지했습니다. 이미 실행된 작업을 되풀이하지 않도록 현재 결과를 확인한 뒤 이어갈 지시를 보내세요.',
   shutdown: 'PC 에이전트가 종료되어 작업이 중단되었습니다. 다시 연결한 후 요청하세요.',
   revoked: '연결된 기기의 권한이 변경되거나 해제되어 작업을 중단했습니다.',
   'discord-disconnected': 'Discord 연결이 끊겨 작업을 안전하게 중단했습니다. 재연결 후 다시 요청하세요.',
@@ -25,7 +26,7 @@ const CANCEL_MESSAGES = {
 export type ChatCancelReason = keyof typeof CANCEL_MESSAGES;
 
 /**
- * Per-connection chat state: the conversation turns plus the
+ * Per-run chat state: the conversation turns plus the
  * approval-in-flight bookkeeping. One confirmation at a time (tool calls
  * execute sequentially), resolved by the owning device or by timeout.
  * A transient socket disconnect does not own or cancel this state.
@@ -64,6 +65,8 @@ export class ChatSession {
   cancellationMessage(): string | undefined {
     return this.abort?.signal.aborted && this.cancelReason ? CANCEL_MESSAGES[this.cancelReason] : undefined;
   }
+
+  isReconfiguring(): boolean { return this.cancelReason === 'reconfigure'; }
 
   steer(text: string): number {
     if (!this.busy || this.abort?.signal.aborted) throw new Error('종료 중이거나 실행 중인 작업이 없습니다. 완료 후 새 메시지를 보내세요.');

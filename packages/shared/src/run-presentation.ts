@@ -109,7 +109,7 @@ export function mergeToolActivity<T extends { key: string; callId?: string; name
 }
 export function runPresentation(run: {
   phase?: ChatRunPhase; activity?: ChatRunActivity[]; agents?: CoordinationAgent[];
-  activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean;
+  activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean; queued?: boolean;
   startedAt?: number; updatedAt?: number; busy: boolean; status?: string;
 }, now = Date.now()) {
   const state = run.phase ?? (run.busy ? 'starting' : 'completed');
@@ -131,7 +131,9 @@ export function runPresentation(run: {
   const queuedAgents = agents.filter(agent => agent.state === 'queued').length;
   // Recognize only this host-emitted stage marker; never reflect free-form status text.
   const verifying = !terminal && ['starting', 'working'].includes(state) && /^최종 검증 시작(?: ·|$)/.test(run.status ?? '');
+  const queued = !terminal && state === 'starting' && run.queued === true;
   const heading = state === 'completed' && hasErrors ? '응답 완료 · 실행 오류 확인'
+    : queued ? '프로젝트 실행 대기'
     : verifying ? '최종 결과 검토 중'
     : ['starting', 'working'].includes(state) && !running.length
       ? runningAgents ? (runningAgents > 1 ? '보조 작업 병렬 실행 중' : '보조 작업 실행 중')
@@ -143,6 +145,7 @@ export function runPresentation(run: {
       errors ? `${partial || hiddenErrorNotice ? '표시된 ' : ''}오류 ${errors}개` : '', hiddenErrorNotice, historyNotice].filter(Boolean).join(' · ')
     : state === 'approval' ? '승인 또는 거절을 기다리고 있어요'
     : state === 'cancelling' ? '실제 실행이 종료될 때까지 기다리고 있어요'
+    : queued ? '같은 프로젝트의 앞선 작업이 끝나면 시작합니다. 다른 대화는 계속 사용할 수 있어요.'
     : verifying ? '최종 담당자가 결과를 검토하고 있어요. 검증 완료 여부는 아직 확인되지 않았습니다.'
     : running.length ? `${activityLabel(running.at(-1)!.label)}${running.length > 1 ? ` · ${running.length}개 실행 중` : ''}`
     : runningAgents ? `보조 작업 ${runningAgents}개 실행 중${queuedAgents ? ` · ${queuedAgents}개 실행 대기` : ''}`

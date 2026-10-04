@@ -18,6 +18,44 @@ function check(description, condition) {
   if (!condition) throw new Error(`MOBILE UI CONTRACT FAILED: ${description}`);
 }
 
+check('new conversations invalidate old loads, commit the current target synchronously, and preserve drafts',
+  chat.includes('if (creatingConversation.current) return;')
+  && chat.includes('const generation = ++loadGeneration.current;')
+  && chat.includes('if (generation === loadGeneration.current) await loadConversation(created.id);')
+  && chat.includes('conversationRef.current = detail;')
+  && chat.includes('navigationPendingRef.current || activeId.current !== currentConversation.id')
+  && chat.includes('inputRef.current = drafts.current.get(id)')
+  && !chat.includes("if (target) { setInput(''); await loadConversation(target.id); }"));
+check('project groups persist per PC and expose independent run badges without draft contents',
+  chat.includes('groupProjectConversations(workspaces, conversations, projectScope)')
+  && chat.includes('conversationDisplayTitle(c, Boolean(')
+  && chat.includes('AsyncStorage.setItem(collapseKey, JSON.stringify(next))')
+  && chat.includes('accessibilityState={{ expanded: !collapsedProjects.includes(group.id) }}')
+  && chat.includes("runs[c.id]?.queued ? '대기 중' : '실행 중'"));
+check('running model and permission changes save for next run, with explicit stop/apply and no automatic replay',
+  chat.includes('const configurationLocked = navigationPending || savingConfiguration;')
+  && chat.includes("client.call('chat.configure'")
+  && chat.includes("apply: 'next-run' | 'stop-current' = 'next-run'")
+  && chat.includes("configureExecution(target.id, {}, 'stop-current')")
+  && chat.includes('expectedRunId: runs[id]?.runId')
+  && chat.includes('activeRun?.pendingConfig')
+  && chat.includes('activeRun.effectiveConfig?.permissionMode')
+  && chat.includes('configurationSaveInFlightRef.current.has(currentConversation.id)'));
+check('late execution-setting saves cannot change another conversation screen or command mode',
+  (chat.match(/if \(activeId\.current !== conversationId\) return;/g) ?? []).length >= 7
+  && chat.includes('mountedRef.current && activeId.current === conversationId'));
+check('reopening waits for only that conversation setting save before fetching its snapshot',
+  chat.includes('useRef(new ConversationSaveBarrier())')
+  && chat.indexOf('await configurationSaveInFlightRef.current.wait(id);') < chat.indexOf("client.call('conversations.get', { id })")
+  && chat.includes('if (generation !== loadGeneration.current) return;'));
+check('reasoning save completion owns only its conversation popup and saving indicator',
+  chat.includes('const [savingReasoningIds, setSavingReasoningIds] = useState<string[]>([]);')
+  && chat.includes('Boolean(conversation && savingReasoningIds.includes(conversation.id))')
+  && chat.includes('setSavingReasoningIds(ids => [...ids, conversationId]);')
+  && chat.includes('if (activeId.current === conversationId) setShowReasoning(false);')
+  && chat.includes('setSavingReasoningIds(ids => ids.filter(id => id !== conversationId))')
+  && !chat.includes('setSavingReasoning(false)'));
+
 check('Gradle bundle tasks track shared workspace sources and configuration outside the mobile root',
   androidBuild.includes("def mrRobotSharedRoot = new File(rootDir, '../../../packages/shared')")
   && androidBuild.includes('tasks.withType(com.facebook.react.tasks.BundleHermesCTask).configureEach')
@@ -108,7 +146,7 @@ check('an exact failed retry replaces only the failed tail while a start-dispatc
   && chat.includes('setMessages((items) => appendPendingAttempt(items, text));'));
 const mobilePermissionControl = chat.indexOf('setPermissionNotice(\'\'); setShowAccess(true);');
 const mobileTokenPolicyControl = chat.indexOf('accessibilityLabel="대화 토큰 정책"');
-check('per-conversation token policy follows permission and is run-locked, rollback-safe, and administrator-gated',
+check('per-conversation token policy follows permission and saves through next-run configuration within the authenticated policy ceiling',
   mobilePermissionControl >= 0
   && mobileTokenPolicyControl > mobilePermissionControl
   && types.includes("export type ConversationTokenPolicy = 'adaptive' | 'economy' | 'standard' | 'quality' | 'audit-only';")
@@ -117,7 +155,8 @@ check('per-conversation token policy follows permission and is run-locked, rollb
   && rpc.includes('this.isAdmin = this.authed && auth?.isAdmin === true;')
   && rpc.includes('canUseAuditOnly = false;')
   && rpc.includes('this.canUseAuditOnly = this.authed && auth?.canUseAuditOnly === true;')
-  && chat.includes("if (!client.canUseAuditOnly || !conversation || busy || !beginConfigurationSave()) return;")
+  && chat.includes("if (!client.canUseAuditOnly || !conversation || !beginConfigurationSave()) return;")
+  && chat.includes("configureExecution(conversationId, { tokenPolicy })")
   && chat.includes("tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive'")
   && chat.includes('disabled={configurationLocked || !client.canUseAuditOnly}')
   && chat.includes("...(client.canUseAuditOnly ? [['audit-only', '무제한 · 감사만'")

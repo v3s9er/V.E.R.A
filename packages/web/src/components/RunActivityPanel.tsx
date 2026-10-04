@@ -3,14 +3,14 @@ import './RunActivityPanel.css';
 import { activityLabel, agentActivityLabel, AGENT_STATE_LABELS, executionPresentation, runPresentation } from '@mr-robot/shared';
 import type { ChatRunActivity, ChatRunPhase, CoordinationAgent, RoutingExecutionMode } from '@mr-robot/shared';
 
-export function RunActivityPanel({ phase, activity = [], activityTruncated, activityHadErrors, observationLimited, agents = [], startedAt, updatedAt, busy, status, executionMode }: {
+export function RunActivityPanel({ phase, activity = [], activityTruncated, activityHadErrors, observationLimited, queued, agents = [], startedAt, updatedAt, busy, status, executionMode }: {
   phase?: ChatRunPhase; activity?: ChatRunActivity[]; agents?: CoordinationAgent[]; startedAt?: number; updatedAt?: number; busy: boolean; status?: string; executionMode?: RoutingExecutionMode;
-  activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean;
+  activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean; queued?: boolean;
 }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => { if (!busy) return; setNow(Date.now()); const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, [busy]);
   if (!busy && !phase && !activity.length && !agents.length) return null;
-  const view = runPresentation({ phase, activity, activityTruncated, activityHadErrors, observationLimited, agents, startedAt, updatedAt, busy, status }, now);
+  const view = runPresentation({ phase, activity, activityTruncated, activityHadErrors, observationLimited, queued, agents, startedAt, updatedAt, busy, status }, now);
   const execution = executionPresentation(executionMode, agents);
   const { state, heading } = view;
   const hasErrors = view.hasErrors;

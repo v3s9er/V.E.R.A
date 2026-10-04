@@ -18,7 +18,7 @@ function sourceFiles(directory) {
 }
 
 test('web and mobile screens use V.E.R.A without changing internal client identifiers', () => {
-  for (const path of [...sourceFiles('packages/web/src'), ...sourceFiles('apps/mobile/src/screens')]) {
+  for (const path of [...sourceFiles('packages/web/src'), ...sourceFiles('apps/mobile/src/screens'), ...sourceFiles('apps/mobile/src/components')]) {
     assert.doesNotMatch(read(path), oldDisplayName, `old display branding in ${path}`);
   }
   assert.match(read('packages/web/index.html'), /<title>V\.E\.R\.A — PC AI 에이전트<\/title>/);
@@ -30,11 +30,21 @@ test('web and mobile screens use V.E.R.A without changing internal client identi
   assert.match(read('packages/web/src/rpc.ts'), /export class MrRobotClient/);
 });
 
+test('conversation sidebar and assistant chrome use the current brand independently of saved message text', () => {
+  const chat = read('packages/web/src/views/ChatView.tsx');
+  assert.match(chat, /className="conversation-brand"[^\n]*<b>V\.E\.R\.A<\/b>/);
+  assert.match(chat, /className="msg-meta">\{m\.role === 'user' \? '나' : 'V\.E\.R\.A'\}/);
+  assert.match(read('packages/web/src/App.tsx'), /<b>V\.E\.R\.A<\/b>/);
+  // Branding applies to product chrome; historical user/model content is not
+  // rewritten or migrated merely because it contains the previous name.
+  assert.doesNotMatch(chat, /(?:m\.text|m\.content)\.replace(?:All)?\([^\n]*Mr/);
+});
+
 test('display metadata preserves Windows and Android installation identity', () => {
   const desktop = JSON.parse(read('packages/desktop/electron-builder.json'));
   assert.equal(desktop.productName, 'V.E.R.A');
   assert.equal(desktop.nsis.shortcutName, 'V.E.R.A');
-  assert.equal(desktop.executableName, 'Mr.Robot');
+  assert.equal(desktop.executableName, 'V.E.R.A');
   assert.equal(desktop.appId, 'com.polaris.mrrobot');
   const { expo } = JSON.parse(read('apps/mobile/app.json'));
   assert.equal(expo.name, 'V.E.R.A');
@@ -75,6 +85,21 @@ test('desktop bootstrap stages and applies branding before starting the agent', 
   assert.match(read('scripts/stage-desktop.mjs'), /copyFileSync\(join\(desktop, 'branding\.mjs'\), join\(stage, 'branding\.mjs'\)\)/);
   assert.equal(DESKTOP_LOGIN_ITEM_NAME, 'electron.app.Mr.Robot');
   assert.equal(main.match(/name: DESKTOP_LOGIN_ITEM_NAME/g)?.length, 2, 'both startup settings writes use the existing Windows registry value');
+  assert.equal(main.match(/path: process\.execPath, name: DESKTOP_LOGIN_ITEM_NAME/g)?.length, 2, 'the existing login item points to the current executable, including after rename');
+});
+
+test('installer and uninstaller fail closed until both legacy and current executables exit', () => {
+  const desktop = JSON.parse(read('packages/desktop/electron-builder.json'));
+  assert.equal(desktop.nsis.include, 'installer-migration.nsh');
+  assert.equal(desktop.nsis.allowToChangeInstallationDirectory, true);
+  const migration = read('packages/desktop/installer-migration.nsh');
+  assert.match(migration, /!macro customCheckAppRunning/);
+  assert.match(migration, /VERA_REQUIRE_PROCESS_EXIT "Mr\.Robot\.exe"/);
+  assert.match(migration, /VERA_REQUIRE_PROCESS_EXIT "\$\{APP_EXECUTABLE_FILENAME\}"/);
+  assert.match(migration, /nsProcess::_FindProcess/);
+  assert.match(migration, /\$R0 != 603/);
+  assert.equal(migration.match(/SetErrorLevel 2/g)?.length, 2);
+  assert.doesNotMatch(migration, /_KillProcess|_CloseProcess|taskkill|Stop-Process|RMDir|DeleteRegKey|WriteRegStr/i);
 });
 
 test('an explicit packaged user-data-dir isolates profiles and the instance lock', (t) => {

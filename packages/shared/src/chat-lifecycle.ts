@@ -38,6 +38,27 @@ export class ChatRequestOwnership {
     return token;
   }
   owns(conversationId: string, token: object): boolean { return this.pending.get(conversationId) === token; }
+  has(conversationId: string): boolean { return this.pending.has(conversationId); }
   finish(conversationId: string): void { this.pending.delete(conversationId); }
   clear(): void { this.pending.clear(); }
+}
+
+/** A reopened conversation must read settings after its own pending save settles. */
+export class ConversationSaveBarrier {
+  private readonly pending = new Map<string, { settled: Promise<void>; resolve(): void }>();
+  has(conversationId: string): boolean { return this.pending.has(conversationId); }
+  add(conversationId: string): void {
+    if (this.pending.has(conversationId)) return;
+    let resolve!: () => void;
+    const settled = new Promise<void>(done => { resolve = done; });
+    this.pending.set(conversationId, { settled, resolve });
+  }
+  delete(conversationId: string): void {
+    const entry = this.pending.get(conversationId);
+    this.pending.delete(conversationId);
+    entry?.resolve();
+  }
+  async wait(conversationId: string): Promise<void> {
+    while (this.pending.has(conversationId)) await this.pending.get(conversationId)!.settled;
+  }
 }

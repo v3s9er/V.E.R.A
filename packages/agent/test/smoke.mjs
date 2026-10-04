@@ -868,7 +868,7 @@ const { host, port } = await server.start({ port: 8799, host: '127.0.0.1' });
 const base = `http://127.0.0.1:${port}`;
 
 const expectedBuiltins = [
-  'calendar', 'remote-link', 'tailscale-connect', 'docker-sandbox', 'ctf-toolpack',
+  'calendar', 'remote-link', 'tailscale-connect', 'docker-sandbox', 'managed-sandbox', 'ctf-toolpack',
   'mcp-host', 'voice-wake', 'lid-display', 'resource-archiver', 'sslscan-auditor',
   'webcrypto-observer', 'discord-agent',
 ].sort();

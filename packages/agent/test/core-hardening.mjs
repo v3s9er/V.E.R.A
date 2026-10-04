@@ -1210,12 +1210,19 @@ console.log('8b. model-run admission is shared, bounded, and failure-safe');
   const startsBeforeInvalid = server.chatRunAdmission.snapshot().globalStarts;
   let invalidStartRejected = false;
   try { handlers.get('chat.start')({ conversationId: conversation.id, text: 'bad policy', tokenPolicy: 'unbounded' }, admin); } catch { invalidStartRejected = true; }
-  admin.state.chat.begin();
+  let finishActive;
+  const activeGate = new Promise(resolve => { finishActive = resolve; });
+  const previousRun = server.loop.run;
+  server.loop.run = async (...args) => { await activeGate; return previousRun(...args); };
+  const active = handlers.get('chat.start')({ conversationId: conversation.id, text: 'active conversation' }, admin);
+  const startsWhileActive = server.chatRunAdmission.snapshot().globalStarts;
   let busyRejected = false;
   try { handlers.get('chat.start')({ conversationId: conversation.id, text: 'busy' }, admin); } catch { busyRejected = true; }
-  admin.state.chat.end();
-  check('invalid or already-busy starts are rejected before consuming admission state',
-    invalidStartRejected && busyRejected && server.chatRunAdmission.snapshot().globalStarts === startsBeforeInvalid);
+  check('invalid or already-busy conversation starts are rejected before consuming admission state',
+    invalidStartRejected && busyRejected && startsWhileActive === startsBeforeInvalid + 1
+    && server.chatRunAdmission.snapshot().globalStarts === startsWhileActive);
+  finishActive();
+  await active;
 }
 
 {

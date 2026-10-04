@@ -11,12 +11,19 @@ const names: Record<string, string> = {
 /** Call only AFTER thread/turn correlation. Never retain provider payloads. */
 export class NativeToolEvents {
   private items = new Map<string, { name: string; started: number; done: boolean; failed: boolean }>();
-  constructor(private emit?: (event: NativeToolEvent) => void, private now = Date.now) {}
+  private hostToolNames: Set<string>;
+  constructor(private emit?: (event: NativeToolEvent) => void, private now = Date.now, hostToolNames: readonly string[] = []) {
+    // Only host-registered public operation names may replace the generic label.
+    // Copy the allowlist and never derive a name from provider arguments/output.
+    this.hostToolNames = new Set(hostToolNames.filter(name => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)));
+  }
   private publish(event: NativeToolEvent): void {
     try { this.emit?.(event); } catch { /* Progress consumers cannot break execution. */ }
   }
   accept(method: string, item: any): void {
-    const name = Object.hasOwn(names, item?.type) ? names[item.type] : undefined;
+    const genericName = Object.hasOwn(names, item?.type) ? names[item.type] : undefined;
+    const name = item?.type === 'dynamicToolCall' && typeof item.tool === 'string' && this.hostToolNames.has(item.tool)
+      ? item.tool : genericName;
     if (!name || !['item/started', 'item/completed'].includes(method)
       || typeof item.id !== 'string' || !item.id || item.id.length > 200) return;
     let previous = this.items.get(item.id);

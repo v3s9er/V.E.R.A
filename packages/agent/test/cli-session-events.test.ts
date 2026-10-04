@@ -67,6 +67,9 @@ try {
   }
 } finally {
   closeTextWorkers(); closeNativeWorkers();
+  // Windows keeps a working-directory handle until the fixture worker exits.
+  // Await the same bounded retirement barrier used by the actual CLI pool.
+  await waitForCliRetirements(process.env);
   for (let i = 0; i < 30; i++) { try { rmSync(dir, { recursive: true, force: true }); break; } catch (e) { if (i === 29) throw e; await new Promise(r => setTimeout(r, 100)); } }
 }
 console.log('Session event ordering passed for isolated and native transports.');

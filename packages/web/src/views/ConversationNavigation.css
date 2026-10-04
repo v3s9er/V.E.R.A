@@ -1,0 +1,10 @@
+.conversation-project-group { min-width: 0; margin: 4px 0 10px; }
+.conversation-group-toggle { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 36px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text-dim, #b8b6c4); text-align: left; cursor: pointer; }
+.conversation-group-toggle b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.conversation-group-toggle small { font-size: 10px; opacity: .7; }
+.conversation-group-toggle:hover { background: #ffffff08; }
+.conversation-running { color: #b5d8ca; font-size: 10px; white-space: nowrap; }
+.conversation-loading { color: #bab5c6; font-size: 11px; padding: 2px 0 6px; }
+.pending-execution-config { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 7px 0; color: #d5c6ef; font-size: 11px; }
+.pending-execution-config span { flex: 1; min-width: 180px; }
+.pending-execution-config button { min-height: 30px; }
