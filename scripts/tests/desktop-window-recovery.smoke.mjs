@@ -25,6 +25,24 @@ try {
   const page = await app.firstWindow();
   await page.locator('textarea').first().waitFor({state:'visible', timeout:60_000});
   assert.match(await page.title(), /PC AI/);
+  if (process.platform === 'win32') {
+    const chrome = await page.evaluate(() => ({
+      enabled: document.documentElement.dataset.windowChrome,
+      drag: getComputedStyle(document.querySelector('.desktop-drag-region')).getPropertyValue('-webkit-app-region'),
+      inputTop: document.querySelector('textarea').getBoundingClientRect().top,
+      inputBottom: document.querySelector('textarea').getBoundingClientRect().bottom,
+      height: innerHeight,
+      overlay: navigator.windowControlsOverlay?.visible,
+      header: getComputedStyle(document.querySelector('.chat-commandbar')).backgroundColor,
+    }));
+    assert.equal(chrome.enabled, 'overlay');
+    assert.equal(chrome.drag, 'drag');
+    assert.equal(chrome.overlay, true, 'Native Windows caption buttons must remain visible');
+    assert.equal(chrome.header, 'rgba(0, 0, 0, 0)', 'Production lazy CSS must not restore the detached header');
+    assert.ok(chrome.inputTop >= 32 && chrome.inputBottom <= chrome.height);
+    await page.screenshot({ path: join(privateTestDir, 'native-window.png') });
+    console.log(`Native chrome screenshot: ${join(privateTestDir, 'native-window.png')}`);
+  }
   const pid = await app.evaluate(() => process.pid);
   await app.evaluate(({BrowserWindow}) => {
     const w = BrowserWindow.getAllWindows()[0];

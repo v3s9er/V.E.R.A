@@ -38,7 +38,7 @@ const s = StyleSheet.create({
   compact: { minHeight: 40, width: 40, paddingHorizontal: 0, paddingVertical: 0, justifyContent: 'center', backgroundColor: 'transparent' },
   heading: { flex: 1, minWidth: 0, gap: 3 }, title: { color: colors.text, fontSize: 12, fontWeight: '600' }, detail: { color: colors.dim, fontSize: 11 },
   backdrop: { flex: 1, backgroundColor: '#0008', justifyContent: 'flex-end' },
-  sheet: { maxHeight: '75%', backgroundColor: '#151923', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 28 },
+  sheet: { maxHeight: '75%', backgroundColor: colors.card, borderTopWidth: 1, borderColor: '#ffffff18', borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingBottom: 28 },
   header: { paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   close: { minWidth: 44, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
   content: { padding: 20, gap: 8 }, row: { gap: 5, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },

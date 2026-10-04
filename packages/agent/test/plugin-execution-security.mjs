@@ -153,11 +153,13 @@ console.log('3. Orca cancellation reaps its subprocess tree');
   const running = runOrcaCommand(process.execPath, ['-e', childProgram, grandchildPidFile], 20_000, runningController.signal);
   const pidWritten = await waitFor(() => existsSync(grandchildPidFile));
   const grandchildPid = pidWritten ? Number(readFileSync(grandchildPidFile, 'utf8')) : 0;
+  const abortStartedAt = Date.now();
   runningController.abort(new Error('cancel delegated work'));
   let cancelled = false;
   try { await running; } catch (error) { cancelled = /cancel delegated work/.test(error instanceof Error ? error.message : String(error)); }
+  const abortElapsedMs = Date.now() - abortStartedAt;
   const grandchildExited = grandchildPid > 0 ? await waitFor(() => !processAlive(grandchildPid)) : false;
-  check('abort rejects promptly after reaping the CLI', pidWritten && cancelled && Date.now() - started < 5000);
+  check('abort rejects promptly after reaping the CLI', pidWritten && cancelled && Date.now() - started < 5000, JSON.stringify({ pidWritten, cancelled, startupMs: abortStartedAt - started, abortElapsedMs, totalMs: Date.now() - started }));
   check('abort terminates the CLI process tree, including grandchildren', grandchildExited, String(grandchildPid));
   check('abort listener is removed after settlement', getEventListeners(runningController.signal, 'abort').length === 0);
 

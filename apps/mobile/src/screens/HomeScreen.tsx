@@ -14,10 +14,10 @@ import { connectionOrigins } from '../pcs';
 type Tab = 'chat' | 'files' | 'schedules' | 'settings';
 
 const TABS: Array<{ key: Tab; label: string; icon: string }> = [
-  { key: 'chat', label: '대화', icon: '💬' },
+  { key: 'chat', label: '대화', icon: '▤' },
   { key: 'files', label: '파일', icon: '⇄' },
-  { key: 'schedules', label: '예약', icon: '⏰' },
-  { key: 'settings', label: '설정', icon: '⚙️' },
+  { key: 'schedules', label: '예약', icon: '◷' },
+  { key: 'settings', label: '설정', icon: '⚙' },
 ];
 
 export function HomeScreen({
@@ -71,15 +71,15 @@ export function HomeScreen({
   }, [authenticated, client, pc.id]);
 
   return (
-    <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right, paddingTop: keyboardVisible ? insets.top : 0 }]}>
-      {!keyboardVisible && <View style={[styles.header, compact && styles.headerCompact, tab === 'chat' && styles.headerChat, { paddingTop: Math.max(insets.top, 12) }]}>
+    <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right, paddingTop: keyboardVisible || tab === 'chat' ? insets.top : 0 }]}>
+      {!keyboardVisible && tab !== 'chat' && <View style={[styles.header, compact && styles.headerCompact, { paddingTop: Math.max(insets.top, 12) }]}>
         <View style={styles.headerText}>
-          <Text style={[styles.pcName, tab === 'chat' && styles.pcNameChat]} numberOfLines={1}>
+          <Text style={styles.pcName} numberOfLines={1}>
             실행 PC · {pc.name}
           </Text>
-          {tab !== 'chat' && <Text style={styles.pcAddr} numberOfLines={1}>
+          <Text style={styles.pcAddr} numberOfLines={1}>
             {connectionOrigins(pc)[0] ?? '보안 접속 주소 없음'}
-          </Text>}
+          </Text>
         </View>
         <TouchableOpacity
           style={[styles.switchBtn, compact && styles.switchBtnCompact]}
@@ -103,7 +103,7 @@ export function HomeScreen({
       )}
 
       <View style={styles.content}>
-        {tab === 'chat' && <ChatScreen client={client} pc={pc} keyboardVisible={keyboardVisible} onExecutionBusyChange={(value) => { if (value) setExecutionBusy(true); }} />}
+        {tab === 'chat' && <ChatScreen client={client} pc={pc} keyboardVisible={keyboardVisible} onSelectExecutionPc={() => setShowPcPicker(true)} onExecutionBusyChange={(value) => { if (value) setExecutionBusy(true); }} />}
         {tab === 'files' && <FilesScreen pc={pc} />}
         {tab === 'schedules' && (
           <SchedulesScreen client={client} privateWorkAuthenticated={authenticated} />
@@ -115,7 +115,7 @@ export function HomeScreen({
         {TABS.map((t) => (
           <TouchableOpacity
             key={t.key}
-            style={styles.tab}
+            style={[styles.tab, tab === t.key && styles.tabSelected]}
             onPress={() => setTab(t.key)}
             accessibilityRole="tab"
             accessibilityLabel={t.label}
@@ -204,12 +204,13 @@ const styles = StyleSheet.create({
   content: { flex: 1 },
   tabbar: {
     flexDirection: 'row',
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    backgroundColor: 'rgba(255,255,255,0.02)',
-    paddingTop: 8,
+    backgroundColor: '#101216',
+    paddingTop: 6,
+    paddingHorizontal: 8,
+    gap: 4,
   },
   tab: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', gap: 3 },
+  tabSelected: { borderRadius: 12, backgroundColor: '#ffffff07' },
   tabIcon: { fontSize: 20, opacity: 0.45 },
   tabLabel: { fontSize: 11, color: colors.faint, fontWeight: '600' },
   tabActive: { color: colors.accent, opacity: 1 },

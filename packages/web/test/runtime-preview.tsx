@@ -18,6 +18,7 @@ const emit = (event: string, data: unknown) => listeners.get(event)?.forEach(fn 
 const projects: WorkspaceInfo[] = [{ id: 'design', name: '앱 리뉴얼', path: 'C:\\Fixture\\Design', isDefault: true, createdAt: 1 }, { id: 'docs', name: '사용 가이드', path: 'C:\\Fixture\\Docs', isDefault: false, createdAt: 2 }];
 const makeChat = (id: string, workspaceId?: string): ConversationDetail => ({ id, workspaceId, title: '프로젝트 흐름 정리', status: 'active', pinned: false, createdAt: 1, updatedAt: Date.now(), messageCount: 2, reasoningEffort: 'medium', providerId: 'demo', permissionMode: 'ask', tokenPolicy: 'adaptive', compactedMessages: 0, usage: { promptTokens: 0, completionTokens: 0 }, messages: [ { role: 'user', content: '프로젝트별로 대화를 나누고 작업 진행 상황을 확인하고 싶어.' }, { role: 'assistant', content: '프로젝트에 작업 폴더를 연결하고 대화를 이어가세요.\n\n각 대화는 별도 세션을 유지합니다. 실행 기록은 입력창 위에서 펼쳐볼 수 있고, 작업 중에는 지시를 추가하거나 정지할 수 있어요.\n\n### 이번 작업\n\n- 프로젝트와 작업 폴더 연결\n- 대화별 실행 상태 복원\n- 도구 결과와 오류를 구분해서 표시' } ] });
 const chats = [makeChat('chat-design', 'design'), makeChat('chat-docs', 'docs')];
+if (fixtureParams.has('longHistory')) chats.push(...Array.from({ length: 60 }, (_, i) => makeChat(`history-${i}`, 'design')));
 for (const chat of chats) {
   chat.messages.unshift(...Array.from({ length: 42 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const, content: `보관 기록 ${index + 1} · 화면 검증용 메시지입니다. 실제 대화가 아닙니다.` })));
   chat.messageCount = chat.messages.length;

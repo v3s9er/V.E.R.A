@@ -1,6 +1,7 @@
 import { uploadSecureFile } from '../secureFiles';
 import { ChatFiles } from '../components/ChatFiles';
 import { RunActivity } from '../components/RunActivity';
+import { RunTimeline } from '../components/RunTimeline';
 import { ToolHistory } from '../components/ToolHistory';
 import { terminalRunUpdate } from '../../../../packages/shared/src/run-presentation';
 import { ProjectPicker } from '../components/ProjectPicker';
@@ -96,7 +97,7 @@ function describe(input: unknown): string {
   }
 }
 
-export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBusyChange }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean; onExecutionBusyChange?: (busy: boolean) => void }) {
+export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBusyChange, onSelectExecutionPc }: { client: MrRobotClient; pc: SavedPc; keyboardVisible?: boolean; onExecutionBusyChange?: (busy: boolean) => void; onSelectExecutionPc?: () => void }) {
   const insets = useSafeAreaInsets();
   const { width, height, fontScale } = useWindowDimensions();
   const compact = width < 390 || fontScale > 1.25;
@@ -1032,9 +1033,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   );
 
   const busyControls = busy ? (
-    <View style={[styles.busyActions, shortKeyboardViewport && { width: 300, flexShrink: 0 }]}>
+    <View style={styles.busyActions}>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업에 추가 명령 끼워넣기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, styles.busyActionBtn, (!input.trim() || savingConfiguration) && styles.disabledBtn]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
-        <Text style={styles.sendText} numberOfLines={shortKeyboardViewport ? 1 : undefined}>{shortKeyboardViewport ? '추가 명령' : '추가 명령 끼워넣기'}</Text>
+        <Text style={styles.sendText} numberOfLines={1}>↑</Text>
       </TouchableOpacity>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="실행 중인 작업 중지" accessibilityState={{ busy: Boolean(activeRun?.cancelling), disabled: Boolean(activeRun?.cancelling) }} style={[styles.sendBtn, styles.cancelBtn, { width: 48, paddingHorizontal: 8 }, activeRun?.cancelling && { opacity: 0.55 }]} onPress={() => void cancelRun()} disabled={activeRun?.cancelling}>
         <Text style={styles.sendText} numberOfLines={1}>{activeRun?.cancelling ? '…' : '■'}</Text>
@@ -1048,8 +1049,9 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="프로젝트 선택과 관리" onPress={() => { Keyboard.dismiss(); setShowProjects(true); }}><Text style={styles.toolBtnText}>▱</Text></TouchableOpacity>
         <TouchableOpacity style={styles.chatHeading} accessibilityRole="button" accessibilityLabel="대화 목록과 추가 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}>
           <Text style={styles.chatHeadingTitle} numberOfLines={1}>{conversation?.title || '새 대화'} ⌄</Text>
-          {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
+          {!keyboardVisible && <Text style={styles.chatHeadingDetail} numberOfLines={1}>{pc.name} · {workspaces.find(w => w.id === conversation?.workspaceId)?.name || 'PC 작업 공간'}</Text>}
         </TouchableOpacity>
+        {onSelectExecutionPc && !keyboardVisible && <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="실행 PC 선택" onPress={onSelectExecutionPc}><Text style={styles.pcSelectIcon}>PC⌄</Text></TouchableOpacity>}
         <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="새 대화" disabled={savingConfiguration} onPress={() => void createConversation()}><Text style={styles.toolBtnText}>＋</Text></TouchableOpacity>
       </View>}
       {loadError ? <View style={styles.loadError} accessibilityLiveRegion="assertive"><View style={styles.loadErrorCopy}><Text style={styles.loadErrorTitle}>대화 정보를 불러오지 못했습니다</Text><Text style={styles.loadErrorText} numberOfLines={2}>{loadError}</Text></View><TouchableOpacity style={styles.loadRetryBtn} onPress={() => void refreshInitialData()} accessibilityRole="button" accessibilityLabel="대화 다시 불러오기"><Text style={styles.loadRetryText}>재시도</Text></TouchableOpacity></View> : null}
@@ -1089,7 +1091,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         renderItem={({ item: m }) => (
           <View key={m.id} style={[styles.row, m.role === 'user' && styles.rowUser]}>
             <View style={[styles.bubble, m.role === 'user' && styles.bubbleUser]}>
-              {m.content ? <Text style={styles.bubbleText}>{m.role === 'assistant' ? chatFileDisplayText(m.content) : m.content}</Text> : !m.done ? <Text style={styles.bubbleText}>{activity.at(-1) || '요청을 확인하고 있습니다…'}</Text> : null}
+              {m.content ? <Text style={styles.bubbleText}>{m.role === 'assistant' ? chatFileDisplayText(m.content) : m.content}</Text> : !m.done ? <RunTimeline run={activeRun ?? null} busy={busy} /> : null}
               {m.role === 'assistant' && conversation && <ChatFiles text={m.content} pc={pc} conversationId={conversation.id} />}
               {m.error ? <Text style={styles.errorText}>⚠️ {m.error}</Text> : null}
             </View>
@@ -1154,16 +1156,15 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
             {supportsDaybreak(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model) && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Daybreak" accessibilityState={{ selected: conversation?.daybreakEnabled === true, disabled: configurationLocked }} disabled={configurationLocked} onPress={() => void toggleDaybreak()} style={styles.composerSelectBtn}><Text style={[styles.composerSelectText, conversation?.daybreakEnabled && { color: colors.accent2 }]}>☀ {shortKeyboardViewport ? (conversation?.daybreakEnabled ? 'ON' : 'OFF') : `Daybreak ${conversation?.daybreakEnabled ? '켜짐' : '꺼짐'}`}</Text></TouchableOpacity>}
             {!shortKeyboardViewport && <View style={styles.composerToolbarSpacer} />}
+            {busyControls}
             {!busy && (
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="명령 보내기" accessibilityState={{ disabled: !input.trim() || savingConfiguration }} style={[styles.sendBtn, (!input.trim() || savingConfiguration) && { opacity: 0.5 }]} onPress={() => void send()} disabled={!input.trim() || savingConfiguration}>
                 <Text style={styles.sendText}>{savingConfiguration ? '저장 중…' : '보내기'}</Text>
               </TouchableOpacity>
             )}
           </View>
-          {shortKeyboardViewport && busyControls}
           </View>
         </View>
-        {!shortKeyboardViewport && busyControls}
         {configurationSaveFailed && <Text style={styles.composerSettingError} accessibilityLiveRegion="assertive">대화 설정을 저장하지 못했습니다. 다시 선택해 주세요.</Text>}
       </View>
 
@@ -1372,8 +1373,8 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   scrollContent: { padding: 16, gap: 14 },
   emptyContent: { flexGrow: 1 },
-  empty: { alignItems: 'center', marginTop: 70 },
-  emptyIcon: { fontSize: 42, color: colors.accent, textShadowColor: 'rgba(124,92,255,0.8)', textShadowRadius: 20 },
+  empty: { alignItems: 'center', marginVertical: 40, paddingHorizontal: 20 },
+  emptyIcon: { fontSize: 40, color: '#c8c1e0', textShadowColor: '#a091df22', textShadowRadius: 12 },
   emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '700', marginTop: 10 },
   emptyText: { color: colors.faint, textAlign: 'center', lineHeight: 21, marginTop: 6 },
   row: { flexDirection: 'column', alignItems: 'flex-start', gap: 6 },
@@ -1387,7 +1388,7 @@ const styles = StyleSheet.create({
     maxWidth: '96%',
     minWidth: 60,
   },
-  bubbleUser: { backgroundColor: '#27263e', borderColor: 'rgba(166,152,250,0.18)', borderWidth: 1, maxWidth: '90%', borderBottomRightRadius: 5 },
+  bubbleUser: { backgroundColor: '#2c2939', borderColor: '#baa9e61a', borderWidth: 1, maxWidth: '90%', borderBottomRightRadius: 5 },
   bubbleText: { color: colors.text, fontSize: 15, lineHeight: 24 },
   errorText: { color: colors.err, fontSize: 12.5, marginTop: 6 },
   tools: { gap: 4, maxWidth: '92%', alignSelf: 'flex-start' },
@@ -1410,12 +1411,13 @@ const styles = StyleSheet.create({
   latestText: { color: colors.accent2, fontSize: 11.5, fontWeight: '800' },
   runStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 7, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: 'rgba(34,211,238,.05)' },
   runStatusText: { flex: 1, color: colors.dim, fontSize: 11.5 },
-  inputBar: { gap: 7, padding: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
+  inputBar: { gap: 7, padding: 12, backgroundColor: colors.bg },
   inputBarCompact: { paddingHorizontal: 8, paddingTop: 8 },
-  composerCard: { borderWidth: 1, borderColor: 'rgba(255,255,255,.14)', borderRadius: 18, backgroundColor: '#151923', padding: 8, gap: 2 },
+  composerCard: { borderWidth: 1, borderColor: '#ffffff1a', borderTopColor: '#ffffff26', borderRadius: 20, backgroundColor: '#24262e', padding: 8, gap: 2, shadowColor: '#000', shadowOpacity: .24, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 5 },
   composerToolbar: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 4 },
   composerCompactControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  chatHeader: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  chatHeader: { minHeight: 52, paddingHorizontal: 12, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  pcSelectIcon: { color: colors.dim, fontSize: 11, fontWeight: '600' },
   chatHeading: { flex: 1, minWidth: 0 },
   chatHeadingTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
   chatHeadingDetail: { color: colors.faint, fontSize: 11, marginTop: 3 },
@@ -1452,7 +1454,7 @@ const styles = StyleSheet.create({
   },
   sendBtn: { minHeight: 40, backgroundColor: colors.accent, borderRadius: radius.sm, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
   cancelBtn: { backgroundColor: 'rgba(248,113,113,0.25)' },
-  busyActions: { flexDirection: 'row', gap: 7 },
+  busyActions: { flexDirection: 'row', gap: 6, flexShrink: 0, width: 98 },
   busyActionBtn: { flex: 1 },
   sendText: { color: '#fff', fontWeight: '700' },
   reasoningBar: { minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 7 },

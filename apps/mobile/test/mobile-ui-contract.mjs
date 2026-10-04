@@ -40,7 +40,7 @@ check('opening the keyboard follows the latest message and list size changes pre
   && chat.includes('onContentSizeChange={() => { if (stickToBottom.current)')
   && chat.includes('onLayout={() => { if (stickToBottom.current)'));
 check('keyboard entry mode frees vertical space without covering the composer',
-  home.includes('{!keyboardVisible && <View style={[styles.header')
+  home.includes("{!keyboardVisible && tab !== 'chat' && <View style={[styles.header")
   && home.includes('{!keyboardVisible && <View style={[styles.tabbar')
   && chat.includes('{!keyboardVisible && <Text style={styles.chatHeadingDetail}')
   && !chat.includes('style={styles.modeBar}')
@@ -68,10 +68,11 @@ check('mobile auth retains the server authority ceiling and the access picker ca
   && chat.includes("permissionCappedByDevice ? '·상한' : ''")
   && chat.includes('updated.permissionMode !== permissionMode')
   && chat.includes('PC 앱의 원격 PC 관리'));
-check('busy steering and stop actions occupy their own responsive row',
+check('busy steering and stop actions share the composer toolbar without an extra full-width row',
   chat.includes('const busyControls = busy ?')
-  && chat.includes('{shortKeyboardViewport && busyControls}')
-  && chat.includes('{!shortKeyboardViewport && busyControls}')
+  && chat.includes('{busyControls}')
+  && !chat.includes('{!shortKeyboardViewport && busyControls}')
+  && chat.includes("busyActions: { flexDirection: 'row', gap: 6, flexShrink: 0, width: 98 }")
   && chat.includes('busyActionBtn: { flex: 1 }'));
 check('an exact failed retry replaces only the failed tail while a start-dispatch ref blocks fast duplicate taps',
   chat.includes('const appendPendingAttempt = (items: UiMsg[], text: string): UiMsg[] =>')
@@ -149,7 +150,7 @@ check('work details open in a bounded dismissible sheet instead of pushing the c
   && progress.includes('onRequestClose={() => setOpen(false)}')
   && progress.includes("maxHeight: '75%'")
   && chat.includes('<RunActivity run={activeRun ?? null} busy={busy} compact />')
-  && home.includes('paddingTop: keyboardVisible ? insets.top : 0')
+  && home.includes("paddingTop: keyboardVisible || tab === 'chat' ? insets.top : 0")
   && !progress.includes('item.input') && !progress.includes('item.detail'));
 check('mobile tool history is collapsed, bounded and hides raw payloads',
   chat.includes('<ToolHistory tools={m.tools} />')
@@ -158,4 +159,11 @@ check('mobile tool history is collapsed, bounded and hides raw payloads',
 check('terminal state is retained when completion and error notifications arrive late',
   chat.includes("setRunFinished(d.conversationId, 'failed')")
   && chat.includes('terminalRunUpdate(current[conversationId], phase)'));
+const timeline = read('src/components/RunTimeline.tsx');
+check('mobile unifies the PC and conversation header and shows actual waiting events',
+  home.includes("!keyboardVisible && tab !== 'chat'")
+  && home.includes('onSelectExecutionPc={() => setShowPcPicker(true)}')
+  && chat.includes('<RunTimeline run={activeRun ?? null} busy={busy} />')
+  && timeline.includes('runTimeline(run ?? {})')
+  && !timeline.includes('item.input') && !timeline.includes('item.output'));
 console.log('MOBILE UI CONTRACT PASSED');

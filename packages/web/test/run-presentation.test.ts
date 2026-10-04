@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activityLabel, mergeToolActivity, runPresentation, terminalRunUpdate } from '../../shared/src/run-presentation.js';
+import { activityLabel, mergeToolActivity, runPresentation, runTimeline, terminalRunUpdate } from '../../shared/src/run-presentation.js';
 
 test('progress reports actual tools, waiting, approvals and failures without fabricated reasoning', () => {
   assert.equal(activityLabel('{"token":"private"}'), '도구 작업');
@@ -29,4 +29,15 @@ test('tool rows are immutable and duplicate call events cannot duplicate a row',
   assert.equal(started[0].status, 'start');
   assert.equal(ended[0].status, 'done');
   assert.equal(mergeToolActivity(ended, event)[0].status, 'done');
+});
+test('inline timeline stays chronological and bounded without reflecting raw tool payloads', () => {
+  const activity = Array.from({ length: 40 }, (_, i) => ({ id: String(i), label: i === 39 ? '{"secret":"TEST_ONLY"}' : 'read_file', startedAt: i, state: 'done' as const, input: 'PRIVATE_INPUT', output: 'PRIVATE_OUTPUT' })).reverse();
+  const snapshot = JSON.stringify(activity);
+  const rows = runTimeline({ activity });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(rows.map(r => r.at), [34, 35, 36, 37, 38, 39]);
+  assert.equal(rows.at(-1)?.label, '도구 작업');
+  assert.equal(JSON.stringify(activity), snapshot);
+  assert.doesNotMatch(JSON.stringify(rows), /TEST_ONLY|PRIVATE_/);
+  assert.deepEqual(runTimeline({}), []);
 });

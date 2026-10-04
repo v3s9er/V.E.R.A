@@ -693,7 +693,9 @@ function createWindow(url) {
   win = new BrowserWindow({
     ...initialWindowBounds(area),
     title: 'Mr.Robot',
-    backgroundColor: '#0b0f1a',
+    backgroundColor: '#101216',
+    // Keep native window controls (including Windows snap layouts) without a white frame.
+    ...(process.platform === 'win32' ? { titleBarStyle: 'hidden', titleBarOverlay: { color: '#101216', symbolColor: '#d5d8e1', height: 32 } } : {}),
     autoHideMenuBar: true,
     icon: icon(),
     show: false,

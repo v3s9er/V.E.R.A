@@ -31,4 +31,5 @@ contextBridge.exposeInMainWorld('mrRobotDesktop', Object.freeze({
     return () => ipcRenderer.removeListener('mr-robot:navigate', listener);
   },
   platform: 'windows',
+  windowChrome: process.platform === 'win32' ? 'overlay' : undefined,
 }));

@@ -12,7 +12,8 @@ import { inConversationSpace, selectConversationInSpace, type ConversationSpace 
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 import { RunActivityPanel } from '../components/RunActivityPanel.js';
-import { mergeToolActivity, runPresentation, terminalRunUpdate } from '@mr-robot/shared';
+import { RunTimeline } from '../components/RunTimeline.js';
+import { activityLabel, mergeToolActivity, runPresentation, terminalRunUpdate } from '@mr-robot/shared';
 import { ModelPicker } from '../components/ModelPicker.js';
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
@@ -49,6 +50,7 @@ declare global {
       cancelDownload(id: string): Promise<{ ok: boolean }>;
       onNavigate(handler: (view: string) => void): () => void;
       platform: string;
+      windowChrome?: 'overlay';
     };
     webkitSpeechRecognition?: new () => SpeechRecognitionLike;
     SpeechRecognition?: new () => SpeechRecognitionLike;
@@ -1005,6 +1007,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const executionControlsDisabled = busy || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
+  const visibleConversations = conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope);
   const currentHistory = historyPage?.id === selected?.id ? historyPage?.info : selected?.history;
   const rememberHistoryAnchor = (): void => {
     const scroll = scroller.current;
@@ -1065,7 +1068,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         {space === 'personal' && <ProjectNavigation projects={workspaces} conversations={conversations} active={projectScope} running={runningIds} onSelect={id => void selectProject(id)} onChanged={setWorkspaces} />}
         <div className="conversation-list-head">{space === 'personal' ? <Button onClick={() => void createConversation()}>＋ 새 대화</Button> : <span className="conversation-space-label">티켓 대화 기록</span>}<button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
         <div className="conversation-items">
-          {conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope).map((c) => <div
+          {visibleConversations.map((c) => <div
             key={c.id}
             className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
             onContextMenu={(event) => {
@@ -1087,7 +1090,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
               setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
             }}
           >•••</button></div>)}
-          {conversations.length === 0 && <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '대화가 없습니다.'}</div>}
+          {visibleConversations.length === 0 && (busy ? <RunTimeline run={runProgress} busy={busy} compact /> : <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '이 프로젝트의 대화가 없습니다.'}</div>)}
         </div>
         {profile}
       </aside>
@@ -1130,9 +1133,9 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {visibleMessages.map((m) => <div key={m.id} data-message-id={m.id} className={`msg-row ${m.role}`}>
             <div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div>
             <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
-              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{runPresentation({ ...runProgress, busy }).detail}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
+              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <RunTimeline run={runProgress} busy={busy} />)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
               {m.role === 'assistant' && activePc && selected && <ChatFiles key={`${activePc.id}:${selected.id}:${m.id}`} text={m.content} pc={activePc} conversationId={selected.id} />}
-              {m.tools.length > 0 && <details className="tool-history"><summary>작업 내역 {m.tools.length}개 <span>⌄</span></summary><div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? '↳' : t.status === 'done' ? '✓' : '!'}</span></div>)}</div></details>}
+              {m.tools.length > 0 && <details className="tool-history"><summary>작업 내역 {m.tools.length}개 <span>⌄</span></summary><div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`}><span className="tool-icon" aria-hidden="true">{t.status === 'done' ? '✓' : t.status === 'error' ? '!' : '·'}</span><span className="tool-name">{activityLabel(t.name)}</span><span className="tool-state">{t.status === 'start' ? '실행 중' : t.status === 'done' ? '완료' : '오류'}</span></div>)}</div></details>}
             </div>
           </div>)}
           {!runProgress.runId && activity.length > 0 && <details className="chat-activity"><summary>{busy ? '✦ 작업 진행' : '✓ 작업 기록'} · {activity.at(-1)}</summary><ol>{activity.map((entry, index) => <li key={index}>{entry}</li>)}</ol></details>}

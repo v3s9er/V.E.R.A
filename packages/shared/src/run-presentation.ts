@@ -20,6 +20,14 @@ const TOOLS: Record<string, string> = {
 export const AGENT_STATE_LABELS: Record<CoordinationAgent['state'], string> = {
   queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지',
 };
+/** Bounded public event feed. Never include tool arguments, output or model reasoning. */
+export function runTimeline(run: { activity?: ChatRunActivity[]; agents?: CoordinationAgent[] }, limit = 6) {
+  const rows = (run.activity ?? []).map(item => ({
+    id: `tool:${item.id}`, label: activityLabel(item.label),
+    state: item.state, at: item.startedAt,
+  }));
+  return rows.sort((a, b) => a.at - b.at).slice(-Math.max(1, Math.min(12, limit)));
+}
 /** Only host-owned identifiers, never raw arguments, responses, or hidden reasoning. */
 export function activityLabel(label: string): string {
   return TOOLS[label] ?? (/^[a-zA-Z][\w./:-]{0,99}$/.test(label) ? label : '도구 작업');
