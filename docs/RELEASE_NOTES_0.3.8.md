@@ -1,6 +1,6 @@
 # Mr.Robot 0.3.8 — hardened remote access
 
-Mr.Robot 0.3.8 preserves the 0.3.7 private work calendar and adds a security-focused remote-access release for the user-owned `robot.v3s9er.com` Cloudflare Tunnel. The PC remains fully usable by itself; Remote Link, Quick Link, Tailscale, and Orca remain optional.
+Mr.Robot 0.3.8 preserves the 0.3.7 private work calendar and adds a security-focused remote-access release for the user-owned `robot.v3s9er.com` Cloudflare Tunnel. The PC remains fully usable by itself; Remote Link, Quick Link, Tailscale, and other integrations remain optional.
 
 ## Public enrollment and WebSocket protection
 

@@ -21,7 +21,6 @@ interface LoadedPlugin {
 const BUILTIN_CATEGORY_DEFAULTS: Readonly<Record<string, PluginCategory>> = {
   calendar: 'productivity',
   'voice-wake': 'productivity',
-  orca: 'development',
   'mcp-host': 'development',
   'docker-sandbox': 'pentest',
   'ctf-toolpack': 'pentest',

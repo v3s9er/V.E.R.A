@@ -3,7 +3,6 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executeToolBatch, toolResultSucceeded } from '../src/ai/tool-batch.js';
 import { RunProgress } from '../src/server/run-progress.js';
-import { OrcaComputer } from '../src/plugins/orca-computer.js';
 
 test('read batching has a three-worker ceiling and mutation barriers', async () => {
   let active = 0, peak = 0; const finished: number[] = [];
@@ -49,55 +48,4 @@ test('parallel same-name tools correlate by provider call ID', () => {
   const run = new RunProgress(); run.tool({ name: 'read_file', callId: 'a', status: 'start' }); run.tool({ name: 'read_file', callId: 'b', status: 'start' });
   run.tool({ name: 'read_file', callId: 'b', status: 'error' });
   assert.deepEqual(run.snapshot().activity!.map(item => item.state), ['running', 'error']);
-});
-
-const app = { app: 'Fixture Editor', windowId: 'fixture-window' };
-const tree = '[1] Window Fixture\n  [7] Button Save\n  [19] Textbox Note';
-const state = (value = tree) => ({ ok: true, result: { snapshot: { treeText: value } } });
-test('Orca never treats empty output, help text or nested errors as successful execution', async () => {
-  for (const value of [null, {}, { raw: 'CLI help' }, { ok: true, result: { error: 'blocked' } }]) {
-    await assert.rejects(new OrcaComputer(async () => value).apps());
-  }
-});
-test('Orca actions bind app/window, validate sparse indices and send values via stdin', async () => {
-  const calls: Array<{ args: string[]; input?: string }> = [];
-  const desktop = new OrcaComputer(async (args, _signal, input) => { calls.push({ args, input }); return args.includes('get-app-state') ? state() : { ok: true }; });
-  const first = await desktop.observe(app);
-  await assert.rejects(desktop.act({ snapshotToken: first.snapshotToken, action: 'click', elementIndex: 8 }), /인덱스/);
-  const result = await desktop.act({ snapshotToken: first.snapshotToken, action: 'set-value', elementIndex: 19, value: 'fixture input' });
-  const action = calls.find(call => call.args.includes('set-value'))!;
-  assert.ok(action.args.includes('--value-stdin')); assert.ok(!action.args.includes('fixture input')); assert.equal(action.input, 'fixture input');
-  assert.ok(action.args.includes(app.app) && action.args.includes(app.windowId));
-  assert.equal(result.verifiedByReadback, false); assert.ok(result.observation.snapshotToken);
-  await assert.rejects(desktop.act({ snapshotToken: first.snapshotToken, action: 'click', elementIndex: 7 }), /상태/);
-});
-test('Orca rejects changed UI, expired snapshots, arbitrary actions and unapproved selectors', async () => {
-  let now = 0, changed = false, acted = 0;
-  const desktop = new OrcaComputer(async args => { if (args.includes('click')) acted++; return args.includes('get-app-state') ? state(changed ? '[7] Button Different' : tree) : { ok: true }; }, () => now);
-  await assert.rejects(desktop.observe({ app: app.app }), /창 목록/);
-  let observation = await desktop.observe(app);
-  changed = true; await assert.rejects(desktop.act({ snapshotToken: observation.snapshotToken, action: 'click', elementIndex: 7 }), /바뀌었습니다/);
-  changed = false; observation = await desktop.observe(app); now = 30001;
-  await assert.rejects(desktop.act({ snapshotToken: observation.snapshotToken, action: 'click', elementIndex: 7 }), /오래/);
-  observation = await desktop.observe(app);
-  await assert.rejects(desktop.act({ snapshotToken: observation.snapshotToken, action: 'exec', elementIndex: 7 }), /지원/);
-  assert.equal(acted, 0);
-});
-test('Orca consumes a snapshot on failed action and rejects unsupported capabilities', async () => {
-  let denied = false;
-  const desktop = new OrcaComputer(async args => {
-    if (args.includes('click')) { denied = true; return { ok: false, error: 'app_blocked' }; }
-    return args.includes('get-app-state') ? state() : { ok: true };
-  });
-  const observation = await desktop.observe(app);
-  await assert.rejects(desktop.act({ snapshotToken: observation.snapshotToken, action: 'click', elementIndex: 7 }));
-  assert.equal(denied, true);
-  await assert.rejects(desktop.act({ snapshotToken: observation.snapshotToken, action: 'click', elementIndex: 7 }), /상태/);
-  await assert.rejects(new OrcaComputer(async () => ({ ok: false })).observe(app));
-});
-test('Orca cancels before dispatch and never overlaps window operations', async () => {
-  const stop = new AbortController(); stop.abort(); let calls = 0;
-  const desktop = new OrcaComputer(async args => { calls++; await delay(10); return args.includes('get-app-state') ? state() : { ok: true }; });
-  await assert.rejects(desktop.observe(app, stop.signal)); assert.equal(calls, 0);
-  const observing = desktop.observe(app); await assert.rejects(desktop.observe(app), /진행 중/); await observing;
 });

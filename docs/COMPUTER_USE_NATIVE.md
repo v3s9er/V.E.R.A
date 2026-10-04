@@ -1,7 +1,7 @@
 # Native desktop execution
 
-Mr.Robot's Windows desktop backend is independent of Orca and the Codex desktop
-app's Computer Use plugin. No external plugin installation is required. The
+Mr.Robot includes its own Windows desktop backend. No external desktop app or
+Computer Use plugin installation is required. The
 native Codex app-server receives four host-owned dynamic tools: `desktop_windows`,
 `desktop_observe`, `desktop_act`, `desktop_open_browser`. This bridge currently requires Windows, a
 retained native Codex session, and **full PC access**. It is not exposed to
@@ -75,7 +75,6 @@ repeating the write, because accessibility updates can arrive asynchronously.
 
 Research references (architecture only; no third-party source copied):
 
-- Orca: https://github.com/stablyai/orca/tree/403b62a8d8fa6e896a93acc4c15405be0f0b7dc7/native/computer-use-windows
 - Playwright MCP: https://github.com/microsoft/playwright-mcp
 - Microsoft UIA control patterns: https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-control-patterns-overview
 - Codex app-server dynamic tools: https://learn.chatgpt.com/docs/app-server

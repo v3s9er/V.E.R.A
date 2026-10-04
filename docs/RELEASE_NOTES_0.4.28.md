@@ -8,7 +8,7 @@
   editable values and selection/toggle state; explicit unverified results.
 - Live full-access checks, cross-ticket separation, stale-reference protection,
   cancellation and no automatic replay of uncertain input.
-- Packaged standalone backend: Orca/Codex desktop plugins are not prerequisites.
+- Packaged standalone backend: external desktop plugins are not prerequisites.
 - Native protocol, installed-CLI image transfer, lifecycle and regression tests.
 
 Scope: Windows native Codex full-access sessions. This release does not add a

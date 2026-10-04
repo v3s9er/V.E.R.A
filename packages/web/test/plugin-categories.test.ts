@@ -32,7 +32,7 @@ const groups = groupPluginsByCategory([
   plugin('unknown', 'other'),
   plugin('sslscan', 'pentest', true),
   plugin('calendar', 'productivity', true),
-  plugin('orca', 'development', true),
+  plugin('mcp-host', 'development', true),
   legacyBuiltin as PluginInfo,
   legacyUser as PluginInfo,
 ]);

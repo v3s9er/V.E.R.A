@@ -28,7 +28,7 @@ Windows 설치본은 Authenticode로 서명되지 않아 SmartScreen이 표시�
 
 ## 원격 연결 보안 기본값
 
-Remote Link, Tailscale, Orca는 기본 OFF입니다. PC 앱은 이 플러그인 없이 로컬 Agent로 독립 실행합니다. Cloudflare 고정 연결을 사용할 때는 호스트 전체 Access, 소유자 이메일 Allow, Mr.Robot 전용 Service Token의 Service Auth만 사용하고 Bypass·Everyone을 두지 마세요.
+Remote Link, Tailscale 등 선택형 연동은 기본 OFF입니다. PC 앱은 이 플러그인 없이 로컬 Agent로 독립 실행합니다. Cloudflare 고정 연결을 사용할 때는 호스트 전체 Access, 소유자 이메일 Allow, Mr.Robot 전용 Service Token의 Service Auth만 사용하고 Bypass·Everyone을 두지 마세요.
 
 Cloudflare Tunnel과 Access 자체는 이 구성에 유료 Worker/R2/Images/Stream/Log Explorer를 추가하지 않으면 별도 종량제 서비스를 요구하지 않습니다. 각 PC는 고유 hostname과 전용 Tunnel을 사용해야 합니다.
 

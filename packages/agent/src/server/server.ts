@@ -51,7 +51,6 @@ import { TelemetryStore } from '../telemetry.js';
 import { LocalTuningDatasets } from '../tuning-datasets.js';
 import { activeTuningProfile, getTuningCapabilities, normalizeProviderTuningSettings, resolveModelTuning } from '../ai/model-tuning.js';
 import { PluginManager } from '../plugins/manager.js';
-import { createOrcaPlugin } from '../plugins/orca.js';
 import { createCalendarPlugin } from '../plugins/calendar.js';
 import { createTailscalePlugin } from '../plugins/tailscale.js';
 import { createDiscordPlugin } from '../plugins/discord.js';
@@ -1900,7 +1899,6 @@ export class AgentServer {
 
   async start(opts: StartOptions = {}): Promise<{ host: string; port: number }> {
     if (this.httpServer) return { host: this.boundHost, port: this.boundPort };
-    await this.plugins.loadBuiltin(createOrcaPlugin());
     await this.plugins.loadBuiltin(createCalendarPlugin());
     await this.plugins.loadBuiltin(this.remoteLinkPlugin);
     await this.plugins.loadBuiltin(createTailscalePlugin());

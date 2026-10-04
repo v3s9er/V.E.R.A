@@ -39,7 +39,7 @@ Quick Link addresses are temporary and change after restart. A stable branded en
 - The Android APK is signed with the local Mr.Robot release key.
 - The Windows installer is not Authenticode-signed, so SmartScreen can require confirmation. Verify its SHA-256 against the GitHub release.
 - A physical-phone pass remains recommended for manufacturer-specific background behavior, camera pairing, keyboard behavior, and remote transfer.
-- If Orca has already accepted a worktree creation before cancellation, Mr.Robot terminates the local CLI tree but does not automatically delete that worktree because it may contain user data.
+- If a delegated execution backend has already accepted a worktree creation before cancellation, Mr.Robot terminates the local CLI tree but does not automatically delete that worktree because it may contain user data.
 
 ## Verified artifacts
 

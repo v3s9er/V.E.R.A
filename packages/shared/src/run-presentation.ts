@@ -15,7 +15,7 @@ const TOOLS: Record<string, string> = {
   read_file: '파일 읽기', list_files: '폴더 확인', shell_exec: '명령 실행', write_file: '파일 수정',
   native_agent: '네이티브 에이전트', screenshot: '화면 확인', mouse_click: '화면 조작',
   desktop_open_browser: '브라우저 열기', desktop_windows: '앱 창 확인', desktop_observe: '화면 읽기', desktop_act: '화면 조작',
-  web_search: '웹 검색', web_fetch: '웹 문서 읽기', 'orca.computer.observe': '앱 화면 읽기', 'orca.computer.act': '앱 조작',
+  web_search: '웹 검색', web_fetch: '웹 문서 읽기',
 };
 export const AGENT_STATE_LABELS: Record<CoordinationAgent['state'], string> = {
   queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지',

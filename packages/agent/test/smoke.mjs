@@ -867,23 +867,20 @@ console.log('4. HTTP API + pairing + WS RPC');
 const { host, port } = await server.start({ port: 8799, host: '127.0.0.1' });
 const base = `http://127.0.0.1:${port}`;
 
-const builtInOrca = server.plugins.list().find((plugin) => plugin.id === 'orca');
-check('built-in Orca integration loads', builtInOrca?.commands.includes('orca.delegate'));
+const expectedBuiltins = [
+  'calendar', 'remote-link', 'tailscale-connect', 'docker-sandbox', 'ctf-toolpack',
+  'mcp-host', 'voice-wake', 'lid-display', 'resource-archiver', 'sslscan-auditor',
+  'webcrypto-observer', 'discord-agent',
+].sort();
+const actualBuiltins = server.plugins.list().filter((plugin) => plugin.builtin).map((plugin) => plugin.id).sort();
+check('built-in catalog contains only the supported integrations',
+  JSON.stringify(actualBuiltins) === JSON.stringify(expectedBuiltins), actualBuiltins.join(', '));
 check('low-traffic security plugins are attached as built-ins',
   server.plugins.list().find((plugin) => plugin.id === 'resource-archiver')?.commands.includes('resource-archiver.archive')
   && server.plugins.list().find((plugin) => plugin.id === 'sslscan-auditor')?.commands.includes('sslscan.scan'));
-check('built-in plugins receive stable default categories', builtInOrca?.category === 'development'
+check('built-in plugins receive stable default categories', server.plugins.list().find((plugin) => plugin.id === 'mcp-host')?.category === 'development'
   && server.plugins.list().find((plugin) => plugin.id === 'ctf-toolpack')?.category === 'pentest'
   && server.plugins.list().find((plugin) => plugin.id === 'remote-link')?.category === 'system');
-check('Orca plugin defaults to disabled', builtInOrca?.enabled === false);
-check('Orca schemas hidden for ordinary chat', !server.plugins.aiTools('안녕').some((tool) => tool.name.startsWith('orca.')));
-check('disabled Orca schemas hidden for coding chat', !server.plugins.aiTools('이 저장소 버그를 코딩해서 고쳐줘').some((tool) => tool.name === 'orca.delegate'));
-server.plugins.setEnabled('orca', true);
-check('enabled Orca schemas available for coding chat', server.plugins.aiTools('이 저장소 버그를 코딩해서 고쳐줘').some((tool) => tool.name === 'orca.delegate'));
-const orcaStatus = await server.plugins.call('orca.status', {});
-check('Orca status is bounded and structured', typeof orcaStatus?.installed === 'boolean' && typeof orcaStatus?.runtimeConnected === 'boolean');
-check('Orca delegation defaults to off', orcaStatus?.enabled === false);
-server.plugins.setEnabled('orca', false);
 
 const ping = await (await fetch(`${base}/api/ping`)).json();
 check('GET /api/ping', ping.ok === true);

@@ -1,12 +1,12 @@
 # Mr.Robot 0.3.3 — stable plugin status and reliable Quick Link setup
 
-Mr.Robot 0.3.3 fixes the Cloudflare Quick Link bootstrap path and a plugin-screen refresh loop. The desktop remains standalone by default, while Remote Link, Orca, and the other optional integrations stay disabled until the user enables them.
+Mr.Robot 0.3.3 fixes the Cloudflare Quick Link bootstrap path and a plugin-screen refresh loop. The desktop remains standalone by default, while Remote Link and the other optional integrations stay disabled until the user enables them.
 
 ## Plugin UI stability
 
-- Removed the `remoteStatus → plugins.list → status refresh` effect cycle that repeatedly toggled the Orca and Cloudflare button disabled state.
+- Removed the `remoteStatus → plugins.list → status refresh` effect cycle that repeatedly toggled integration and Cloudflare button disabled states.
 - Passive refreshes no longer flip interactive busy indicators, eliminating the visible button flicker.
-- The fix also stops repeated Orca CLI subprocesses and repeated full dependency probes that the render loop caused.
+- The fix also stops repeated integration CLI subprocesses and repeated full dependency probes that the render loop caused.
 - Pairing events read the latest Remote Link status through a ref without resubscribing the event handler.
 - Refreshing a stopped fixed Tunnel no longer overwrites the saved `autoStart` preference.
 

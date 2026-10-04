@@ -106,7 +106,7 @@ const DEFINITIONS: Definition[] = [
   },
   {
     id: 'git', name: 'Git for Windows', command: 'git', versionArgs: ['--version'], required: true, requiresLogin: false,
-    description: 'Orca worktree와 코드 작업에 필요합니다.', wingetId: 'Git.Git',
+    description: 'Git 저장소와 코드 작업에 필요합니다.', wingetId: 'Git.Git',
     candidates: () => [join(programFiles(), 'Git', 'cmd', 'git.exe')],
   },
   {
@@ -123,11 +123,6 @@ const DEFINITIONS: Definition[] = [
     id: 'claude', name: 'Claude Code', command: 'claude', versionArgs: ['--version'], required: false, requiresLogin: true,
     description: 'Claude 구독 기반 코딩 에이전트입니다. 설치 후 로그인이 필요합니다.', npmPackage: '@anthropic-ai/claude-code@2.1.237',
     candidates: () => [join(appData(), 'npm', 'claude.cmd')],
-  },
-  {
-    id: 'orca', name: 'Orca', command: 'orca', versionArgs: [], required: false, requiresLogin: false,
-    description: '격리된 Git worktree에서 코딩 에이전트를 실행합니다.', wingetId: 'StablyAI.Orca',
-    candidates: () => [join(localAppData(), 'Programs', 'orca', 'resources', 'bin', 'orca.exe')],
   },
   {
     id: 'ollama', name: 'Ollama', command: 'ollama', versionArgs: ['--version'], required: false, requiresLogin: false,

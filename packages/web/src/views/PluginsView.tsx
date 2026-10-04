@@ -16,23 +16,6 @@ import { DiscordPanel } from '../components/DiscordPanel';
 import { LidDisplayPanel } from '../components/LidDisplayPanel';
 import { PLUGIN_CATEGORY_LABELS, groupPluginsByCategory } from '../plugin-categories';
 
-interface OrcaConfig {
-  enabled: boolean;
-  command: string;
-  defaultAgent: 'codex' | 'claude';
-  defaultRepo: string;
-  setup: 'run' | 'skip' | 'inherit';
-  autoOpen: boolean;
-  computerUse?: boolean;
-}
-
-interface OrcaStatus {
-  installed: boolean;
-  runtimeConnected: boolean;
-  version?: string;
-  error?: string;
-  runtimeError?: string;
-}
 interface VoiceConfig { enabled: boolean; wakePhrase: string; language: string; pcPriorityMs: number; audibleReply: boolean; sensitivity: number }
 interface RemoteHandoffInfo { pin: string; expiresAt: number }
 interface McpServerSummary { id: string; name: string; enabled: boolean; env: string[] }
@@ -79,9 +62,6 @@ export function PluginsView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [callResult, setCallResult] = useState('');
-  const [orcaConfig, setOrcaConfig] = useState<OrcaConfig | null>(null);
-  const [orcaStatus, setOrcaStatus] = useState<OrcaStatus | null>(null);
-  const [orcaBusy, setOrcaBusy] = useState(false);
   const [details, setDetails] = useState<Record<string, unknown>>({});
   const [mcpId, setMcpId] = useState('');
   const [mcpCommand, setMcpCommand] = useState('');
@@ -249,24 +229,6 @@ export function PluginsView() {
     }
   }, [client]);
 
-  const refreshOrca = useCallback(async (interactive = false): Promise<void> => {
-    if (interactive) setOrcaBusy(true);
-    try {
-      const status = await client.call('plugins.call', { name: 'orca.status', params: {} }) as OrcaStatus;
-      setOrcaStatus(status);
-      try {
-        const config = await client.call('plugins.call', { name: 'orca.config.get', params: {} }) as OrcaConfig;
-        setOrcaConfig(config);
-      } catch {
-        // A paired non-admin device may inspect status but cannot edit integration settings.
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (interactive) setOrcaBusy(false);
-    }
-  }, [client]);
-
   const refreshRemoteLink = useCallback(async (interactive = false): Promise<void> => {
     if (interactive) setRemoteBusy(true);
     const observedStatusRevision = remoteStatusRevisionRef.current;
@@ -316,10 +278,9 @@ export function PluginsView() {
 
   useEffect(() => {
     if (!canManage) return;
-    if (plugins.some((plugin) => plugin.id === 'orca')) void refreshOrca();
     if (plugins.some((plugin) => plugin.id === 'voice-wake')) void client.call('plugins.call', { name: 'voice.config.get', params: {} }).then((value) => setVoiceConfig(value as VoiceConfig)).catch(() => undefined);
     if (plugins.some((plugin) => plugin.id === 'remote-link')) void refreshRemoteLink();
-  }, [canManage, client, plugins, refreshOrca, refreshRemoteLink]);
+  }, [canManage, client, plugins, refreshRemoteLink]);
 
   const load = async (): Promise<void> => {
     if (!path.trim() || busy) return;
@@ -389,32 +350,6 @@ export function PluginsView() {
       if (mountedRef.current) setMcpServers(servers);
     } catch (err) { if (mountedRef.current) setError(err instanceof Error ? err.message : String(err)); }
     finally { if (mountedRef.current) setBusy(false); }
-  };
-
-  const saveOrca = async (): Promise<void> => {
-    if (!orcaConfig || orcaBusy) return;
-    setOrcaBusy(true); setError('');
-    try {
-      const saved = await client.call('plugins.call', { name: 'orca.config.set', params: orcaConfig }) as OrcaConfig;
-      setOrcaConfig(saved);
-      await refreshOrca(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setOrcaBusy(false);
-    }
-  };
-
-  const openOrca = async (): Promise<void> => {
-    setOrcaBusy(true); setError('');
-    try {
-      await client.call('plugins.call', { name: 'orca.open', params: {} });
-      window.setTimeout(() => void refreshOrca(false), 1200);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setOrcaBusy(false);
-    }
   };
 
   const togglePlugin = async (plugin: PluginInfo): Promise<void> => {
@@ -863,7 +798,7 @@ export function PluginsView() {
             <Card key={plugin.id} className="panel plugin-card plugin-card-readonly">
               <div className="plugin-head">
                 <div className="plugin-identity">
-                  <span className="plugin-icon">{plugin.id === 'orca' ? '⌘' : plugin.id === 'calendar' ? '◷' : plugin.id === 'remote-link' ? '☁' : plugin.id === 'tailscale-connect' ? '↔' : plugin.id === 'docker-sandbox' ? '▣' : plugin.id === 'ctf-toolpack' ? '⌁' : plugin.id === 'mcp-host' ? '◇' : plugin.id === 'resource-archiver' ? '⇩' : plugin.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
+                  <span className="plugin-icon">{plugin.id === 'calendar' ? '◷' : plugin.id === 'remote-link' ? '☁' : plugin.id === 'tailscale-connect' ? '↔' : plugin.id === 'docker-sandbox' ? '▣' : plugin.id === 'ctf-toolpack' ? '⌁' : plugin.id === 'mcp-host' ? '◇' : plugin.id === 'resource-archiver' ? '⇩' : plugin.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
                   <div><h3 className="plugin-name">{plugin.name} <span className="plugin-ver">v{plugin.version}</span></h3><p className="plugin-desc">{plugin.description || plugin.id}</p></div>
                 </div>
                 <div className="plugin-status"><span className={`status-dot ${plugin.enabled ? 'ok' : 'off'}`} /><span>{plugin.enabled ? '사용 중' : '꺼짐'}</span></div>
@@ -929,7 +864,7 @@ export function PluginsView() {
           <Card key={p.id} className={`panel plugin-card ${expanded === p.id ? 'expanded' : ''}`}>
             <div className="plugin-head">
               <div className="plugin-identity">
-                <span className="plugin-icon">{p.id === 'orca' ? '⌘' : p.id === 'calendar' ? '◷' : p.id === 'remote-link' ? '☁' : p.id === 'tailscale-connect' ? '↔' : p.id === 'docker-sandbox' ? '▣' : p.id === 'ctf-toolpack' ? '⌁' : p.id === 'mcp-host' ? '◇' : p.id === 'resource-archiver' ? '⇩' : p.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
+                <span className="plugin-icon">{p.id === 'calendar' ? '◷' : p.id === 'remote-link' ? '☁' : p.id === 'tailscale-connect' ? '↔' : p.id === 'docker-sandbox' ? '▣' : p.id === 'ctf-toolpack' ? '⌁' : p.id === 'mcp-host' ? '◇' : p.id === 'resource-archiver' ? '⇩' : p.id === 'sslscan-auditor' ? '⌾' : '◉'}</span>
                 <div>
                 <h3 className="plugin-name">
                   {p.name} <span className="plugin-ver">v{p.version}</span>
@@ -962,17 +897,12 @@ export function PluginsView() {
                 }}
               >{workbenchId === p.id ? '작업 화면 닫기' : '작업 화면'}</Button>}
               <Button variant="ghost" onClick={() => setExpanded((current) => current === p.id ? null : p.id)}>{expanded === p.id ? '설정 닫기' : '설정·상세'}</Button>
-              {p.id === 'orca' ? <>
-                <Button variant="ghost" onClick={() => void refreshOrca(true)} disabled={orcaBusy}>상태 확인</Button>
-                <Button variant="ghost" onClick={() => void openOrca()} disabled={orcaBusy || orcaStatus?.installed === false}>Orca 열기</Button>
-              </> : <>
-                {p.id === 'remote-link'
-                  ? <Button variant="ghost" onClick={() => void refreshRemoteLink(true)} disabled={remoteBusy}>상태 확인</Button>
-                  : p.builtin ? p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>) : null}
-                {p.id === 'tailscale-connect' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'tailscale.peers')}>기기 목록</Button>}
-                {p.id === 'docker-sandbox' && <Button onClick={() => void pluginCall(p.id, 'docker.ctf.image.ensure')} disabled={busy}>CTF 이미지 준비</Button>}
-                {p.id === 'mcp-host' && <Button variant="ghost" onClick={() => void listMcp()} disabled={busy}>연결 목록</Button>}
-              </>}
+              {p.id === 'remote-link'
+                ? <Button variant="ghost" onClick={() => void refreshRemoteLink(true)} disabled={remoteBusy}>상태 확인</Button>
+                : p.builtin ? p.commands.filter((command) => command.endsWith('.status')).map((c) => <Button key={c} variant="ghost" onClick={() => void pluginCall(p.id, c)}>상태 확인</Button>) : null}
+              {p.id === 'tailscale-connect' && <Button variant="ghost" onClick={() => void pluginCall(p.id, 'tailscale.peers')}>기기 목록</Button>}
+              {p.id === 'docker-sandbox' && <Button onClick={() => void pluginCall(p.id, 'docker.ctf.image.ensure')} disabled={busy}>CTF 이미지 준비</Button>}
+              {p.id === 'mcp-host' && <Button variant="ghost" onClick={() => void listMcp()} disabled={busy}>연결 목록</Button>}
               {!p.builtin && <Button variant="danger" onClick={() => void unload(p.id)}>
                 제거
               </Button>}
@@ -1102,28 +1032,6 @@ export function PluginsView() {
               <p className="panel-hint">고정 Tunnel 주소는 재시작 후에도 유지되지만 PC와 Mr.Robot이 켜져 있어야 합니다. Google 계정 기반 Relay는 별도 E2EE 인프라가 없어 아직 선택할 수 없습니다.</p>
             </div>}
             {details[p.id] !== undefined && <pre className="shell-out">{JSON.stringify(details[p.id], null, 2)}</pre>}
-            {p.id === 'orca' && orcaConfig && <div className="provider-add">
-              <div className="provider-top">
-                <Badge tone={orcaStatus?.installed ? 'ok' : 'warn'}>{orcaStatus?.installed ? 'CLI 설치됨' : 'CLI 없음'}</Badge>
-                <Badge tone={orcaStatus?.runtimeConnected ? 'ok' : 'warn'}>{orcaStatus?.runtimeConnected ? '런타임 연결됨' : '런타임 꺼짐'}</Badge>
-                {orcaStatus?.version && <Badge>{orcaStatus.version}</Badge>}
-              </div>
-              {(orcaStatus?.error || orcaStatus?.runtimeError) && <p className="panel-hint warn-hint">{orcaStatus.error || orcaStatus.runtimeError}</p>}
-              <div className="form-grid">
-                <label className="field"><span>Orca 실행 파일</span><Input value={orcaConfig.command} onChange={(event) => setOrcaConfig({ ...orcaConfig, command: event.target.value })} placeholder="orca 또는 C:\\...\\orca.exe" /></label>
-                <label className="field"><span>기본 저장소 selector</span><Input value={orcaConfig.defaultRepo} onChange={(event) => setOrcaConfig({ ...orcaConfig, defaultRepo: event.target.value })} placeholder="예: id:repo-id" /></label>
-                <label className="field"><span>기본 코딩 에이전트</span><Select value={orcaConfig.defaultAgent} onChange={(event) => setOrcaConfig({ ...orcaConfig, defaultAgent: event.target.value as 'codex' | 'claude' })}><option value="codex">Codex</option><option value="claude">Claude</option></Select></label>
-                <label className="field"><span>Worktree setup</span><Select value={orcaConfig.setup} onChange={(event) => setOrcaConfig({ ...orcaConfig, setup: event.target.value as OrcaConfig['setup'] })}><option value="inherit">저장소 설정 따름</option><option value="run">항상 실행</option><option value="skip">건너뛰기</option></Select></label>
-              </div>
-              <div className="type-row">
-                <label><input type="checkbox" checked={orcaConfig.enabled} onChange={(event) => setOrcaConfig({ ...orcaConfig, enabled: event.target.checked })} /> Mr.Robot 코딩 위임 활성화</label>
-                <label><input type="checkbox" checked={orcaConfig.autoOpen} onChange={(event) => setOrcaConfig({ ...orcaConfig, autoOpen: event.target.checked })} /> 위임할 때 Orca 자동 실행</label>
-                <label><input type="checkbox" checked={orcaConfig.computerUse === true} onChange={(event) => setOrcaConfig({ ...orcaConfig, computerUse: event.target.checked })} /> 접근성 기반 PC 조작 사용 · 별도 선택</label>
-                <p className="muted">앱·창 확인 → 최신 요소 선택 → 조작 후 다시 확인합니다. 각 조작은 대화의 PC 접근 권한을 따르며, 오래된 화면의 요소는 사용할 수 없습니다.</p>
-                <Button onClick={() => void saveOrca()} disabled={orcaBusy}>{orcaBusy ? '확인 중…' : '저장 및 연결 확인'}</Button>
-              </div>
-              <p className="panel-hint">코딩 요청에서만 Orca 도구가 모델에 노출됩니다. 작업 위임은 현재 Mr.Robot 권한 정책의 승인을 거친 뒤 새 Git worktree를 만듭니다.</p>
-            </div>}
             </div>}
           </Card>
             ))}</div>

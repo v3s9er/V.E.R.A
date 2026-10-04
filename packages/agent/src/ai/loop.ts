@@ -357,9 +357,7 @@ export class AgentLoop {
     let provider = decision?.provider ?? (options.providerId ? this.registry.getForModel(options.providerId, options.providerModel) : this.registry.default());
     const turns: Turn[] = [...history, { role: 'user', content: userMessage }];
     const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
-    const semanticDesktop = !options.isolation && extraTools.some(tool => tool.name === 'orca.computer.observe');
-    const rawDesktopTools = new Set(['screenshot', 'get_screen_size', 'mouse_move', 'mouse_click', 'mouse_scroll', 'type_text', 'key_press']);
-    const tools = options.isolation?.tools ?? (selfContained ? [] : [...toolsFor(userMessage).filter(tool => !semanticDesktop || !rawDesktopTools.has(tool.name)).map(neutralTool), ...extraTools]);
+    const tools = options.isolation?.tools ?? (selfContained ? [] : [...toolsFor(userMessage).map(neutralTool), ...extraTools]);
     const knowledgeEnabled = !options.isolation && !selfContained && !!options.knowledgeLookup;
     let knowledgeCalls = 0;
     const lookupKnowledge = async (input: unknown): Promise<string> => {
@@ -867,7 +865,7 @@ export class AgentLoop {
     // an approval policy rather than an OS boundary; keep Claude tool-less
     // unless the user explicitly selected full machine access.
     const requestedNativePermission = options.permissionMode ?? 'ask';
-    const canRunNative = (selected: AiProvider) => !options.isolation && (!semanticDesktop || selected.type === 'codex-cli')
+    const canRunNative = (selected: AiProvider) => !options.isolation
       && !!selected.runAgent && !!options.workspacePath && (selected.type === 'codex-cli' || requestedNativePermission === 'full');
     const runNativeMain = async (provider: AiProvider): Promise<LoopResult> => {
       runSignal.throwIfAborted();

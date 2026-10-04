@@ -184,7 +184,7 @@ export interface RoutingNode {
   providerModel?: string;
   /** Nodes with the same group id discuss/vote together before final validation. */
   groupId?: string;
-  /** Non-model execution backend such as the built-in Orca plugin. */
+  /** Non-model execution backend provided by an integration plugin. */
   integrationId?: string;
 }
 export type RoutingGroupMode = 'collaborative' | 'competitive' | 'review';
@@ -497,7 +497,7 @@ export interface FsEntry {
   modifiedAt: number;
 }
 
-export type DependencyId = 'node' | 'git' | 'speech-ko' | 'codex' | 'claude' | 'orca' | 'ollama' | 'cloudflared' | 'tailscale' | 'docker';
+export type DependencyId = 'node' | 'git' | 'speech-ko' | 'codex' | 'claude' | 'ollama' | 'cloudflared' | 'tailscale' | 'docker';
 
 export interface DependencyInfo {
   id: DependencyId;

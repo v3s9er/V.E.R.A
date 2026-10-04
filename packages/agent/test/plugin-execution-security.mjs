@@ -1,5 +1,4 @@
-import { getEventListeners } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,7 +8,6 @@ const dist = resolve(here, '..', 'dist');
 const scratch = mkdtempSync(join(tmpdir(), 'mr-robot-plugin-security-'));
 const { ToolExecutor } = await import(pathToFileURL(join(dist, 'ai', 'executor.js')).href);
 const { createDockerPlugin, confineDockerWorkspacePaths, revalidateDockerWorkspacePaths } = await import(pathToFileURL(join(dist, 'plugins', 'docker.js')).href);
-const { runOrcaCommand } = await import(pathToFileURL(join(dist, 'plugins', 'orca.js')).href);
 
 let failures = 0;
 function check(name, condition, detail = '') {
@@ -18,23 +16,6 @@ function check(name, condition, detail = '') {
     failures++;
     console.error(`FAIL  ${name} ${detail}`);
   }
-}
-
-function wait(ms) {
-  return new Promise((resolveWait) => setTimeout(resolveWait, ms));
-}
-
-async function waitFor(predicate, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await wait(25);
-  }
-  return predicate();
-}
-
-function processAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 console.log('1. plugin execution context is host-scoped and cancellable');
@@ -126,49 +107,6 @@ console.log('2. Docker mounts remain under the trusted workspace realpath');
   try { revalidateDockerWorkspacePaths(confined); } catch { replacementRejected = true; }
   check('same-path replacement is caught by pre-run inode revalidation', replacementRejected);
   check('Docker plugin release line is 0.3.7', createDockerPlugin().manifest.version === '0.3.7');
-}
-
-console.log('3. Orca cancellation reaps its subprocess tree');
-{
-  const marker = join(scratch, 'pre-abort-marker');
-  const preAborted = new AbortController();
-  preAborted.abort(new Error('already cancelled'));
-  let preAbortRejected = false;
-  try {
-    await runOrcaCommand(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'spawned')`], 5000, preAborted.signal);
-  } catch { preAbortRejected = true; }
-  await wait(50);
-  check('pre-aborted execution never spawns Orca', preAbortRejected && !existsSync(marker));
-
-  const grandchildPidFile = join(scratch, 'orca-grandchild.pid');
-  const childProgram = [
-    "const { spawn } = require('node:child_process');",
-    "const { writeFileSync } = require('node:fs');",
-    "const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
-    "writeFileSync(process.argv[1], String(grandchild.pid));",
-    "setInterval(() => {}, 1000);",
-  ].join(' ');
-  const runningController = new AbortController();
-  const started = Date.now();
-  const running = runOrcaCommand(process.execPath, ['-e', childProgram, grandchildPidFile], 20_000, runningController.signal);
-  const pidWritten = await waitFor(() => existsSync(grandchildPidFile));
-  const grandchildPid = pidWritten ? Number(readFileSync(grandchildPidFile, 'utf8')) : 0;
-  const abortStartedAt = Date.now();
-  runningController.abort(new Error('cancel delegated work'));
-  let cancelled = false;
-  try { await running; } catch (error) { cancelled = /cancel delegated work/.test(error instanceof Error ? error.message : String(error)); }
-  const abortElapsedMs = Date.now() - abortStartedAt;
-  const grandchildExited = grandchildPid > 0 ? await waitFor(() => !processAlive(grandchildPid)) : false;
-  check('abort rejects promptly after reaping the CLI', pidWritten && cancelled && Date.now() - started < 5000, JSON.stringify({ pidWritten, cancelled, startupMs: abortStartedAt - started, abortElapsedMs, totalMs: Date.now() - started }));
-  check('abort terminates the CLI process tree, including grandchildren', grandchildExited, String(grandchildPid));
-  check('abort listener is removed after settlement', getEventListeners(runningController.signal, 'abort').length === 0);
-
-  const timeoutStarted = Date.now();
-  let timedOut = false;
-  try { await runOrcaCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], 100); } catch (error) {
-    timedOut = /100ms/.test(error instanceof Error ? error.message : String(error));
-  }
-  check('timeout uses the same tree-termination and reap path', timedOut && Date.now() - timeoutStarted < 5000);
 }
 
 rmSync(scratch, { recursive: true, force: true });

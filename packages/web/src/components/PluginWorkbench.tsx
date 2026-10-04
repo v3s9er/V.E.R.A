@@ -58,7 +58,6 @@ const BUILTIN_READ_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   calendar: ['calendar.status'],
   'docker-sandbox': ['docker.status'],
   'mcp-host': ['mcp.servers.list'],
-  orca: ['orca.status'],
   'remote-link': ['remote-link.status'],
   'tailscale-connect': ['tailscale.status', 'tailscale.peers'],
   'voice-wake': ['voice.status'],
@@ -101,7 +100,6 @@ function pluginGlyph(id: string): string {
   if (id === 'sslscan-auditor') return '⌾';
   if (id === 'webcrypto-observer') return '⌁';
   if (id === 'remote-link') return '☁';
-  if (id === 'orca') return '⌘';
   return '◇';
 }
 

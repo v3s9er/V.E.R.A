@@ -46,13 +46,11 @@ Token policy keeps the static system prefix short, exposes only task-relevant
 computer tool schemas, caps runs at 16 model steps, blocks a third identical tool
 call, bounds tool output, and keeps recent turns plus a compressed older summary.
 
-The bundled Orca plugin is an execution backend rather than a model provider.
-For coding-shaped requests only, it exposes bounded JSON tools for repository and
-worktree discovery, isolated Codex/Claude delegation, and terminal follow-up. Read
-operations are marked non-destructive; worktree creation and terminal input pass
-through the same permission gate as every other mutating Mr.Robot tool. The plugin
-uses the official `orca` CLI with `shell: false`, persists only its executable path
-and defaults, and can auto-open the local Orca runtime before a delegated task.
+Desktop execution uses Mr.Robot's bundled Windows backend. Retained native Codex
+sessions receive host-owned tools for window discovery, observation, actions and
+browser opening when the current permission policy allows full PC access. Each
+call rechecks authority, bounds its output and supports cancellation; observations
+and action results stay separate. See [Native desktop execution](COMPUTER_USE_NATIVE.md).
 
 Research basis:
 
@@ -99,8 +97,8 @@ additional commands are consumed at the next safe stage/tool boundary.
 
 ## Plugin boundary
 
-Calendar, Cloudflare Quick Link, optional Tailscale transport, voice wake, MCP host, CTF analysis, Docker sandbox,
-and Orca are built-in plugins—not privileges hidden in the core. Every manifest
+Calendar, Cloudflare Quick Link, optional Tailscale transport, voice wake, MCP host,
+CTF analysis and Docker sandbox are built-in plugins. Every manifest
 declares kind, capabilities, permissions, dependencies, and enabled state. The host
 can disable a plugin persistently, hides its AI tool schemas while disabled, and
 still allows its bounded status/config commands. MCP server descriptions and CTF
