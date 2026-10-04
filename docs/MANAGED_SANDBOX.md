@@ -125,11 +125,15 @@ the watchdog's actual Python source; it does not execute user code or access
 real process tables. `VERA_TEST_PYTHON` may point to an existing Python executable;
 an unavailable Python or Windows Store alias explicitly skips that one fixture.
 
-At implementation time Docker CLI 29.7.2 was present but its Linux engine pipe
-was unavailable. No live container smoke was run and no engine was started.
-Thus fake transport tests verify the command contract, not actual kernel quota
-enforcement on this machine. A future live smoke must use a harmless existing
-image and explicitly approved temporary resources, then verify exact cleanup.
+The initial 0.7.1 validation used fake transport because the local Docker engine
+was unavailable; those tests alone did not establish actual kernel enforcement.
+For 0.7.2, an explicitly prepared Docker Linux engine 29.7.2 passed the live
+acceptance test below, including independently verified container cleanup. The
+official `python:3.12-slim` image was downloaded during approved operator setup,
+not by the plugin (digest
+`sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d`).
+This result covers the real plugin handlers and Docker execution path; it is not
+a claim of arbitrary-code safety or successful tests on every host/backend.
 
 An opt-in installed-engine acceptance test is now provided:
 
