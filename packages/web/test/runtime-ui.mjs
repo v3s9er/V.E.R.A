@@ -49,10 +49,12 @@ try {
       });
       await page.locator('.chat-input').fill('테스트 작업');
       await page.getByRole('button', { name: '보내기', exact: true }).click();
-      await page.getByText('도구로 작업 중', { exact: true }).waitFor();
+      await page.locator('.run-panel').getByText('도구로 작업 중', { exact: true }).waitFor();
       await check('running');
       await page.locator('.run-panel summary').click();
       await page.getByRole('list', { name: '실제 작업 기록' }).waitFor();
+      await check('expanded');
+      assert.equal((await page.locator('.tool-history summary').innerText()).replace(/\s+/g, ' '), '작업 내역 1개 ⌄', 'StrictMode must not duplicate a tool event');
       await page.locator('.chat-input').fill('추가 지시 테스트');
       await page.getByRole('button', { name: '명령 끼워넣기', exact: true }).click();
       await page.getByLabel('실행 중인 작업 중지').click();

@@ -1,5 +1,8 @@
 import { uploadSecureFile } from '../secureFiles';
 import { ChatFiles } from '../components/ChatFiles';
+import { RunActivity } from '../components/RunActivity';
+import { ToolHistory } from '../components/ToolHistory';
+import { terminalRunUpdate } from '../../../../packages/shared/src/run-presentation';
 import { ProjectPicker } from '../components/ProjectPicker';
 import { chatFileDisplayText } from '../../../../packages/shared/src/chat-files';
 import { resolveProjectWorkspace } from '../../../../packages/shared/src/projects';
@@ -159,7 +162,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const stickToBottom = useRef(true);
   const draggingMessages = useRef(false);
   const [activity, setActivity] = useState<string[]>([]);
-  const [showActivity, setShowActivity] = useState(false);
   const [unseenMessages, setUnseenMessages] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -341,7 +343,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setConversation(detail);
     setHistoryError(runList === null ? '실행 상태를 확인하지 못했습니다. 새 요청을 보내지 않았습니다. 연결을 확인하고 이 대화를 다시 선택하세요.' : recovery?.message ?? '');
     setHistoryPage({ id, info: detail.history });
-    setActivity([]); setShowActivity(false);
+    setActivity([]);
     setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
     const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
     setMessages(active?.running
@@ -454,14 +456,14 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       });
       scrollIfFollowing();
     };
-    const setRunFinished = (conversationId: string): void => {
+    const setRunFinished = (conversationId: string, phase: 'completed' | 'failed'): void => {
       requestOwnership.current.finish(conversationId);
       cancellationWatches.current.get(conversationId)?.abort();
       cancellationWatches.current.delete(conversationId);
       setConfirm(current => current?.conversationId === conversationId ? null : current);
       setRuns((current) => ({
         ...current,
-        [conversationId]: { ...(current[conversationId] ?? { conversationId, steeringQueued: 0 }), running: false, cancelling: false, status: '' },
+        [conversationId]: { ...(current[conversationId] ?? { conversationId, steeringQueued: 0 }), ...terminalRunUpdate(current[conversationId], phase), running: false, cancelling: false, status: '' },
       }));
     };
     const offs = [
@@ -516,7 +518,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       client.on('chat.done', (data) => {
         const d = data as { conversationId?: string; text: string; conversation?: ConversationDetail };
         if (startingConversationRef.current === d.conversationId) startingConversationRef.current = null;
-        if (d.conversationId) setRunFinished(d.conversationId);
+        if (d.conversationId) setRunFinished(d.conversationId, 'completed');
         if (d.conversationId !== activeId.current) { void refreshConversations(); return; }
         flushDelta();
         if (d.conversation) {
@@ -539,7 +541,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       client.on('chat.error', (data) => {
         const d = data as { conversationId?: string; message: string };
         if (startingConversationRef.current === d.conversationId) startingConversationRef.current = null;
-        if (d.conversationId) setRunFinished(d.conversationId);
+        if (d.conversationId) setRunFinished(d.conversationId, 'failed');
         if (d.conversationId !== activeId.current) return;
         flushDelta();
         setMessages((items) => {
@@ -591,7 +593,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       if (!requestOwnership.current.owns(currentConversation.id, requestToken)) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
       setConfirm(current => current?.conversationId === currentConversation.id ? null : current);
-      setRuns(current => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, phase: 'completed', steeringQueued: 0 } }));
+      setRuns(current => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, ...terminalRunUpdate(current[currentConversation.id], 'completed'), steeringQueued: 0 } }));
       if (activeId.current === currentConversation.id) setMessages(items => {
         const last = items.at(-1);
         return last?.role === 'assistant' ? [...items.slice(0, -1), { ...last, content: result.text || last.content, done: true }] : items;
@@ -614,7 +616,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         }
         return msgs;
       });
-      setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, phase: 'failed', cancelling: false, steeringQueued: 0, status: '' } }));
+      setRuns((current) => ({ ...current, [currentConversation.id]: { ...current[currentConversation.id], conversationId: currentConversation.id, running: false, ...terminalRunUpdate(current[currentConversation.id], 'failed'), cancelling: false, steeringQueued: 0, status: '' } }));
     } finally {
       if (requestOwnership.current.owns(currentConversation.id, requestToken)) {
         requestOwnership.current.finish(currentConversation.id);
@@ -1091,34 +1093,13 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
               {m.role === 'assistant' && conversation && <ChatFiles text={m.content} pc={pc} conversationId={conversation.id} />}
               {m.error ? <Text style={styles.errorText}>⚠️ {m.error}</Text> : null}
             </View>
-            {m.tools.length > 0 && (
-              <View style={styles.tools}>
-                {m.tools.map((t) => (
-                  <View key={t.key} style={[styles.toolChip, t.status === 'done' && styles.toolDone, t.status === 'error' && styles.toolErr]}>
-                    <Text style={styles.toolText} numberOfLines={1}>
-                      🔧 {t.name} {t.summary}
-                    </Text>
-                    <Text style={styles.toolStatus}>{t.status === 'start' ? '…' : t.status === 'done' ? '✓' : '✕'}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
+            <ToolHistory tools={m.tools} />
           </View>
         )}
       />
 
       {unseenMessages && <TouchableOpacity style={styles.latestBtn} onPress={jumpToLatest}><Text style={styles.latestText}>새 응답 보기 ↓</Text></TouchableOpacity>}
-      {(busy || activity.length > 0 || activeRun?.phase) ? <View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="작업 진행 기록 펼치기" accessibilityState={{ expanded: showActivity }} onPress={() => setShowActivity(value => !value)} style={styles.runStatus}><Text style={{ color: colors.accent2 }}>{busy ? '✦' : ['failed', 'cancelled'].includes(activeRun?.phase ?? '') || activeRun?.activity?.some(item => item.state === 'error') ? '!' : '✓'}</Text><Text numberOfLines={1} style={styles.runStatusText}>{activeRun?.phase === 'approval' ? '승인이 필요해요' : activeRun?.phase === 'cancelling' ? '안전하게 중지하는 중…' : activeRun?.phase === 'completed' ? (activeRun.activity?.some(item => item.state === 'error') ? '응답 완료 · 실행 오류 확인' : '응답 완료') : activeRun?.phase === 'failed' ? '작업 오류 확인' : activeRun?.phase === 'cancelled' ? '작업 중지됨' : activity.at(-1) || activeRun?.status || '요청 준비 중'}{activeRun?.steeringQueued ? ` · 추가 지시 ${activeRun.steeringQueued}개` : ''}</Text><Text style={{ color: colors.faint }}>{showActivity ? '⌃' : '⌄'}</Text></TouchableOpacity>
-        {showActivity && !shortKeyboardViewport && <ScrollView style={{ maxHeight: 180, paddingHorizontal: 18 }} nestedScrollEnabled>
-          {activeRun?.agents?.map(agent => <View key={agent.agentId} style={{ paddingVertical: 7, gap: 3 }}>
-            <Text style={{ color: agent.state === 'failed' ? colors.err : colors.text }}>{agent.label} · {{ queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지' }[agent.state]}</Text>
-            <Text style={{ color: colors.dim, fontSize: 11 }}>{agent.model || '모델 확인 중'}</Text>
-            <Text style={{ color: colors.faint, fontSize: 10 }}>{agent.usage.promptTokens + agent.usage.completionTokens > 0 ? `입력 ${agent.usage.promptTokens.toLocaleString()} · 출력 ${agent.usage.completionTokens.toLocaleString()} 토큰` : '토큰 사용량 미보고'}</Text>
-          </View>)}
-          {activeRun?.activity?.length ? activeRun.activity.map(entry => <Text key={entry.id} style={{ color: entry.state === 'error' ? colors.err : colors.dim, paddingVertical: 5 }}>{entry.state === 'done' ? '✓' : entry.state === 'error' ? '!' : '·'} {entry.label}</Text>) : activity.map((entry, index) => <Text key={index} style={{ color: colors.dim, paddingVertical: 5 }}>↳ {entry}</Text>)}
-        </ScrollView>}
-      </View> : null}
+      {!shortKeyboardViewport && <RunActivity key={conversation?.id} run={activeRun ?? null} busy={busy} />}
       <View
         ref={composerRef}
         onLayout={() => { if (keyboardTopRef.current !== null) scheduleComposerKeyboardSync([0, 80]); }}
@@ -1168,6 +1149,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             </TouchableOpacity>
           </View>
           <View style={[styles.composerActionRow, shortKeyboardViewport && { flexShrink: 0 }]}>
+            {shortKeyboardViewport && <RunActivity run={activeRun ?? null} busy={busy} compact />}
             <TouchableOpacity accessibilityRole="button" accessibilityLabel={uploading ? '파일 업로드 취소' : '파일 첨부'} accessibilityState={{ busy: uploading }} style={[styles.composerIconBtn, uploading && styles.toolBtnCancel]} onPress={() => uploading ? void cancelAttachment() : void attachFile()}><Text style={styles.toolBtnText}>{uploading ? '×' : '＋'}</Text></TouchableOpacity>
             <TouchableOpacity style={styles.composerIconBtn} accessibilityRole="button" accessibilityLabel="추가 실행 설정" onPress={() => { Keyboard.dismiss(); setShowChatOptions(true); }}><Text style={styles.toolBtnText}>⋯</Text></TouchableOpacity>
             {supportsDaybreak(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model) && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Daybreak" accessibilityState={{ selected: conversation?.daybreakEnabled === true, disabled: configurationLocked }} disabled={configurationLocked} onPress={() => void toggleDaybreak()} style={styles.composerSelectBtn}><Text style={[styles.composerSelectText, conversation?.daybreakEnabled && { color: colors.accent2 }]}>☀ {shortKeyboardViewport ? (conversation?.daybreakEnabled ? 'ON' : 'OFF') : `Daybreak ${conversation?.daybreakEnabled ? '켜짐' : '꺼짐'}`}</Text></TouchableOpacity>}

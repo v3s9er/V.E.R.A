@@ -71,7 +71,7 @@ export function HomeScreen({
   }, [authenticated, client, pc.id]);
 
   return (
-    <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right }]}>
+    <View style={[styles.root, { paddingLeft: insets.left, paddingRight: insets.right, paddingTop: keyboardVisible ? insets.top : 0 }]}>
       {!keyboardVisible && <View style={[styles.header, compact && styles.headerCompact, tab === 'chat' && styles.headerChat, { paddingTop: Math.max(insets.top, 12) }]}>
         <View style={styles.headerText}>
           <Text style={[styles.pcName, tab === 'chat' && styles.pcNameChat]} numberOfLines={1}>

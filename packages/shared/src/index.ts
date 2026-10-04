@@ -7,3 +7,4 @@ export * from './tuning.js';
 export * from './daybreak.js';
 export * from './ontology.js';
 export * from './chat-lifecycle.js';
+export * from './run-presentation.js';

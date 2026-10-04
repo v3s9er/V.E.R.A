@@ -1,8 +1,12 @@
-.run-panel { border: 1px solid #ffffff12; border-radius: 12px; background: #141923; margin: 0 0 10px; color: #e7eaf2; min-width: 0; }
+.run-panel { border: 0; border-bottom: 1px solid #ffffff12; border-radius: 8px 8px 0 0; background: transparent; margin: 0 0 6px; color: #e7eaf2; min-width: 0; position: relative; }
+.run-panel-time { font-size: 11px; color: #9da8bd; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.run-panel:not(.phase-completed):not(.phase-failed):not(.phase-cancelled) .run-panel-indicator { animation: run-breathe 2s ease-in-out infinite; }
+@keyframes run-breathe { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) { .run-panel .run-panel-indicator { animation: none !important; } }
 .run-panel summary { display: flex; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; list-style: none; min-width: 0; }
 .run-panel summary::-webkit-details-marker { display: none; }
 .run-panel summary:focus-visible, .tool-history summary:focus-visible { outline: 2px solid #a99bff; outline-offset: 2px; border-radius: 10px; }
-.run-panel-indicator { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: #8f7af51c; color: #b4a6ff; flex-shrink: 0; }
+.run-panel-indicator { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: #b4a6ff; flex-shrink: 0; }
 .run-panel.phase-approval .run-panel-indicator { color: #ffd27a; background: #ffd27a15; }
 .run-panel.phase-failed .run-panel-indicator { color: #ff9b9b; background: #ff9b9b15; }
 .run-panel.phase-completed .run-panel-indicator { color: #6fd6af; background: #6fd6af15; }
@@ -12,7 +16,7 @@
 .run-panel-heading small { font-size: 11px; color: #9da8bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-panel-chevron { color: #9da8bd; transition: transform .15s; }
 .run-panel[open] .run-panel-chevron { transform: rotate(180deg); }
-.run-panel-content { max-height: min(240px, 30dvh); overflow: auto; border-top: 1px solid #ffffff0a; }
+.run-panel-content { max-height: min(280px, 38dvh); overflow: auto; overscroll-behavior: contain; border: 1px solid #ffffff20; background: #191e2a; border-radius: 12px; box-shadow: 0 8px 28px #0006; position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; z-index: 30; }
 .run-panel ol { list-style: none; margin: 0; padding: 4px 14px; }
 .run-agent-list { border-bottom: 1px solid #ffffff0a; }
 .run-agent-detail { display: grid; flex: 1; min-width: 0; gap: 3px; }
@@ -66,14 +70,15 @@
 }
 @media (max-height: 540px) {
   .conversation-layout .chat-commandbar { padding:5px 12px; min-height:44px; }
-  .conversation-layout .chat-input { min-height: 42px; max-height: 90px; }
+  .conversation-layout .chat-input { height: 44px; min-height: 40px; max-height: 64px; padding: 5px 8px; }
   .conversation-layout .chat-inputbar.composer-minimal { padding:6px 8px; }
   .conversation-layout .chat-actions { gap:2px; }
+  .conversation-layout .chat-commandbar .agent-state { display:none; }
   .conversation-layout .run-panel { margin-bottom:3px; position:relative; }
   .run-panel summary { padding: 6px 9px; }
-  .run-panel-heading small { display:none; }
+  .run-panel-heading small { font-size:10px; }
   .run-panel p { display:none; }
-  .run-panel[open] .run-panel-content { position:absolute; bottom:100%; left:0; right:0; max-height:95px; background:#1b202e; border:1px solid #ffffff20; border-radius:10px; z-index:20; }
+  .run-panel[open] .run-panel-content { max-height: min(180px, 30dvh); }
   .conversation-layout .chat-inputbar.composer-minimal { margin-bottom: 6px; }
 }
 /* A real navigation drawer leaves the conversation viewport to the messages.

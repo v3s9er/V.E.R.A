@@ -12,6 +12,7 @@ import { inConversationSpace, selectConversationInSpace, type ConversationSpace 
 import { pcOrigin, type DesktopPcLoadResult, type SavedPc } from '../pcs';
 
 import { RunActivityPanel } from '../components/RunActivityPanel.js';
+import { mergeToolActivity, runPresentation, terminalRunUpdate } from '@mr-robot/shared';
 import { ModelPicker } from '../components/ModelPicker.js';
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
@@ -335,7 +336,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }, 10 * 60_000) as { ok?: boolean; error?: string; text?: string; route?: RouteInfo };
       if (selectedId.current !== conversation.id || !requestOwnership.current.owns(conversation.id, requestToken)) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
-      setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
+      setRunProgress(value => ({ ...value, ...terminalRunUpdate(value, 'completed') }));
       if (result.route) setRoute(result.route);
       if (result.text) {
         setMessages((items) => {
@@ -356,7 +357,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         setComposerError(active ? '응답 연결이 끊겼지만 PC 작업은 계속 실행 중입니다. 중복 전송하지 말고 완료를 기다리거나 중지하세요.' : 'PC 실행 상태를 확인할 수 없습니다. 연결 복구 후 확인하세요. 작업을 자동으로 다시 보내지 않았습니다.');
         return;
       }
-      setRunProgress(value => value.phase === 'cancelled' ? value : { ...value, phase: 'failed' });
+      setRunProgress(value => ({ ...value, ...terminalRunUpdate(value, 'failed') }));
       setMessages((items) => {
         const copy = [...items];
         const last = copy[copy.length - 1];
@@ -517,11 +518,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     const offTool = client.on('chat.tool', (data) => {
       if (!isCurrent(data)) return;
       const info = data as { name: string; input: unknown; status: 'start' | 'done' | 'error'; detail?: string; callId?: string };
+      const event = { key: `${info.name}#${++toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: info.status };
       setMessages((items) => {
-        const copy = [...items]; const last = copy[copy.length - 1]; if (!last || last.role !== 'assistant') return copy;
-        if (info.status === 'start') last.tools = [...last.tools.slice(-63), { key: `${info.name}#${++toolCounter.current}`, callId: info.callId, name: info.name, summary: describe(info.input), status: 'start' }];
-        else { const index = last.tools.findIndex(t => (info.callId ? t.callId === info.callId : t.name === info.name) && t.status === 'start'); if (index >= 0) last.tools[index] = { ...last.tools[index], status: info.status, detail: info.detail }; }
-        return copy;
+        const last = items[items.length - 1]; if (!last || last.role !== 'assistant') return items;
+        return [...items.slice(0, -1), { ...last, tools: mergeToolActivity(last.tools, event) }];
       });
     });
     const offStatus = client.on('chat.status', (data) => {
@@ -556,7 +556,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       if (!isCurrent(data)) return;
       const done = data as { text: string; route?: RouteInfo; conversation?: ConversationDetail };
       setConfirm(null);
-      setRunProgress(value => ['cancelled', 'failed'].includes(value.phase ?? '') ? value : { ...value, phase: 'completed' });
+      setRunProgress(value => ({ ...value, ...terminalRunUpdate(value, 'completed') }));
       setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { if (done.text) last.content = done.text; last.done = true; } return copy; });
       if (done.conversation) { selectedRef.current = done.conversation; setSelected(done.conversation); }
       setRoute(done.route ?? null);
@@ -578,7 +578,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
       }
       if (!isCurrent(data)) return;
       setConfirm(null);
-      setRunProgress(value => value.phase === 'cancelled' ? value : { ...value, phase: 'failed' });
+      setRunProgress(value => ({ ...value, ...terminalRunUpdate(value, 'failed') }));
       setMessages((items) => { const copy = [...items]; const last = copy[copy.length - 1]; if (last?.role === 'assistant') { last.done = true; last.error = (data as { message: string }).message; } return copy; });
     });
     const offConfirm = client.on('chat.confirm', (data) => { if (isCurrent(data)) setConfirm(data as ChatConfirmRequest); });
@@ -967,7 +967,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           busyRef.current = false;
           setBusy(false);
           setConfirm(null);
-          setRunProgress(value => ({ ...value, phase: 'cancelled' }));
+          setRunProgress(value => ({ ...value, ...terminalRunUpdate(value, 'cancelled') }));
           setStatus('');
           setMessages((items) => {
             const copy = [...items]; const last = copy[copy.length - 1];
@@ -1104,7 +1104,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           <header className="chat-commandbar">
             <div className="chat-title-group">
               <input aria-label="대화 이름" className="conversation-title-input" value={selected.title} onChange={(e) => setSelected({ ...selected, title: e.target.value })} onBlur={() => void updateConversation({ title: selected.title })} />
-              <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? (status || '작업 준비 중') : activeModeLabel}</span>
+              <span className={`agent-state ${busy || executionConfigSaving ? 'working' : ''}`}><i />{executionConfigSaving ? '실행 설정 저장 중…' : busy ? runPresentation({ ...runProgress, busy }).heading : activeModeLabel}</span>
             </div>
             <button type="button" className={`context-trigger ${contextOpen ? 'active' : ''}`} aria-expanded={contextOpen} onClick={() => setContextOpen((value) => !value)}>
               <span className="context-trigger-icon">▱</span><span><b>프로젝트</b><small>{selectedWorkspace?.name ?? (selected.workspaceId ? '연결 해제됨' : '폴더 선택')}</small></span><em>⌄</em>
@@ -1130,7 +1130,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           {visibleMessages.map((m) => <div key={m.id} data-message-id={m.id} className={`msg-row ${m.role}`}>
             <div className="msg-avatar">{m.role === 'user' ? 'U' : '✦'}</div>
             <div className="msg-body"><div className="msg-meta">{m.role === 'user' ? '나' : 'Mr.Robot'}</div>
-              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{status || '요청을 분석하고 있습니다'}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
+              <div className="msg-bubble">{m.content ? (m.role === 'assistant' ? <MarkdownMessage>{m.content}</MarkdownMessage> : <div className="user-message-text">{m.content}</div>) : (!m.done && <span role="status">{runPresentation({ ...runProgress, busy }).detail}</span>)}{m.error && <div className="msg-error">⚠️ {m.error}</div>}</div>
               {m.role === 'assistant' && activePc && selected && <ChatFiles key={`${activePc.id}:${selected.id}:${m.id}`} text={m.content} pc={activePc} conversationId={selected.id} />}
               {m.tools.length > 0 && <details className="tool-history"><summary>작업 내역 {m.tools.length}개 <span>⌄</span></summary><div className="tool-list" aria-label="작업 활동">{m.tools.map((t) => <div key={t.key} className={`tool-chip ${t.status}`} title={t.summary}><span className="tool-icon">{TOOL_EMOJI[t.name] ?? '🔌'}</span><span className="tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>{t.summary && <span className="tool-summary">{t.summary}</span>}<span className="tool-state">{t.status === 'start' ? '↳' : t.status === 'done' ? '✓' : '!'}</span></div>)}</div></details>}
             </div>
@@ -1139,7 +1139,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
         </div>
 
         <div ref={composerBar} className="chat-inputbar composer-minimal">
-          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} agents={runProgress.agents} startedAt={runProgress.startedAt} busy={busy} fallback={status || route?.model} />}
+          {executionConfigSaving ? <div className="run-status live"><Spinner size={13} /><span>실행 설정 저장 중…</span></div> : <RunActivityPanel phase={runProgress.phase} activity={runProgress.activity} agents={runProgress.agents} startedAt={runProgress.startedAt} updatedAt={runProgress.updatedAt} busy={busy} />}
           {voiceAck && <div className="voice-ack"><span>🎙</span><b>{voiceAck}</b></div>}
           {composerError && <div className="composer-error"><span>!</span>{composerError}{selected && <button type="button" onClick={() => void loadConversation(selected.id).catch(() => setComposerError('상태를 다시 확인하지 못했습니다. 연결을 확인하세요.'))}>상태 다시 확인</button>}<button type="button" aria-label="오류 닫기" onClick={() => setComposerError('')}>×</button></div>}
           {modelRefreshStatus && <div role="status">{modelRefreshStatus}<button type="button" aria-label="모델 갱신 안내 닫기" onClick={() => setModelRefreshStatus('')}>×</button></div>}

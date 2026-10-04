@@ -21,7 +21,7 @@ const client = {
     if (method === 'providers.list') return [{ id: 'fixture', name: 'Fixture', model: 'Test model', isDefault: true, supportedReasoning: ['auto', 'low', 'high'] }];
     if (method === 'providers.models') return ['Test model'];
     if (method === 'chat.pendingConfirm') return null;
-    if (method === 'chat.runs') return process.env.EXPO_PUBLIC_MR_ROBOT_UI_BUSY === '1' ? [{ conversationId: 'fixture', running: true, steeringQueued: 0, status: 'Fixture task in progress' }] : [];
+    if (method === 'chat.runs') return process.env.EXPO_PUBLIC_MR_ROBOT_UI_BUSY === '1' ? [{ conversationId: 'fixture', running: true, phase: 'working', startedAt: Date.now(), steeringQueued: 0, activity: [{ id: 'read', label: 'read_file', state: 'running', startedAt: Date.now() }] }] : [];
     if (['routing.presets.list', 'workspaces.list'].includes(method)) return [];
     throw new Error(`UI fixture refuses unexpected RPC: ${method}`);
   },

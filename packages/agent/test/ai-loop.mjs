@@ -28,7 +28,9 @@ const mock = createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    // This fixture tests model/tool orchestration, not pooled HTTP sockets.
+    // Close explicitly: slow Windows shell tests can cross the keepalive expiry.
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' });
     const sse = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
     const done = () => {
       res.write('data: [DONE]\n\n');
@@ -109,7 +111,8 @@ const mock = createServer((req, res) => {
     }
   });
 });
-await new Promise((r) => mock.listen(9999, '127.0.0.1', r));
+await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+const mockBaseUrl = `http://127.0.0.1:${mock.address().port}/v1`;
 
 // ---- run the loop --------------------------------------------------------
 const { AgentServer } = await import(pathToFileURL('./packages/agent/dist/server/server.js').href);
@@ -118,7 +121,7 @@ const server = new AgentServer();
 const provider = server.providersAdd({
   label: 'mock',
   type: 'openai-compatible',
-  baseUrl: 'http://127.0.0.1:9999/v1',
+  baseUrl: mockBaseUrl,
   model: 'mock-model',
   apiKey: 'test-key',
 });
@@ -210,11 +213,11 @@ check('swarm budget profile includes bounded configured iterations', swarmBudget
 // provider selections. Three tool rounds plus the final response must spend
 // only one premium call and continue every later round on a free tool model.
 const premiumBudgetProvider = server.providersAdd({
-  label: 'Premium Budget', type: 'openai-compatible', baseUrl: 'http://127.0.0.1:9999/v1',
+  label: 'Premium Budget', type: 'openai-compatible', baseUrl: mockBaseUrl,
   model: 'premium-budget', apiKey: 'test-key', source: 'api', costTier: 2,
 });
 server.providersAdd({
-  label: 'Free Budget', type: 'openai-compatible', baseUrl: 'http://127.0.0.1:9999/v1',
+  label: 'Free Budget', type: 'openai-compatible', baseUrl: mockBaseUrl,
   model: 'free-budget', apiKey: 'test-key', source: 'free', costTier: 0,
 });
 const budgetResult = await server.loop.run([], '명령 실행하고 세 번 검증해줘', { confirm: async () => true }, [], {

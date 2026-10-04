@@ -140,4 +140,22 @@ check('confirmed cancellation releases the mobile dispatch guard even without te
   && chat.includes('await watchChatSettlement(')
   && !chat.includes('cancelTimers'));
 
+const progress = read('src/components/RunActivity.tsx');
+const toolHistory = read('src/components/ToolHistory.tsx');
+check('work details open in a bounded dismissible sheet instead of pushing the composer',
+  chat.includes('<RunActivity key={conversation?.id}')
+  && progress.includes('runPresentation({ ...run, busy }, now)')
+  && progress.includes('<Modal visible={open}')
+  && progress.includes('onRequestClose={() => setOpen(false)}')
+  && progress.includes("maxHeight: '75%'")
+  && chat.includes('<RunActivity run={activeRun ?? null} busy={busy} compact />')
+  && home.includes('paddingTop: keyboardVisible ? insets.top : 0')
+  && !progress.includes('item.input') && !progress.includes('item.detail'));
+check('mobile tool history is collapsed, bounded and hides raw payloads',
+  chat.includes('<ToolHistory tools={m.tools} />')
+  && toolHistory.includes('useState(false)') && toolHistory.includes('maxHeight: 180')
+  && toolHistory.includes('activityLabel(t.name)') && !toolHistory.includes('t.summary'));
+check('terminal state is retained when completion and error notifications arrive late',
+  chat.includes("setRunFinished(d.conversationId, 'failed')")
+  && chat.includes('terminalRunUpdate(current[conversationId], phase)'));
 console.log('MOBILE UI CONTRACT PASSED');
