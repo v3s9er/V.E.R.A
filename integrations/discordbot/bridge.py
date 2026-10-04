@@ -189,10 +189,10 @@ class Bridge:
         async def user_access(interaction: discord.Interaction, user: discord.Member, mode: str, confirm_full: bool = False):
             await self.execute(interaction, 'user-access', targetUserId=str(user.id), mode=mode, confirmFull=confirm_full)
 
-        @group.command(name='model-limit', description='서버 관리자 전용: 사용자별 모델 상한 설정·조회')
+        @group.command(name='model-limit', description='관리자: 사용자별 GPT-6 Sol·Astra 등 모델 사용 허용')
         @app_commands.checks.has_permissions(administrator=True)
-        @app_commands.describe(user='제한할 서버 사용자', ceiling='상위 모델 차단 · 서버 내 모든 티켓에 적용')
-        @app_commands.choices(ceiling=[app_commands.Choice(name=label, value=value) for value, label in [('show', '현재 상한 조회'), ('spark', 'spark 이하'), ('mini', 'mini 이하'), ('luna', 'luna 이하'), ('terra', 'terra 이하'), ('sol', 'sol 이하'), ('astra', 'astra 이하'), ('unlimited', '제한 해제 · 모든 공급자')]])
+        @app_commands.describe(user='모델 사용을 허용할 서버 사용자', ceiling='PC 접근 권한과 별개 · 이 서버의 모든 티켓에 적용')
+        @app_commands.choices(ceiling=[app_commands.Choice(name=label, value=value) for value, label in [('show', '현재 허용 범위 조회'), ('default', '기본값 · GPT-6 Sol/Astra 개별 허용 회수'), ('spark', 'Spark 이하'), ('mini', 'Mini 이하'), ('luna', 'Luna 이하'), ('terra', 'Terra 이하'), ('sol', 'GPT-6 Sol 이하 허용'), ('astra', 'GPT-6 Astra 이하 허용 · Sol 포함'), ('unlimited', '모든 모델 명시적 허용 · 모든 공급자')]])
         async def model_limit(interaction: discord.Interaction, user: discord.Member, ceiling: str):
             await self.execute(interaction, 'model-limit', targetUserId=str(user.id), ceiling=ceiling)
 

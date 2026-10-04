@@ -60,8 +60,10 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
   }
   ws.send(JSON.stringify({ id: req.id, ok: true, result: req.method === 'auth' ? { ok: true, isAdmin: false, permissionCap: 'full', canUseAuditOnly: true } : req.method === 'conversations.create' ? { id: 'test-conversation' } : { ok: true } }));
 }); });
-const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra', 'unknown', 'sol'];
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], modelCatalog: async () => ({ models: catalog, source: 'codex-model-list', state: 'fresh', lastUpdatedAt: 1, lastAttemptAt: 1, modelCapabilities: { 'gpt-6-astra': { supportedReasoningEfforts: ['ultra'] }, 'gpt-5.6-sol': { supportedReasoningEfforts: ['low', 'ultra'] }, 'gpt-5.6-luna': { supportedReasoningEfforts: ['max'] } } }), permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
+const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-sol', 'gpt-6-astra', 'unknown', 'sol'];
+let catalogState: 'fresh' | 'stale' | 'fallback' = 'fresh';
+let catalogWait: (() => Promise<void>) | undefined;
+const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], modelCatalog: async () => { await catalogWait?.(); return { models: [...catalog], source: 'codex-model-list', state: catalogState, lastUpdatedAt: 1, lastAttemptAt: 1, modelCapabilities: { 'gpt-6-astra': { supportedReasoningEfforts: ['ultra'] }, 'gpt-6-sol': { supportedReasoningEfforts: ['low', 'high'] }, 'gpt-5.6-sol': { supportedReasoningEfforts: ['low', 'ultra'] }, 'gpt-5.6-luna': { supportedReasoningEfforts: ['max'] } } }; }, permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -119,18 +121,75 @@ try {
     assert.ok((await request({ action, guildAdmin: false, mode: 'full', confirmFull: true, targetUserId: identity.userId, ceiling: 'unlimited' })).error, 'non-admin policy mutation denied by host');
   }
   assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'sol' })).result.modelCeiling, 'sol');
-  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 5));
+  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 6));
   assert.equal((await request({ action: 'models' })).result[0].model, '', 'above-cap configured default not offered');
   assert.equal((await request({ action: 'status', channelId: '666666666666666666' })).result.modelCeiling, 'sol', 'new channels cannot reset per-user cap');
   assert.equal((await request({ action: 'status', userId: '555555555555555555' })).result.modelCeiling, 'unlimited', 'other users isolated');
   const basic = { guildAdmin: false, allowAi: true, userId: '555555555555555555' };
+  const policyScope = `${identity.guildId}:${basic.userId}`;
+  const permissionSnapshot = structuredClone(storage.get('permissions'));
+  const accessSnapshot = structuredClone(storage.get('userAccess'));
+  const defaultStatus = (await request({ ...basic, action: 'status' })).result;
+  assert.equal(defaultStatus.modelCeiling, 'default');
+  assert.equal(defaultStatus.modelPolicyEnforced, true);
+  const defaultCatalog = (await request({ ...basic, action: 'models', providerId: 'provider', includeCapabilities: true })).result;
+  assert.equal(defaultCatalog.modelGrantExplicit, false);
+  assert(defaultCatalog.models.includes('gpt-5.6-sol'), 'legacy Sol is not silently revoked');
+  assert(!defaultCatalog.models.includes('gpt-6-sol') && !defaultCatalog.models.includes('gpt-6-astra'));
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-sol', effort: 'auto' })).error);
+  assert.ok((await request({ ...basic, action: 'ask', text: 'ungranted default' })).error);
+  assert.ok((await request({ ...basic, action: 'ask', text: 'empty slash defaults still need grant', providerId: '', model: '' })).error);
+  assert.ok((await request({ ...basic, action: 'ask', text: 'reject malformed provider', providerId: false, model: '' })).error);
+  assert.ok((await request({ ...basic, action: 'ask', text: 'reject malformed model', providerId: '', model: 0 })).error);
+  assert.ok((await request({ ...basic, action: 'model-limit', targetUserId: basic.userId, ceiling: 'astra' })).error, 'ordinary users cannot self-grant');
+  assert.equal((await request({ action: 'model-limit', targetUserId: basic.userId, ceiling: 'sol' })).result.modelCeiling, 'sol');
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-sol', effort: 'high' })).result);
+  assert.equal((await request({ ...basic, action: 'ask', text: 'explicitly granted GPT-6 Sol', providerId: '', model: '' })).result.text, 'isolated result');
+  assert.equal(lastRun.providerModel, 'gpt-6-sol');
+  assert.equal(lastRun.discordModelCeiling, 'sol');
+  assert.equal(lastRun.permissionMode, 'workspace');
+  assert.equal(lastRun.discordIsolation, 'isolated');
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-astra', effort: 'auto' })).error);
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'forged', model: 'gpt-6-sol', effort: 'auto' })).error);
+  const newTicketStatus = (await request({ ...basic, action: 'status', channelId: '666666666666666666' })).result;
+  assert.equal(newTicketStatus.modelCeiling, 'sol', 'grant applies to all target user tickets');
+  storage.set('allowedGuildIds', [identity.guildId, '444444444444444444']);
+  assert.equal((await request({ ...basic, action: 'status', guildId: '444444444444444444' })).result.modelCeiling, 'default', 'grant never crosses guild');
+  storage.set('allowedGuildIds', [identity.guildId]);
+  for (const state of ['stale', 'fallback'] as const) {
+    catalogState = state;
+    assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-sol', effort: 'auto' })).error);
+    assert.ok((await request({ ...basic, action: 'ask', text: 'stale catalogue', model: 'gpt-6-sol' })).error);
+  }
+  catalogState = 'fresh';
+  catalog.splice(5, 1);
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-sol', effort: 'auto' })).error, 'removed model cannot be saved from old picker');
+  assert.ok((await request({ ...basic, action: 'ask', text: 'removed model preference' })).error, 'persisted choice revalidates exact account catalog');
+  catalog.splice(5, 0, 'gpt-6-sol');
+  let releaseCatalog: (() => void) | undefined;
+  let waiting = false;
+  catalogWait = () => new Promise<void>(resolve => { waiting = true; releaseCatalog = resolve; });
+  const delayedSettings = request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-sol', effort: 'auto' });
+  await waitFor(() => waiting);
+  assert.equal((await request({ action: 'model-limit', targetUserId: basic.userId, ceiling: 'default' })).result.modelCeiling, 'default');
+  catalogWait = undefined; releaseCatalog!();
+  assert.ok((await delayedSettings).error, 'revocation racing model discovery prevents settings save');
+  assert.ok(!Object.hasOwn(storage.get('modelLimits') as object, policyScope));
+  assert.ok((await request({ ...basic, action: 'ask', text: 'revoked saved preference' })).error);
+  assert.ok((await request({ action: 'model-limit', targetUserId: basic.userId, ceiling: 'unlimited' })).result);
+  assert.equal((storage.get('modelLimits') as any)[policyScope], 'unlimited', 'explicit unlimited must survive restart distinctly from default');
+  assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
+  assert.deepEqual(storage.get('permissions'), permissionSnapshot, 'model grant/revoke never changes PC permission');
+  assert.deepEqual(storage.get('userAccess'), accessSnapshot, 'model grant/revoke never grants existing host files');
+  assert.ok((await request({ action: 'model-limit', targetUserId: basic.userId, ceiling: 'astra' })).result);
+  assert.ok((await request({ ...basic, action: 'settings', providerId: 'provider', model: 'gpt-6-astra', effort: 'auto' })).result);
   const basicKey = `${identity.guildId}:${identity.channelId}:${basic.userId}:isolated`;
   storage.set('conversations', { [basicKey]: 'deleted-ticket' });
   const original = discordAttachmentStore().put('deleted-ticket', 'fixture.txt', Buffer.from('synthetic continuity attachment'));
   const createsBeforeRepair = createdConversations;
   assert.equal((await request({ ...basic, action: 'status' })).result.access, 'isolated');
   assert.equal((await request({ ...basic, action: 'models' })).result[0].type, 'codex-cli', 'ordinary users see the same owner subscriptions');
-  assert.equal((await request({ ...basic, action: 'ask', text: 'create a safe report' })).result.text, 'isolated result');
+  assert.equal((await request({ ...basic, action: 'ask', text: 'create a safe report', providerId: '', model: '' })).result.text, 'isolated result');
   assert.equal(createdConversations, createsBeforeRepair + 1, 'deleted ticket repaired exactly once');
   const repairedId = lastRun.conversationId;
   assert.equal((storage.get('conversations') as any)[basicKey], repairedId);
@@ -205,7 +264,7 @@ try {
   await waitFor(() => replies.some(r => r.id === 'ask')); assert.equal(replies.find(r => r.id === 'ask').result.text, 'Test finished');
   assert.equal(commands.get('discord.status')!().busy, false);
   assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'astra' })).result.modelCeiling, 'astra');
-  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 6));
+  assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog.slice(0, 7));
   assert.equal((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'show' })).result.modelCeiling, 'astra');
   assert.ok((await request({ action: 'model-limit', targetUserId: identity.userId, ceiling: 'unlimited' })).result);
   assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog);
@@ -231,9 +290,12 @@ try {
   assert.ok(replies.some(r => r.event === 'thread.state'));
   deferIsolated = true;
   const peer = { ...basic, userId: '777777777777777777', channelId: '888888888888888888' };
+  await request({ action: 'model-limit', targetUserId: peer.userId, ceiling: 'astra' });
   emit({ ...identity, ...basic, id: 'parallel-a', action: 'ask', text: 'parallel A' });
-  emit({ ...identity, ...peer, id: 'parallel-b', action: 'ask', text: 'parallel B' });
+  emit({ ...identity, ...peer, id: 'parallel-b', action: 'ask', text: 'parallel B', providerId: '', model: '' });
   await waitFor(() => held.size === 2);
+  assert.equal(lastRun.providerModel, 'gpt-6-astra', 'empty slash defaults use provider default without saved preference');
+  assert.ok((await request({ action: 'model-limit', targetUserId: basic.userId, ceiling: 'default' })).error, 'grant cannot be revoked while target is running');
   assert.equal(commands.get('discord.status')!().activeCount, 2);
   assert.ok((await request({ ...basic, userId: '666666666666666666', action: 'ask', text: 'third' })).error);
   assert.ok((await request({ action: 'ask', text: 'full exclusive' })).error);

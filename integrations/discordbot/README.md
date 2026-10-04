@@ -67,24 +67,35 @@ Queue limits are 16 total/4 per thread; session limits are 64 total/20 per user.
 
 ## Security and limits
 
-### User model ceilings (Discord Agent 1.4.0)
+### Per-user model grants (V.E.R.A 0.7.2)
 
 Server administrators can run `/robot model-limit user:@member ceiling:sol`
-or choose `astra`, `show` (inspect), or `unlimited` (remove the restriction).
+to allow **GPT-6 Sol and lower tiers**, or `ceiling:astra` to also allow
+**GPT-6 Astra**. Members then open `/robot model` in their own ticket and select
+the model. An already-open picker has **허용 모델 새로고침** to reload grants.
+`show` inspects the policy, `default` removes the explicit grant, and
+`unlimited` explicitly allows all models from the owner's registered providers.
 The policy is stored privately per guild/user, not per channel; opening/deleting
 tickets or restarting the bot does not reset it. Other users/guilds are isolated.
-Changes are refused while the target user's run is active. No limits are assigned
-automatically to existing users.
+Changes are refused while the target user's run is active. Existing ordinary
+model access is preserved, but ordinary members without an explicit grant cannot
+select GPT-6 Sol/Astra. An administrator's own default remains unrestricted;
+explicit administrator caps still apply. Previously saved `sol`/`astra` ceilings
+also count as grants. Older `unlimited` settings were stored as a missing entry,
+so their intent cannot be recovered: reissue an explicit grant for GPT-6 access.
+The plugin never grants a role or changes PC access as part of a model grant.
 
 The explicit application ordering is `spark < mini < luna < terra < sol < astra`.
 Exact model IDs are gpt-5.3-codex-spark, gpt-5.4-mini, gpt-5.6-luna,
-gpt-5.6-terra, gpt-5.6-sol, gpt-6-astra. This is an administration policy, not
+gpt-5.6-terra, gpt-5.6-sol, gpt-6-sol, gpt-6-astra. Both Sol generations belong
+to the `sol` tier. This is an administration policy, not
 a benchmark ranking. Unknown IDs/aliases and other vendors (including Claude)
 are denied for limited users rather than guessed into a tier. `unlimited`
-restores all configured providers. Adding future model IDs requires an explicit
+explicitly permits all configured providers. Adding future model IDs requires an explicit
 policy update.
 
-Catalogs and saved/direct selections are checked by the Node host. Limited
+Catalogs and saved/direct selections are checked by the Node host against both
+the live available catalog and the current user policy. Limited
 requests resolve their provider/default explicitly. Every actual provider call
 through V.E.R.A's loop is checked again, including API/native execution and
 fallback providers. Discord runs do not inherit PC routing presets. Policy

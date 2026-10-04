@@ -15,7 +15,7 @@ import { discordAttachmentStore, validateAttachmentSources, DiscordAttachmentErr
 import { attachmentInstructions, isAudioAttachment, readDiscordAttachment, stageNativeAttachments } from '../server/discord-documents.js';
 import { configureDiscordSandboxEngine, closeDiscordSandboxes } from '../server/discord-sandbox.js';
 import { discordAccess, parseDiscordAccess, DISCORD_ADMIN_ACTIONS } from './discord-access.js';
-import { assertDiscordModelAllowed, discordModelAllowed, parseDiscordModelCeiling } from './discord-model-policy.js';
+import { assertDiscordModelAllowed, discordModelAllowed, discordModelPolicy, parseDiscordModelCeiling } from './discord-model-policy.js';
 
 export interface DiscordHost {
   port(): number;
@@ -70,6 +70,39 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     return { ...defaults, ...saved, mode: saved ? saved.mode ?? 'legacy' : defaults.mode };
   };
   const status = () => ({ running: !!child, ready, owner, busy, activeCount: runs.size, capacity: 2, error: lastError, workspace, config: config() });
+  const readModelLimits = (): Record<string, unknown> => {
+    const saved = ctx.storage.get<Record<string, unknown>>('modelLimits');
+    const limits = saved === undefined ? {} : saved;
+    if (!limits || typeof limits !== 'object' || Array.isArray(limits)) throw new Error('모델 정책 저장소가 손상되었습니다. PC에서 복구하세요.');
+    return limits;
+  };
+  const providerFor = async (providerId?: string) => {
+    if (providerId !== undefined && (typeof providerId !== 'string' || !providerId || providerId.length > 200)) throw new Error('공급자 설정이 올바르지 않습니다.');
+    const providers = await host.models();
+    if (!Array.isArray(providers)) throw new Error('공급자 목록을 확인할 수 없습니다.');
+    const provider = providerId ? providers.find(p => p?.providerId === providerId) : providers.find(p => p?.isDefault) ?? providers[0];
+    if (!provider || typeof provider.providerId !== 'string') throw new Error('연결된 공급자를 /robot model에서 선택하세요.');
+    return provider;
+  };
+  const currentCatalog = async (providerId: string): Promise<ProviderModelCatalog> => {
+    const details = host.modelCatalog ? await host.modelCatalog(providerId) : { models: await host.models(providerId), source: 'provider', state: 'fresh', lastUpdatedAt: null, lastAttemptAt: null };
+    if (!Array.isArray(details.models) || details.state !== 'fresh') throw new Error('현재 연결된 계정의 모델 목록을 확인하지 못했습니다. PC에서 모델 목록을 새로고침한 뒤 /robot model을 다시 여세요.');
+    return { ...details, models: details.models.filter((model: unknown): model is string => typeof model === 'string' && model.length > 0 && model.length <= 200 && model === model.trim()).slice(0, 1000) } as ProviderModelCatalog;
+  };
+  const resolveModelSelection = async (providerId?: string, model?: string) => {
+    const provider = await providerFor(providerId);
+    const selected = model ?? provider.model;
+    const catalog = await currentCatalog(provider.providerId);
+    if (typeof selected !== 'string' || !catalog.models.includes(selected)) throw new Error('선택한 모델을 현재 연결된 계정에서 사용할 수 없습니다. /robot model을 다시 열어 허용 목록에서 선택하세요.');
+    return { providerId: provider.providerId as string, model: selected };
+  };
+  const optionalSelection = (value: unknown): string | undefined => {
+    // Slash-command defaults intentionally arrive as empty strings; malformed
+    // non-string input must not silently fall back to a more privileged default.
+    if (value === undefined || value === '') return undefined;
+    if (typeof value !== 'string' || value.length > 200 || value !== value.trim()) throw new Error('모델/공급자 설정이 잘못되었습니다.');
+    return value;
+  };
   const validateEffort = async (providerId: string | undefined, model: string | undefined, effort: string): Promise<void> => {
     if (!REASONING_EFFORT_ORDER.includes(effort as ReasoningEffort)) throw new Error('추론 단계가 올바르지 않습니다. /robot model에서 선택하세요.');
     if (effort === 'auto') return;
@@ -148,27 +181,27 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     const isolated = access !== 'full';
     const conversationKey = isolated ? `${channel}:isolated` : channel;
     const resultKey = `${conversationKey}:${access}`;
-    const savedLimits = ctx.storage.get<Record<string, string>>('modelLimits');
-    const limits = savedLimits === undefined ? {} : savedLimits;
-    if (!limits || typeof limits !== 'object' || Array.isArray(limits)) throw new Error('모델 정책 저장소가 손상되었습니다. PC에서 복구하세요.');
+    const limits = readModelLimits();
+    const currentModelPolicy = () => discordModelPolicy(message.guildAdmin === true, readModelLimits(), userScope);
+    const policyMetadata = () => ({ modelPolicyEnforced: true, modelCeiling: currentModelPolicy(), modelGrantExplicit: Object.hasOwn(readModelLimits(), userScope) });
     if (message.action === 'model-limit') {
       // Independently guarded on the host; slash visibility is not authorization.
       if (message.guildAdmin !== true) throw new Error('모델 제한 변경은 서버 관리자만 할 수 있습니다.');
       if (!/^\d{15,22}$/.test(String(message.targetUserId))) throw new Error('대상 서버 사용자를 선택하세요.');
       const target = `${message.guildId}:${message.targetUserId}`;
       if (message.ceiling === 'show') {
-        const ceiling = parseDiscordModelCeiling(Object.hasOwn(limits, target) ? limits[target] : 'unlimited');
-        return { modelCeiling: ceiling, message: `대상 사용자 모델 상한: ${ceiling} · 서버 내 모든 티켓에 적용` };
+        const ceiling = Object.hasOwn(limits, target) ? parseDiscordModelCeiling(limits[target]) : 'default';
+        return { modelCeiling: ceiling, modelPolicyEnforced: true, modelGrantExplicit: ceiling !== 'default', message: `대상 사용자 모델 상한: ${ceiling} · 기본값은 일반 사용자의 GPT-6 허가 없음 / 관리자 제한 없음 · PC 접근 권한과 별개` };
       }
-      const ceiling = parseDiscordModelCeiling(message.ceiling);
+      const ceiling = message.ceiling === 'default' ? 'default' : parseDiscordModelCeiling(message.ceiling);
       if ([...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.targetUserId}`))) throw new Error('대상 사용자의 실행을 먼저 중지하세요. 실행 도중에는 모델 상한을 변경할 수 없습니다.');
-      if (ceiling !== 'unlimited' && Object.keys(limits).length >= 256 && !Object.hasOwn(limits, target)) throw new Error('모델 정책 저장소가 가득 찼습니다. 불필요한 제한을 해제하세요.');
+      if (ceiling !== 'default' && Object.keys(limits).length >= 256 && !Object.hasOwn(limits, target)) throw new Error('모델 정책 저장소가 가득 찼습니다. 불필요한 정책을 기본값으로 되돌리세요.');
       const next = { ...limits };
-      if (ceiling === 'unlimited') delete next[target]; else next[target] = ceiling;
+      if (ceiling === 'default') delete next[target]; else next[target] = ceiling;
       ctx.storage.set('modelLimits', next);
-      return { modelCeiling: ceiling, message: `대상 사용자 모델 상한을 ${ceiling === 'unlimited' ? '제한 없음' : ceiling + ' 이하'}으로 저장했습니다. 이 서버의 기존·새 티켓과 직접 명령에 적용됩니다. 제한 시 미분류 모델은 차단됩니다.` };
+      return { modelCeiling: ceiling, modelPolicyEnforced: true, modelGrantExplicit: ceiling !== 'default', message: `대상 사용자 모델 상한을 ${ceiling === 'default' ? '기본값 (일반 사용자의 GPT-6 허가 해제)' : ceiling === 'unlimited' ? '제한 없음 (명시적 허가)' : ceiling + ' 이하'}으로 저장했습니다. 이 서버의 기존·새 티켓과 직접 명령에 적용됩니다. PC 접근 권한은 변경하지 않았습니다.` };
     }
-    const modelCeiling = parseDiscordModelCeiling(Object.hasOwn(limits, userScope) ? limits[userScope] : 'unlimited');
+    const modelCeiling = currentModelPolicy();
     threads.assertOwner(message);
     if (message.action === 'thread.unbind' && [...runs.keys()].some(key => key.startsWith(`${message.guildId}:`))) throw new Error('서버에서 실행 중인 작업을 먼저 중지하세요.');
     const threadCommand = threads.command(message, activeChannel);
@@ -188,29 +221,37 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     const preferences = ctx.storage.get<Record<string, { providerId?: string; model?: string; effort?: string }>>('preferences') ?? {};
     const preference = preferences[channel] ?? {};
     if (message.action === 'settings') {
+      const settingsGeneration = generation;
       if (busy && channel === activeChannel) throw new Error('작업을 중지한 후 설정을 바꾸세요.');
       if (Object.keys(preferences).length >= 64 && !preferences[channel]) throw new Error('설정 저장소가 가득 찼습니다.');
       if (typeof message.model !== 'string' || message.model.length > 200 || typeof message.providerId !== 'string' || message.providerId.length > 200) throw new Error('모델/공급자 설정이 잘못되었습니다.');
       assertDiscordModelAllowed(modelCeiling, message.model);
+      await resolveModelSelection(message.providerId, message.model);
       await validateEffort(message.providerId, message.model, message.effort);
-      preferences[channel] = { providerId: message.providerId, model: message.model, effort: message.effort };
-      ctx.storage.set('preferences', preferences);
-      return { message: '이 대화의 모델·추론 설정을 저장했습니다.' };
+      // Discovery can await a CLI/network response while an administrator revokes
+      // the grant. Re-read policy and run ownership before mutating preferences.
+      assertDiscordModelAllowed(currentModelPolicy(), message.model);
+      if (generation !== settingsGeneration || !ready) throw new Error('Discord 연결이 변경되어 설정을 저장하지 않았습니다.');
+      if (runs.has(channel)) throw new Error('작업을 중지한 후 설정을 바꾸세요.');
+      ctx.storage.set('preferences', { ...(ctx.storage.get<Record<string, unknown>>('preferences') ?? {}), [channel]: { providerId: message.providerId, model: message.model, effort: message.effort } });
+      return { ...policyMetadata(), message: '이 대화의 모델·추론 설정을 저장했습니다. PC 접근 권한은 변경하지 않았습니다.' };
     }
     if (message.action === 'models') {
       const providerId = typeof message.providerId === 'string' && message.providerId.length <= 200 ? message.providerId : undefined;
-      const catalog = await host.models(providerId);
-      if (!Array.isArray(catalog)) throw new Error('모델 목록 응답이 올바르지 않습니다.');
       if (providerId) {
-        const models = catalog.filter(model => discordModelAllowed(modelCeiling, model));
-        if (message.includeCapabilities === true && host.modelCatalog) {
-          const details = await host.modelCatalog(providerId);
-          return { models, modelCapabilities: Object.fromEntries(Object.entries(details.modelCapabilities ?? {}).filter(([model]) => models.includes(model))) };
+        await providerFor(providerId);
+        const details = await currentCatalog(providerId);
+        const effectivePolicy = currentModelPolicy();
+        const models = details.models.filter(model => discordModelAllowed(effectivePolicy, model));
+        if (message.includeCapabilities === true) {
+          return { ...details, ...policyMetadata(), models, modelCapabilities: Object.fromEntries(Object.entries(details.modelCapabilities ?? {}).filter(([model]) => models.includes(model))) };
         }
         return models;
       }
+      const catalog = await host.models();
+      if (!Array.isArray(catalog)) throw new Error('모델 목록 응답이 올바르지 않습니다.');
       // Keep providers discoverable even when their configured default is above the cap.
-      return catalog.map(provider => ({ ...provider, model: discordModelAllowed(modelCeiling, provider.model) ? provider.model : '', modelCeiling }));
+      return catalog.map(provider => ({ ...provider, model: discordModelAllowed(currentModelPolicy(), provider.model) ? provider.model : '', ...policyMetadata() }));
     }
     if (message.action === 'result') {
       if (results.has(resultKey)) return results.get(resultKey);
@@ -220,7 +261,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       const last = Array.isArray(saved?.messages) ? [...saved.messages].reverse().find(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) : undefined;
       return { message: last ? `마지막 저장된 답변입니다.\n\n${last.content.slice(0, 150_000)}` : '아직 저장된 답변이 없습니다. 이 채널에 작업을 입력해 주세요.' };
     }
-    if (message.action === 'status') return { ready, busy: !!run, activeCount: runs.size, canStart: runs.size < 2 && ![...runs.values()].some(r => !r.isolated) && (isolated || runs.size === 0) && ![...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`)), preference, permission, access, modelCeiling, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `접근: ${isolated ? access === 'search' ? '인터넷 검색만 · PC 접근 불가' : '격리 작업 · 기존 PC 파일 접근 불가' : permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'}` };
+    if (message.action === 'status') return { ready, busy: !!run, activeCount: runs.size, canStart: runs.size < 2 && ![...runs.values()].some(r => !r.isolated) && (isolated || runs.size === 0) && ![...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`)), preference, permission, access, ...policyMetadata(), effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', message: `접근: ${isolated ? access === 'search' ? '인터넷 검색만 · PC 접근 불가' : '격리 작업 · 기존 PC 파일 접근 불가' : permission} · 모델: ${preference.model || 'PC 기본 모델'} · 모델 상한: ${modelCeiling} · 추론: ${preference.effort || 'auto'}` };
     if (message.action === 'access') {
       if (message.guildAdmin !== true) throw new Error('PC 접근 권한 변경은 서버 관리자만 할 수 있습니다.');
       if (busy && channel === activeChannel) throw new Error('작업 중에는 권한을 바꿀 수 없습니다. 먼저 /robot stop을 사용하세요.');
@@ -274,28 +315,13 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     }, 10_000);
     currentRun.heartbeat.unref();
     try {
-      let providerId = message.providerId || preference.providerId;
-      let model = message.model || preference.model;
+      const { providerId, model } = await resolveModelSelection(optionalSelection(message.providerId) ?? preference.providerId, optionalSelection(message.model) ?? preference.model);
+      assertLive();
+      assertDiscordModelAllowed(currentModelPolicy(), model);
       const reasoningEffort = message.effort || preference.effort || 'auto';
       await validateEffort(providerId, model, reasoningEffort);
-      if (isolated) {
-        const catalog = await host.models();
-        if (!Array.isArray(catalog)) throw new Error('격리 작업용 모델 목록을 확인할 수 없습니다.');
-        const selected = providerId ? catalog.find(p => p.providerId === providerId) : catalog.find(p => p.isDefault) ?? catalog[0];
-        if (!selected) throw new Error('PC에 연결된 공급자가 없습니다. PC 앱에서 모델을 연결하세요.');
-        providerId = selected.providerId; model ||= selected.model;
-        assertDiscordModelAllowed(modelCeiling, model);
-      }
-      if (modelCeiling !== 'unlimited') {
-        const catalog = await host.models();
-        if (!Array.isArray(catalog)) throw new Error('모델 설정을 확인할 수 없습니다.');
-        const provider = providerId ? catalog.find(p => p.providerId === providerId) : catalog.find(p => p.isDefault) ?? catalog[0];
-        if (!provider) throw new Error('허용된 공급자·모델을 /robot model에서 선택하세요.');
-        providerId = provider.providerId;
-        model ||= provider.model;
-        assertDiscordModelAllowed(modelCeiling, model);
-        if (commandGeneration !== generation) throw new Error('Discord 연결이 변경되어 요청이 취소되었습니다.');
-      }
+      assertLive();
+      assertDiscordModelAllowed(currentModelPolicy(), model);
       let missingConversation: string | undefined;
       if (conversations[conversationKey]) {
         let saved;
@@ -392,9 +418,14 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
       });
       await currentRun.connection.authenticate(grantToken);
       assertLive();
+      // Attachment preparation may take long enough for a provider refresh or
+      // account change. Revalidate the exact selection at the admission boundary.
+      await resolveModelSelection(providerId, model);
+      assertLive();
+      assertDiscordModelAllowed(currentModelPolicy(), model);
       const result = await currentRun.connection.call('chat.start', {
         conversationId: currentRun.conversation, text: message.text + attachmentContext, permissionMode: permission, tokenPolicy: 'audit-only',
-        discordModelCeiling: modelCeiling,
+        discordModelCeiling: currentModelPolicy(),
         discordAttachmentIds: selection.files.map(f => f.id),
         ...(isolated ? { discordIsolation: access } : {}),
         ...(providerId ? { providerId } : {}),
@@ -515,7 +546,7 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     finally { starting = false; }
   }
   return {
-    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.7.0', kind: 'integration', enabledByDefault: false,
+    manifest: { id: 'discord-agent', name: 'Discord Agent', version: '1.8.0', kind: 'integration', enabledByDefault: false,
       description: 'allow_ai 개인 티켓 · 사용자별 격리·모델 제한 · 관리자 권한 관리 · 병렬 대기열·추가 지시·파일 지원.', permissions: ['network.client'] },
     activate(context) {
       ctx = context;

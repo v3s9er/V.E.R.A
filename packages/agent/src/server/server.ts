@@ -56,7 +56,7 @@ import { createCalendarPlugin } from '../plugins/calendar.js';
 import { createTailscalePlugin } from '../plugins/tailscale.js';
 import { createDiscordPlugin } from '../plugins/discord.js';
 import { createLidDisplayPlugin } from '../plugins/lid-display.js';
-import { assertDiscordModelAllowed, parseDiscordModelCeiling } from '../plugins/discord-model-policy.js';
+import { assertDiscordModelAllowed, parseDiscordModelPolicy } from '../plugins/discord-model-policy.js';
 import { createDockerPlugin } from '../plugins/docker.js';
 import { createManagedSandboxPlugin } from '../plugins/managed-sandbox.js';
 import { createCtfPlugin } from '../plugins/ctf.js';
@@ -94,7 +94,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.1';
+export const VERSION = '0.7.2';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
@@ -2683,7 +2683,7 @@ export class AgentServer {
             beforeModelCall: (source) => {
               // Record only after the existing Discord authorization succeeds.
               // A denied selection is not evidence that this model ran.
-              if (client.state.auth?.trustedDiscord) assertDiscordModelAllowed(parseDiscordModelCeiling(body.discordModelCeiling ?? 'unlimited'), source.model);
+              if (client.state.auth?.trustedDiscord) assertDiscordModelAllowed(parseDiscordModelPolicy(body.discordModelCeiling ?? 'default'), source.model);
               noteModelSource(source);
             },
             onProviderTiming: timing => { if (transport.length < 128) transport.push({ ...timing, atMs: Date.now() - runStartedAt }); },

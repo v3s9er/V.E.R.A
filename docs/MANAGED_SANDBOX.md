@@ -131,6 +131,30 @@ Thus fake transport tests verify the command contract, not actual kernel quota
 enforcement on this machine. A future live smoke must use a harmless existing
 image and explicitly approved temporary resources, then verify exact cleanup.
 
+An opt-in installed-engine acceptance test is now provided:
+
+```powershell
+$env:VERA_TEST_MANAGED_SANDBOX_LIVE = '1'
+try {
+  node --import tsx --test packages/agent/test/managed-sandbox-installed.test.ts
+} finally {
+  Remove-Item Env:VERA_TEST_MANAGED_SANDBOX_LIVE
+}
+```
+
+Without that opt-in the test skips before contacting Docker or creating any
+fixture. With it, the existing engine and image are mandatory; missing readiness
+is a failure, not a silently skipped success. The test uses the real plugin
+command handlers and actual Docker transport, with a fresh temporary host scope
+directory (never mounted), random ownership label, and two isolated conversations.
+It checks retained workspace state, cross-conversation separation, UID/capabilities,
+seccomp, read-only root, tmpfs, effective cgroup quotas, denied external networking,
+timeout, output overflow, cancellation and the independent background watchdog.
+Finally it disposes only its tracked containers and independently verifies that
+none with its fresh owner label remain. It never starts or repairs Docker, pulls
+images, modifies existing containers, or prunes the daemon. A failing host startup
+must be resolved separately; fixture code must not weaken the sandbox to bypass it.
+
 ## Primary references
 
 - [Docker container resource and privilege controls](https://docs.docker.com/engine/containers/run/)

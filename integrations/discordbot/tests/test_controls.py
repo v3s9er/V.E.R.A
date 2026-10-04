@@ -81,6 +81,39 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picker.models, [])
         picker.stop()
 
+    async def test_explicit_sol_grant_selects_gpt6_sol_without_pc_access_request(self):
+        self.bridge.request.return_value = {'models': ['gpt-6-sol', 'gpt-5.6-sol'], 'modelCeiling': 'sol', 'modelPolicyEnforced': True}
+        picker = ModelPicker(self.manager, 3, [{'providerId': 'p', 'name': 'Codex', 'type': 'codex-cli', 'modelCeiling': 'default', 'modelPolicyEnforced': True}], {})
+        await picker.load(self.context)
+        self.assertIn('GPT-6 Sol 이하', picker.caption())
+        selector = next(c for c in picker.children if isinstance(c, discord.ui.Select) and c.row == 1)
+        selector._values = ['0']
+        await selector.callback(self.context)
+        self.assertEqual(self.bridge.request.call_args.args[1], 'settings')
+        self.assertEqual(self.bridge.request.call_args.kwargs, {'providerId': 'p', 'model': 'gpt-6-sol', 'effort': 'auto'})
+        picker.stop()
+
+    async def test_explicit_astra_grant_and_revocation_refresh_live_catalog(self):
+        provider = {'providerId': 'p', 'name': 'Codex', 'model': 'gpt-6-astra', 'modelCeiling': 'astra', 'modelPolicyEnforced': True}
+        self.bridge.request.return_value = {'models': ['gpt-6-astra', 'gpt-6-sol'], 'modelCeiling': 'astra', 'modelPolicyEnforced': True}
+        picker = ModelPicker(self.manager, 3, [provider], {'providerId': 'p', 'model': 'gpt-6-astra'})
+        await picker.load(self.context)
+        self.assertEqual(picker.models, ['gpt-6-astra', 'gpt-6-sol'])
+        self.bridge.request.side_effect = [[{**provider, 'model': '', 'modelCeiling': 'default'}], {'models': ['gpt-5.6-sol'], 'modelCeiling': 'default', 'modelPolicyEnforced': True}]
+        refresh = next(c for c in picker.children if getattr(c, 'label', '') == '허용 모델 새로고침')
+        await refresh.callback(self.context)
+        self.assertEqual(picker.models, ['gpt-5.6-sol'])
+        self.assertIn('관리자 허용 필요', picker.caption())
+        picker.stop()
+
+    async def test_host_enforced_catalog_never_reinserts_unlimited_stale_model(self):
+        provider = {'providerId': 'p', 'name': 'Codex', 'model': 'gpt-6-astra', 'modelCeiling': 'unlimited', 'modelPolicyEnforced': True}
+        self.bridge.request.side_effect = RuntimeError('offline')
+        picker = ModelPicker(self.manager, 3, [provider], {'providerId': 'p', 'model': 'gpt-6-sol'})
+        await picker.load(self.context)
+        self.assertEqual(picker.models, [])
+        picker.stop()
+
     async def test_confirmation_retains_cancel_button(self):
         view = Confirm(self.manager, self.context, 'full')
         self.assertEqual([c.label for c in view.children], ['확인', '취소'])

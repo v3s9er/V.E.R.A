@@ -164,6 +164,9 @@ class ModelPicker(SafeView):
             try:
                 found = await self.manager.bridge.request(interaction, 'models', providerId=self.current_provider['providerId'], includeCapabilities=True)
                 if isinstance(found, dict):
+                    for field in ('modelCeiling', 'modelPolicyEnforced'):
+                        if field in found:
+                            self.current_provider[field] = found[field]
                     self.capabilities = found.get('modelCapabilities', {})
                     found = found.get('models', [])
                 if not isinstance(found, list):
@@ -172,11 +175,11 @@ class ModelPicker(SafeView):
                 raise
             except Exception:
                 found = []
-                self.warning = '\n모델 발견 실패: 등록 모델만 표시합니다. PC에서 공급자 연결을 확인하세요.'
+                self.warning = '\n모델 발견 실패: PC에서 공급자 연결을 확인하고 허용 모델을 새로고침하세요.'
             configured = self.current_provider.get('model')
             selected = self.preference.get('model') if self.preference.get('providerId') == self.current_provider['providerId'] else None
             # Never reinsert a stale selected/configured model above the live cap.
-            candidates = found if self.current_provider.get('modelCeiling', 'unlimited') != 'unlimited' else [selected, configured, *found]
+            candidates = found if self.current_provider.get('modelPolicyEnforced') or self.current_provider.get('modelCeiling', 'unlimited') != 'unlimited' else [selected, configured, *found]
             self.models = list(dict.fromkeys(m for m in candidates if isinstance(m, str) and 0 < len(m) <= 200))[:1000]
         self.model_page = 0
         self.render()
@@ -184,7 +187,8 @@ class ModelPicker(SafeView):
     def caption(self):
         current = self.preference.get('model') or '기본 모델'
         ceiling = self.current_provider.get('modelCeiling', 'unlimited') if self.current_provider else 'unlimited'
-        return discord.utils.escape_mentions(f"모델 선택 · 현재 {current} · 상한 {ceiling}\n공급자 → 모델을 고르면 이 티켓에 저장됩니다. 추론도 아래에서 선택하세요.{self.warning}")[:1800]
+        allowance = {'default': '기본 · GPT-6 Sol/Astra는 관리자 허용 필요', 'sol': 'GPT-6 Sol 이하', 'astra': 'GPT-6 Astra 이하 · Sol 포함', 'unlimited': '전체 모델'}.get(ceiling, ceiling + ' 이하')
+        return discord.utils.escape_mentions(f"모델 선택 · 현재 {current} · 상한 {ceiling}\n허용 범위: {allowance}\n모델 허용과 PC 접근 권한은 별개입니다. 공급자 → 모델을 고르면 이 티켓에 저장됩니다.{self.warning}")[:1800]
 
     def render(self):
         self.clear_items()
@@ -239,6 +243,21 @@ class ModelPicker(SafeView):
                 await interaction.response.edit_message(content=self.caption(), view=self)
             button.callback = page
             self.add_item(button)
+        refresh = discord.ui.Button(label='허용 모델 새로고침', style=discord.ButtonStyle.secondary, row=4)
+        async def refresh_models(interaction):
+            await interaction.response.defer()
+            providers = await self.manager.bridge.request(interaction, 'models')
+            if not isinstance(providers, list):
+                raise RuntimeError('모델 목록을 갱신하지 못했습니다. 잠시 후 다시 시도하세요.')
+            previous_id = self.current_provider.get('providerId') if self.current_provider else None
+            self.providers = [p for p in providers if isinstance(p, dict) and p.get('providerId')][:200]
+            self.current_provider = next((p for p in self.providers if p['providerId'] == previous_id), self.providers[0] if self.providers else None)
+            self.provider_page = self.providers.index(self.current_provider) // 25 if self.current_provider else 0
+            self.models = []
+            await self.load(interaction)
+            await interaction.edit_original_response(content=self.caption(), view=self)
+        refresh.callback = refresh_models
+        self.add_item(refresh)
 
 class Settings(SafeView):
     def __init__(self, manager, state):
