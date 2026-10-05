@@ -20,7 +20,7 @@
 .project-search .project-icon-button { min-width: 24px; min-height: 24px; padding: 4px; }
 .project-archive-button { padding-inline: 6px; font-size: 11px; }
 .project-icon-button:hover, .project-archive-button:hover { background: #ffffff0b; color: var(--text); }
-div.conversation-layout .project-navigation .project-tree { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; padding: 0 8px 12px; gap: 12px; overflow: auto; overscroll-behavior: contain; }
+div.conversation-layout .project-navigation .project-tree { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; padding: 0 8px 12px; gap: 2px; overflow: auto; overscroll-behavior: contain; }
 .project-tree .conversation-project-group { min-width: 0; margin: 0; flex: 0 0 auto; }
 .project-tree-heading { display: flex; align-items: center; min-width: 0; min-height: 34px; border-radius: 7px; }
 .project-tree-heading:hover, .project-tree-heading:focus-within { background: #ffffff04; }
@@ -35,6 +35,8 @@ div.conversation-layout .project-navigation .project-tree { display: flex; flex:
 .project-tree-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 1px; padding-right: 2px; }
 .project-conversations { margin-left: 15px; padding-left: 4px; border-left: 1px solid #ffffff0a; }
 .project-ticket-list, .project-loose-list { min-width: 0; flex: 0 0 auto; }
+.project-tree > .project-loose-list { margin-top: 8px; }
+.project-tree > .project-overflow-toggle { flex: 0 0 auto; margin-bottom: 4px; }
 .project-show-more { display: block; margin: 3px 0 0; min-height: 28px; padding: 5px 10px; border: 0; border-radius: 6px; color: var(--text-faint); text-align: left; font: inherit; font-size: 11px; background: transparent; cursor: pointer; }
 .project-show-more:hover { color: var(--text); background: #ffffff06; }
 .project-empty { margin: 0; padding: 9px 10px; color: var(--text-faint); font-size: 11px; line-height: 1.6; }

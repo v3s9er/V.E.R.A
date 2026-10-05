@@ -81,10 +81,17 @@ try {
     await nav();
     await expect(sidebar.locator('.project-nav-items')).toHaveCount(0);
     await expect(group('앱 리뉴얼')).toHaveCount(1);
+    await expect(project('empty')).toHaveCount(0);
+    await sidebar.getByRole('button', { name: '프로젝트 1개 더 보기', exact: true }).click();
     await expect(project('empty')).toBeVisible();
+    await expect(group('빈 프로젝트')).toHaveAttribute('aria-expanded', 'false');
+    await expect(sidebar).not.toContainText('아직 대화가 없습니다.');
+    await sidebar.getByRole('button', { name: '최근 프로젝트만 보기', exact: true }).click();
     await expect(row('sidebar-discord')).toHaveCount(0);
     await expect(row('sidebar-archived')).toHaveCount(0);
     await checkLoose();
+    await expect(group('앱 리뉴얼')).toHaveAttribute('aria-expanded', 'false');
+    await group('앱 리뉴얼').click();
     await expect(project('design').locator('[data-conversation-id]')).toHaveCount(8);
     for (const id of ['chat-design', 'sidebar-19', 'sidebar-20']) await expect(row(id)).toBeVisible();
     await expect(row('sidebar-6')).toHaveCount(0);
@@ -223,10 +230,12 @@ try {
     await expect(row('sidebar-archived')).toHaveCount(0);
     await sidebar.getByRole('tab', { name: '내 대화', exact: true }).click();
     await nav();
+    await group('앱 리뉴얼').click();
     await expect(row('sidebar-1')).toBeVisible();
 
     // Empty project headers are navigation only. The adjacent action supplies its id.
     const createsBeforeEmpty = (await rpc('conversations.create')).length;
+    await sidebar.getByRole('button', { name: '프로젝트 1개 더 보기', exact: true }).click();
     await group('빈 프로젝트').click();
     await group('빈 프로젝트').click();
     assert.equal((await rpc('conversations.create')).length, createsBeforeEmpty);
@@ -286,6 +295,39 @@ try {
     await expect(search).toHaveValue('');
     await checkBounds();
     await page.screenshot({ path: join(screenshots, `${width}-verified.png`) });
+
+    // Reproduce the real clutter: 89 projects, 67 without active conversations.
+    await page.goto(`${server.origin}/test/runtime-preview.html?embedded&sidebarFixture&manyProjects`);
+    await page.getByLabel('대화 이름', { exact: true }).waitFor();
+    await nav();
+    await expect(sidebar.locator('[data-project-id]')).toHaveCount(5);
+    await expect(sidebar.getByRole('button', { name: '프로젝트 84개 더 보기', exact: true })).toBeVisible();
+    await expect(sidebar).not.toContainText('아직 대화가 없습니다.');
+    await expect(group('회귀 프로젝트 020')).toHaveAttribute('aria-expanded', 'false');
+    await expect(sidebar.locator('.project-conversations')).toHaveCount(0);
+    await checkLoose();
+    const looseTop = await row('sidebar-unassigned').evaluate(element => element.offsetTop);
+    assert.ok(looseTop < 700, `loose chats do not trail 89 project groups: ${looseTop}`);
+    await checkBounds();
+    await page.screenshot({ path: join(screenshots, `${width}-many-projects.png`) });
+    await sidebar.getByRole('button', { name: '프로젝트 84개 더 보기', exact: true }).click();
+    await expect(sidebar.locator('[data-project-id]')).toHaveCount(89);
+    await expect(group('회귀 프로젝트 086')).toHaveAttribute('aria-expanded', 'false');
+    await sidebar.getByRole('button', { name: '최근 프로젝트만 보기', exact: true }).click();
+    await expect(sidebar.locator('[data-project-id]')).toHaveCount(5);
+    await search.fill('회귀 프로젝트 001');
+    await expect(row('chat-bulk-1')).toBeVisible();
+    await select('chat-bulk-1');
+    await nav();
+    await search.fill('');
+    await expect(project('bulk-1')).toBeVisible();
+    await expect(row('chat-bulk-1')).toBeVisible();
+    await search.fill('회귀 프로젝트 086');
+    await expect(project('bulk-86')).toBeVisible();
+    await expect(project('bulk-86').getByRole('button', { name: '대화 시작', exact: true })).toBeVisible();
+    await search.fill('');
+    assert.equal((await rpc('projects.delete')).length, 0, 'presentation does not remove old projects');
+    assert.equal((await rpc('conversations.update')).length, 0, 'presentation does not move/archive conversations');
     await page.close();
     console.log(`${width}px: unified tree, five recent plus exceptions, search, persistent collapse, keyboard menus, archive/Discord, project CRUD, explicit new-chat target passed`);
   }

@@ -53,6 +53,13 @@ if (fixtureParams.has('sidebarFixture')) {
     return chat ? { id: chat.id, title: chat.title, workspaceId: chat.workspaceId } : null;
   };
 }
+if (fixtureParams.has('manyProjects')) {
+  for (let index = 1; index <= 86; index++) {
+    const id = `bulk-${index}`;
+    projects.push({ id, name: `회귀 프로젝트 ${String(index).padStart(3, '0')}`, path: `C:\\Fixture\\${id}`, isDefault: false, createdAt: index });
+    chats.push({ ...makeChat(`chat-${id}`, id), title: `대량 목록 검증 ${index}`, status: index <= 20 ? 'active' : 'archived', updatedAt: 1000 + index });
+  }
+}
 for (const chat of chats) {
   chat.messages.unshift(...Array.from({ length: 42 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const, content: `보관 기록 ${index + 1} · 화면 검증용 메시지입니다. 실제 대화가 아닙니다.` })));
   chat.messageCount = chat.messages.length;

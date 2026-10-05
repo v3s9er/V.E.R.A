@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import type { ConversationSummary, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Button, Input, Modal } from './ui';
+import { projectNavigation } from './project-navigation';
 import './ProjectNavigation.css';
 
 const PREVIEW_COUNT = 5;
@@ -32,7 +33,19 @@ export function ProjectNavigation({ projects, conversations, active, running = [
   const { client } = useMrRobot();
   const [search, setSearch] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
-  useEffect(() => { if (createdConversationId) setSearch(''); }, [createdConversationId]);
+  const [allProjects, setAllProjects] = useState(false);
+  const [openedProjects, setOpenedProjects] = useState<string[]>([]);
+  const createdWorkspaceId = conversations.find(conversation => conversation.id === createdConversationId)?.workspaceId;
+  useEffect(() => {
+    if (!createdConversationId) return;
+    setSearch('');
+    if (createdWorkspaceId) setOpenedProjects(current => current.includes(createdWorkspaceId) ? current : [...current, createdWorkspaceId]);
+  }, [createdConversationId, createdWorkspaceId]);
+  useEffect(() => {
+    // A result selected via search stays revealed after clearing that search.
+    const workspaceId = conversations.find(conversation => conversation.id === selectedId)?.workspaceId;
+    if (search && workspaceId) setOpenedProjects(current => current.includes(workspaceId) ? current : [...current, workspaceId]);
+  }, [selectedId]);
   const [editing, setEditing] = useState<WorkspaceInfo | 'new' | null>(null);
   const [name, setName] = useState(''), [path, setPath] = useState(''), [instructions, setInstructions] = useState('');
   const [error, setError] = useState(''), [saving, setSaving] = useState(false), [confirmRemove, setConfirmRemove] = useState(false);
@@ -61,14 +74,14 @@ export function ProjectNavigation({ projects, conversations, active, running = [
   };
   const query = search.trim().toLocaleLowerCase();
   const inSpace = conversations.filter(conversation => (conversation.origin === 'discord') === (space === 'discord'));
-  const knownProjects = new Set(projects.map(project => project.id));
+  const navigation = projectNavigation(projects, inSpace, active, selectedId, running);
   const groups: Array<{ id: string; name: string; project?: WorkspaceInfo; conversations: ConversationSummary[] }> = space === 'discord'
     ? [{ id: '__discord__', name: '티켓 대화 기록', conversations: inSpace }]
     : [
-      ...projects.map(project => ({ id: project.id, name: project.name, project, conversations: inSpace.filter(conversation => conversation.workspaceId === project.id) })),
+      ...(query || allProjects ? navigation.groups : navigation.preview),
       // Loose conversations are root rows, not a synthetic project. The empty
       // name also prevents a made-up folder label from matching search results.
-      { id: UNASSIGNED_GROUP, name: '', conversations: inSpace.filter(conversation => !conversation.workspaceId || !knownProjects.has(conversation.workspaceId)) },
+      { id: UNASSIGNED_GROUP, name: '', conversations: navigation.loose },
     ].filter(group => group.id !== UNASSIGNED_GROUP || group.conversations.length > 0);
   const matchingGroups = groups.map(group => ({
     ...group,
@@ -78,9 +91,21 @@ export function ProjectNavigation({ projects, conversations, active, running = [
   })).filter(group => !query || group.conversations.length > 0 || group.name.toLocaleLowerCase().includes(query));
   const newConversation = (groupId: string, workspaceId?: string) => {
     setSearch('');
+    setOpenedProjects(current => current.includes(groupId) ? current : [...current, groupId]);
     if (collapsed.includes(groupId)) onToggle(groupId);
     onNewConversation(workspaceId);
   };
+  const projectOpen = (group: typeof groups[number]) => Boolean(query) || (!collapsed.includes(group.id) && openedProjects.includes(group.id));
+  const toggleProject = (group: typeof groups[number]) => {
+    if (query) return;
+    const opening = !projectOpen(group);
+    setOpenedProjects(current => opening ? [...current.filter(id => id !== group.id), group.id] : current.filter(id => id !== group.id));
+    if (opening === collapsed.includes(group.id)) onToggle(group.id);
+  };
+  const projectOverflow = space === 'personal' && !query && navigation.hiddenCount > 0
+    ? <button type="button" className="project-show-more project-overflow-toggle" aria-expanded={allProjects} onClick={() => setAllProjects(value => !value)}>
+      {allProjects ? '최근 프로젝트만 보기' : `프로젝트 ${navigation.hiddenCount}개 더 보기`}
+    </button> : null;
   const renderGroupConversations = (group: typeof groups[number]) => {
     const expanded = expandedGroups.includes(group.id);
     const recentIds = new Set([...group.conversations].sort((first, second) => second.updatedAt - first.updatedAt).slice(0, PREVIEW_COUNT).map(conversation => conversation.id));
@@ -93,7 +118,8 @@ export function ProjectNavigation({ projects, conversations, active, running = [
       {!query && (hiddenCount > 0 || expanded && group.conversations.length > PREVIEW_COUNT) && <button type="button" className="project-show-more" aria-expanded={expanded} onClick={() => setExpandedGroups(current => expanded ? current.filter(id => id !== group.id) : [...current, group.id])}>
         {expanded ? '대화 접기' : `대화 ${hiddenCount}개 더 보기`}
       </button>}
-      {group.conversations.length === 0 && (query || !emptyContent) && <p className="project-empty">{query ? '일치하는 대화가 없습니다.' : archived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord 티켓 대화가 여기에 표시됩니다.' : '아직 대화가 없습니다.'}</p>}
+      {group.conversations.length === 0 && !group.project && (query || !emptyContent) && <p className="project-empty">{query ? '일치하는 대화가 없습니다.' : archived ? '보관한 대화가 없습니다.' : 'Discord 티켓 대화가 여기에 표시됩니다.'}</p>}
+      {group.project && group.conversations.length === 0 && !archived && <button type="button" className="project-show-more" onClick={() => newConversation(group.id, group.id)}>대화 시작</button>}
     </>;
   };
   return <section className="project-navigation" aria-label={space === 'personal' ? '프로젝트와 대화' : 'Discord 대화'}>
@@ -113,11 +139,11 @@ export function ProjectNavigation({ projects, conversations, active, running = [
       {matchingGroups.map(group => space === 'discord'
         ? <div className="project-ticket-list" key={group.id}>{renderGroupConversations(group)}</div>
         : !group.project
-        ? <div className="project-loose-list" key={group.id}>{group.conversations.map(conversation => <Fragment key={conversation.id}>{renderConversation(conversation)}</Fragment>)}</div>
+        ? <Fragment key={group.id}>{projectOverflow}<div className="project-loose-list">{group.conversations.map(conversation => <Fragment key={conversation.id}>{renderConversation(conversation)}</Fragment>)}</div></Fragment>
         : <section className="conversation-project-group" data-project-id={group.id} key={group.id}>
           <div className={`project-tree-heading ${active === group.id || group.conversations.some(conversation => conversation.id === selectedId) ? 'selected' : ''}`}>
-            <button type="button" className="project-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={Boolean(query) || !collapsed.includes(group.id)} title={group.project?.path ?? group.name} onClick={() => { if (!query) onToggle(group.id); }}>
-              <span className={`project-chevron ${query || !collapsed.includes(group.id) ? 'expanded' : ''}`}><NavigationIcon name="chevron" /></span>
+            <button type="button" className="project-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={projectOpen(group)} title={group.project?.path ?? group.name} onClick={() => toggleProject(group)}>
+              <span className={`project-chevron ${projectOpen(group) ? 'expanded' : ''}`}><NavigationIcon name="chevron" /></span>
               <span className="project-folder-icon"><NavigationIcon name="folder" /></span>
               <span className="project-group-name">{group.name}</span>
               {group.conversations.some(conversation => running.includes(conversation.id)) && <span className="project-running" role="img" aria-label="프로젝트 작업 진행 중" title="작업 진행 중" />}
@@ -127,8 +153,9 @@ export function ProjectNavigation({ projects, conversations, active, running = [
               {client.isAdmin && <button type="button" className="project-icon-button project-edit" title={`${group.name} 설정`} aria-label={`${group.name} 프로젝트 설정`} onClick={() => open(group.project!)}><NavigationIcon name="more" /></button>}
             </div>}
           </div>
-          {(query || !collapsed.includes(group.id)) && <div className="project-conversations">{renderGroupConversations(group)}</div>}
+          {projectOpen(group) && <div className="project-conversations">{renderGroupConversations(group)}</div>}
         </section>)}
+      {!navigation.loose.length && projectOverflow}
       {!query && inSpace.length === 0 && emptyContent}
       {matchingGroups.length === 0 && (query || !emptyContent) && <p className="project-empty" role="status">{query ? '일치하는 대화가 없습니다.' : archived ? '보관한 대화가 없습니다.' : '프로젝트를 만들고 대화를 시작하세요.'}</p>}
     </div>

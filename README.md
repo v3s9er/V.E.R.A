@@ -1,6 +1,6 @@
 # V.E.R.A — 모바일 ↔ PC AI 에이전트 (Windows)
 
-> 현재 소스 버전: **0.7.4**. [변경 내역과 검증 범위](docs/RELEASE_0.7.4.md), [실제 앱 경로 평가 방법](docs/VERA_EVALUATION_PROTOCOL.md), [로컬 파인튜닝 안내](docs/local-finetuning.md)를 먼저 보세요. GitHub 설치 파일 게시 여부는 Releases에서 별도 확인하세요. 기본 사용법은 [사용자 안내서](docs/USER_GUIDE_0.3.md), 설계·연구·라이선스 근거는 [연구 문서](docs/RESEARCH_AND_LICENSES.md)에 있습니다.
+> 현재 소스 버전: **0.7.5**. [변경 내역과 검증 범위](docs/RELEASE_0.7.5.md), [실제 앱 경로 평가 방법](docs/VERA_EVALUATION_PROTOCOL.md), [로컬 파인튜닝 안내](docs/local-finetuning.md)를 먼저 보세요. GitHub 설치 파일 게시 여부는 Releases에서 별도 확인하세요. 기본 사용법은 [사용자 안내서](docs/USER_GUIDE_0.3.md), 설계·연구·라이선스 근거는 [연구 문서](docs/RESEARCH_AND_LICENSES.md)에 있습니다.
 
 PC의 **모든 기능**(셸·파일·앱·마우스/키보드·화면)을 PC 에이전트가 권한 정책 아래 사용하고, 폰에서 토큰으로 연결해 작업을 위임하는 개인용 에이전트입니다.
 
@@ -97,7 +97,7 @@ Windows x64 설치 파일 생성:
 npm run build:installer
 ```
 
-결과는 `release/V.E.R.A-Setup-0.7.4-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 서명된 배포가 필요한 환경에는 코드 서명 인증서를 별도로 적용해야 합니다.
+결과는 `release/V.E.R.A-Setup-0.7.5-x64.exe`입니다. 현재 빌드는 개발용 미서명 설치 파일이므로 조직의 Windows 애플리케이션 제어 정책에서 차단될 수 있습니다. 서명된 배포가 필요한 환경에는 코드 서명 인증서를 별도로 적용해야 합니다.
 
 설치 후 처음 실행하면 **외부 도구 및 의존성 마법사 v5**가 열립니다. 모든 항목을 실제 실행 파일로 검사하고, Node.js LTS·Git·PC 음성·Codex·Claude와 Quick Link용 cloudflared를 누락 시 자동 설치합니다. cloudflared는 x64 사용자 범위 portable 패키지로 설치하며 플러그인 화면의 전용 설치 버튼으로도 다시 시도할 수 있습니다. Tailscale, Docker, Ollama는 계속 선택 플러그인·기능으로 유지됩니다. 완료 후에도 설정 → 외부 도구에서 다시 검사하거나 설치할 수 있습니다. Codex·Claude 계정 로그인은 자격 증명을 앱에 복사하지 않고 각 공식 CLI에서 직접 진행합니다.
 
@@ -116,7 +116,7 @@ npx expo run:android
 3. 하단 탭에서 **대화 / 예약 / 설정** 전환. 대화 입력창 안의 드롭다운에서 액세스 권한과 현재 모델이 지원하는 추론 강도 선택
 4. PC 여러 대 등록 가능 — 상단 `PC 전환` 버튼으로 전환
 
-현재 공개 Android 설치 파일은 `release/mobile/V.E.R.A-Mobile-0.7.2.apk`(versionCode 48)이며 기존 릴리스 인증서와 앱 ID를 유지합니다. 0.7.3과 0.7.4는 PC·웹 화면 업데이트로 새 APK는 배포하지 않습니다. 다음 APK 배포 전에는 versionCode를 올려야 합니다. 동일 인증서로 서명된 이전 설치본에서 업데이트할 수 있습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 고정 Tunnel QR에는 12자리·10분·1회용 외출 코드와 최대 5분의 서버 결합 Access assertion만 들어가며 장기 Service Token은 포함되지 않습니다. 첫 등록이 성공하면 PC가 장기 Access 자격과 기기 토큰을 한 번만 전달하고 Android는 PC별 버전형 SecureStore bundle에 원자 저장합니다. 사용자가 Client ID/Secret을 직접 복사할 필요는 없습니다. Tailscale을 쓰는 경우에도 인증 연결은 Serve가 제공하는 HTTPS 이름을 사용합니다. 숫자형 `100.64/10` 및 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
+현재 공개 Android 설치 파일은 `release/mobile/V.E.R.A-Mobile-0.7.2.apk`(versionCode 48)이며 기존 릴리스 인증서와 앱 ID를 유지합니다. 0.7.3–0.7.5는 PC·웹 화면 업데이트로 새 APK는 배포하지 않습니다. 다음 APK 배포 전에는 versionCode를 올려야 합니다. 동일 인증서로 서명된 이전 설치본에서 업데이트할 수 있습니다. 휴대폰에 VPN을 켜지 않으려면 PC의 Cloudflare 임시 또는 고정 Tunnel을 시작한 뒤 HTTPS 주소/QR을 사용합니다. 고정 Tunnel QR에는 12자리·10분·1회용 외출 코드와 최대 5분의 서버 결합 Access assertion만 들어가며 장기 Service Token은 포함되지 않습니다. 첫 등록이 성공하면 PC가 장기 Access 자격과 기기 토큰을 한 번만 전달하고 Android는 PC별 버전형 SecureStore bundle에 원자 저장합니다. 사용자가 Client ID/Secret을 직접 복사할 필요는 없습니다. Tailscale을 쓰는 경우에도 인증 연결은 Serve가 제공하는 HTTPS 이름을 사용합니다. 숫자형 `100.64/10` 및 일반 HTTP Wi-Fi/LAN 주소로 인증정보를 보내는 연결은 차단됩니다.
 
 ## 모델 모듈과 라우팅 설정
 

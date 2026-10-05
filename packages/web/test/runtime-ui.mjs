@@ -44,6 +44,7 @@ try {
     try {
       await check('idle');
       await nav();
+      await page.getByLabel('사용 가이드 대화 접기/펼치기', { exact: true }).click();
       await page.locator('[data-conversation-id="chat-docs"]').click();
       await page.locator('.context-trigger').filter({ hasText: '사용 가이드' }).waitFor();
       await nav();
