@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "private": true,
   "license": "MIT",
   "description": "V.E.R.A — 모바일↔PC AI 에이전트 (Windows)",

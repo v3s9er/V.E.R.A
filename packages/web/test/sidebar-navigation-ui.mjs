@@ -18,6 +18,10 @@ try {
     const page = await browser.newPage({ viewport: { width, height: width === 992 ? 530 : 800 }, hasTouch: width === 390 });
     activePage = page; activeWidth = width;
     await page.route('**/*', server.route);
+    await page.addInitScript(() => {
+      const key = 'vera:collapsed-projects:local';
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(['__unassigned__']));
+    });
     page.on('pageerror', error => errors.push(`${width}px: ${error.message}`));
     await page.goto(`${server.origin}/test/runtime-preview.html?embedded&sidebarFixture`);
     await page.getByLabel('대화 이름', { exact: true }).waitFor();
@@ -32,6 +36,15 @@ try {
     const group = name => sidebar.getByLabel(`${name} 대화 접기/펼치기`, { exact: true });
     const select = async id => { await nav(); await row(id).click(); await expect(page.locator('.chat-input')).toBeEnabled(); };
     const rpc = method => page.evaluate(method => window.runtimeFixture.calls.filter(call => call.method === method), method);
+    const looseIds = ['sidebar-unassigned', 'sidebar-orphan', ...Array.from({ length: 6 }, (_, index) => `sidebar-loose-${index + 1}`)];
+    const checkLoose = async () => {
+      await expect(project('__unassigned__')).toHaveCount(0);
+      await expect(group('일반 대화')).toHaveCount(0);
+      for (const id of looseIds) {
+        await expect(row(id)).toBeVisible();
+        assert.equal(await row(id).evaluate(element => element.closest('[data-project-id], .project-conversations') !== null), false, `${id} is a plain root row, without folder indentation`);
+      }
+    };
     const menu = id => row(id).locator('..').getByRole('button', { name: / 메뉴$/ });
     const saveDocsProject = async () => {
       await nav();
@@ -71,9 +84,7 @@ try {
     await expect(project('empty')).toBeVisible();
     await expect(row('sidebar-discord')).toHaveCount(0);
     await expect(row('sidebar-archived')).toHaveCount(0);
-    await expect(row('sidebar-orphan')).toBeVisible();
-    await expect(row('sidebar-unassigned')).toBeVisible();
-    await expect(project('__unassigned__').getByRole('button', { name: /새 대화/ })).toHaveCount(0);
+    await checkLoose();
     await expect(project('design').locator('[data-conversation-id]')).toHaveCount(8);
     for (const id of ['chat-design', 'sidebar-19', 'sidebar-20']) await expect(row(id)).toBeVisible();
     await expect(row('sidebar-6')).toHaveCount(0);
@@ -108,6 +119,17 @@ try {
     await expect(project('design').locator('[data-conversation-id]')).toHaveCount(0);
     assert.equal((await rpc('conversations.create')).length, beforeCollapseCreates, 'project header never creates a chat');
     const search = sidebar.getByLabel('대화 검색', { exact: true });
+    await checkLoose();
+    await search.fill('일반 대화');
+    await expect(sidebar.locator('[data-conversation-id]')).toHaveCount(0);
+    await search.fill('폴더 밖');
+    await expect(sidebar.locator('[data-conversation-id]')).toHaveCount(6);
+    await page.screenshot({ path: join(screenshots, `${width}-flat-conversations.png`) });
+    await search.fill('폴더 밖 대화 06');
+    await expect(row('sidebar-loose-6')).toBeVisible();
+    await expect(sidebar.locator('[data-conversation-id]')).toHaveCount(1);
+    await search.fill('');
+    await checkLoose();
     await search.fill('화면 검증 대화 12');
     await expect(row('sidebar-12')).toBeVisible();
     await expect(sidebar.locator('[data-conversation-id]')).toHaveCount(1);
@@ -123,6 +145,7 @@ try {
     await page.getByLabel('대화 이름', { exact: true }).waitFor();
     await nav();
     await expect(group('앱 리뉴얼')).toHaveAttribute('aria-expanded', 'false');
+    await checkLoose();
     await group('앱 리뉴얼').focus();
     await page.keyboard.press('Space');
     await expect(group('앱 리뉴얼')).toHaveAttribute('aria-expanded', 'true');
@@ -251,6 +274,7 @@ try {
     await select('sidebar-orphan');
     await expect(page.getByLabel('대화 이름', { exact: true })).toHaveValue('연결 해제된 프로젝트 대화');
     assert.equal((await rpc('conversations.update')).filter(call => call.params.id === 'sidebar-orphan' && Object.hasOwn(call.params, 'workspaceId')).length, 0, 'new chat does not reassign the existing orphan');
+    assert.deepEqual(await page.evaluate(() => window.runtimeFixture.getSidebarConversation('sidebar-orphan')), { id: 'sidebar-orphan', title: '연결 해제된 프로젝트 대화', workspaceId: 'removed-project' });
     await nav();
     await search.fill('화면 검증 대화 12');
     const createsBeforeGlobal = (await rpc('conversations.create')).length;

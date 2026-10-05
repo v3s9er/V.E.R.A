@@ -45,6 +45,13 @@ if (fixtureParams.has('sidebarFixture')) {
     { ...makeChat('sidebar-discord', 'design'), title: 'Discord 지원 티켓', origin: 'discord', updatedAt: 500 },
     { ...makeChat('sidebar-discord-archived', 'design'), title: 'Discord 보관 티켓', origin: 'discord', status: 'archived', updatedAt: 450 },
   );
+  chats.push(...Array.from({ length: 6 }, (_, index) => ({
+    ...makeChat(`sidebar-loose-${index + 1}`), title: `폴더 밖 대화 ${String(index + 1).padStart(2, '0')}`, updatedAt: 150 - index,
+  })));
+  (window as any).runtimeFixture.getSidebarConversation = (id: string) => {
+    const chat = chats.find(conversation => conversation.id === id);
+    return chat ? { id: chat.id, title: chat.title, workspaceId: chat.workspaceId } : null;
+  };
 }
 for (const chat of chats) {
   chat.messages.unshift(...Array.from({ length: 42 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const, content: `보관 기록 ${index + 1} · 화면 검증용 메시지입니다. 실제 대화가 아닙니다.` })));

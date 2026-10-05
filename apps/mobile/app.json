@@ -2,7 +2,7 @@
   "expo": {
     "name": "V.E.R.A",
     "slug": "mr-robot-mobile",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "icon": "./assets/icon.png",
     "orientation": "default",
     "userInterfaceStyle": "dark",

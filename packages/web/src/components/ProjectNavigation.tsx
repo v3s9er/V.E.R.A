@@ -66,7 +66,9 @@ export function ProjectNavigation({ projects, conversations, active, running = [
     ? [{ id: '__discord__', name: '티켓 대화 기록', conversations: inSpace }]
     : [
       ...projects.map(project => ({ id: project.id, name: project.name, project, conversations: inSpace.filter(conversation => conversation.workspaceId === project.id) })),
-      { id: UNASSIGNED_GROUP, name: '일반 대화', conversations: inSpace.filter(conversation => !conversation.workspaceId || !knownProjects.has(conversation.workspaceId)) },
+      // Loose conversations are root rows, not a synthetic project. The empty
+      // name also prevents a made-up folder label from matching search results.
+      { id: UNASSIGNED_GROUP, name: '', conversations: inSpace.filter(conversation => !conversation.workspaceId || !knownProjects.has(conversation.workspaceId)) },
     ].filter(group => group.id !== UNASSIGNED_GROUP || group.conversations.length > 0);
   const matchingGroups = groups.map(group => ({
     ...group,
@@ -110,6 +112,8 @@ export function ProjectNavigation({ projects, conversations, active, running = [
     <div className="conversation-items project-tree">
       {matchingGroups.map(group => space === 'discord'
         ? <div className="project-ticket-list" key={group.id}>{renderGroupConversations(group)}</div>
+        : !group.project
+        ? <div className="project-loose-list" key={group.id}>{group.conversations.map(conversation => <Fragment key={conversation.id}>{renderConversation(conversation)}</Fragment>)}</div>
         : <section className="conversation-project-group" data-project-id={group.id} key={group.id}>
           <div className={`project-tree-heading ${active === group.id || group.conversations.some(conversation => conversation.id === selectedId) ? 'selected' : ''}`}>
             <button type="button" className="project-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={Boolean(query) || !collapsed.includes(group.id)} title={group.project?.path ?? group.name} onClick={() => { if (!query) onToggle(group.id); }}>
