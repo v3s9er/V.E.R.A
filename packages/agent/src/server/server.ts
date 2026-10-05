@@ -95,7 +95,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.6';
+export const VERSION = '0.7.7';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
@@ -723,6 +723,10 @@ export class AgentServer {
   private readonly remoteLinkPlugin = createRemoteLinkPlugin();
   private readonly discordLinkIds = new Set<string>();
   private readonly discordPlugin = createDiscordPlugin({
+    lastExecution: conversationId => {
+      const trace = this.telemetry.list(1200).find(item => item.conversationId === conversationId);
+      return trace ? { model: trace.model, effort: trace.effort, at: trace.at, ok: trace.ok } : undefined;
+    },
     port: () => this.boundPort,
     enabled: () => this.plugins.list().some((item) => item.id === 'discord-agent' && item.enabled),
     issue: () => {

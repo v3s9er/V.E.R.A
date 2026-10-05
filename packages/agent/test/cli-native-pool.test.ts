@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { pooledNativeCodex, closeNativeWorkers } from '../src/ai/cli-native-pool.js';
 import { waitForCliRetirements } from '../src/ai/cli-process-retirement.js';
 import type { NativeAgentRequest } from '../src/ai/provider.js';
+import { executionContext } from '../src/ai/execution-metadata.js';
 const dir = mkdtempSync(join(tmpdir(), 'mrrobot-native-test-'));
 const base: NativeAgentRequest = { prompt: 'fallback', cwd: dir, permissionMode: 'read-only', reasoningEffort: 'high',
   session: { key: 'user:ticket', directory: dir, history: [], input: 'FIRST_PRIVATE_INPUT', instructions: 'test only', context: '' } };
@@ -33,6 +34,15 @@ try {
   assert.equal((await call(rewritten)).text, 'answer 1', 'same-length or appended histories never hide an earlier rewrite');
   assert.ok(!readFileSync(join(dir, 'native-sessions.json'), 'utf8').includes('FIRST_PRIVATE_INPUT'));
   assert.equal((await call({ ...base, session: { ...base.session!, key: 'other-user' } })).text, 'answer 1');
+  const reporting = { label: 'fixture', model: 'test' };
+  const effortFirst: NativeAgentRequest = { ...base, reasoningEffort: 'xhigh', session: { ...base.session!, key: 'effort-reporting',
+    input: 'EXPECT_EFFORT:xhigh', context: executionContext('', reporting, 'xhigh') } };
+  const effortAnswer = await call(effortFirst);
+  assert.equal(effortAnswer.text, 'answer 1');
+  const effortNext = next(effortFirst, effortAnswer.text, 'EXPECT_EFFORT:high');
+  effortNext.reasoningEffort = 'high';
+  effortNext.session!.context = executionContext('', reporting, 'high');
+  assert.equal((await call(effortNext)).text, 'answer 2', 'per-turn effort metadata must reach CLI without replacing the warm session');
   const tools: unknown[] = [];
   await call({ ...base, onTool: e => tools.push(e), session: { ...base.session!, key: 'metrics', input: 'EXPECT_TOOL_METRICS' } });
   assert.equal(tools.length, 2);

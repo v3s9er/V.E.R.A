@@ -63,7 +63,9 @@ server.on('connection', ws => { socket = ws; ws.on('message', raw => {
 const catalog = ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-sol', 'gpt-6-astra', 'unknown', 'sol'];
 let catalogState: 'fresh' | 'stale' | 'fallback' = 'fresh';
 let catalogWait: (() => Promise<void>) | undefined;
-const plugin = createDiscordPlugin({ port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], modelCatalog: async () => { await catalogWait?.(); return { models: [...catalog], source: 'codex-model-list', state: catalogState, lastUpdatedAt: 1, lastAttemptAt: 1, modelCapabilities: { 'gpt-6-astra': { supportedReasoningEfforts: ['ultra'] }, 'gpt-6-sol': { supportedReasoningEfforts: ['low', 'high'] }, 'gpt-5.6-sol': { supportedReasoningEfforts: ['low', 'ultra'] }, 'gpt-5.6-luna': { supportedReasoningEfforts: ['max'] } } }; }, permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
+let executionReads = 0;
+let lastExecution: { model?: string; effort?: string; at: number; ok: boolean } | undefined;
+const plugin = createDiscordPlugin({ lastExecution: id => { assert.equal(id, 'test-conversation'); executionReads++; return lastExecution; }, port: () => (server.address() as any).port, enabled: () => enabled, issue: () => ({ id: 'test-link', token: 'fixture-token' }), revoke: () => { revoked++; }, models: (id) => id ? catalog : [{ providerId: 'provider', type: 'codex-cli', model: 'gpt-6-astra', isDefault: true }], modelCatalog: async () => { await catalogWait?.(); return { models: [...catalog], source: 'codex-model-list', state: catalogState, lastUpdatedAt: 1, lastAttemptAt: 1, modelCapabilities: { 'gpt-6-astra': { supportedReasoningEfforts: ['ultra'] }, 'gpt-6-sol': { supportedReasoningEfforts: ['low', 'high'] }, 'gpt-5.6-sol': { supportedReasoningEfforts: ['low', 'ultra'] }, 'gpt-5.6-luna': { supportedReasoningEfforts: ['max'] } } }; }, permissionCeiling: () => readOnlyLock ? 'read-only' : 'full', readChatFile: (id) => { assert.equal(id, 'test-conversation'); fileReads++; return { data: 'ZmlsZQ==' }; } }, { spawn: (() => fake) as any });
 const ctx: any = {
   storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
   registerCommand: (name: string, fn: Function, opts: any) => { assert.equal(opts.adminOnly, true); assert.equal(opts.tool, false); commands.set(name, fn); },
@@ -252,6 +254,26 @@ try {
   assert.equal(commands.get('discord.status')!().busy, false);
   assert.ok((await assign(identity.userId, 'gpt-6-astra', 'auto')).result);
   assert.equal((await request({ action: 'model-policy', targetUserId: identity.userId, mode: 'show' })).result.preference.model, 'gpt-6-astra');
+  const savedAssignments = structuredClone(storage.get('modelAssignments'));
+  lastExecution = { model: 'gpt-6-astra', effort: 'xhigh', at: 1_700_000_000_000, ok: true };
+  const adminStatus = (await request({ action: 'status' })).result;
+  assert.match(adminStatus.message, /관리자 지정: gpt-6-astra · 추론: auto/);
+  assert.match(adminStatus.message, /최근 종료 실행.*전달한 추론: xhigh/);
+  assert.match(adminStatus.message, /standard는 작업 분류/);
+  assert.deepEqual(adminStatus.lastExecution, lastExecution);
+  assert.doesNotMatch(adminStatus.publicMessage, /gpt-|추론|모델|xhigh/);
+  const readsBeforeOrdinary = executionReads;
+  const ordinaryStatus = (await request({ ...basic, action: 'status' })).result;
+  assert.equal(executionReads, readsBeforeOrdinary, 'ordinary status never queries execution metadata');
+  assert.equal(Object.hasOwn(ordinaryStatus, 'lastExecution'), false);
+  assert.doesNotMatch(ordinaryStatus.message, /gpt-|추론|모델|xhigh/);
+  lastExecution = { ...lastExecution, effort: 'auto', ok: false };
+  assert.match((await request({ action: 'status' })).result.message, /공급자 내부 기본값 미확인 · 실패 또는 중지/);
+  lastExecution = { ...lastExecution, effort: undefined };
+  assert.match((await request({ action: 'status' })).result.message, /확인 불가 · 실행 옵션 기록 없음/);
+  lastExecution = undefined;
+  assert.match((await request({ action: 'status' })).result.message, /확인 가능한 기록 없음/);
+  assert.deepEqual(storage.get('modelAssignments'), savedAssignments, 'reporting must preserve every user assignment');
   assert.deepEqual((await request({ action: 'models', providerId: 'provider' })).result, catalog);
   emit({ ...identity, id: 'result', action: 'result' });
   await waitFor(() => replies.some(r => r.id === 'result')); assert.equal(replies.find(r => r.id === 'result').result.text, 'Test finished');

@@ -1,5 +1,6 @@
 import { COMPUTER_TOOLS } from '@mr-robot/shared';
 import { AdaptiveExecution } from './adaptive-execution.js';
+import { executionContext, executionMetadata } from './execution-metadata.js';
 import { isTextOnlyTask, isSelfContainedRequest } from './request-shape.js';
 import { contextualTurns } from './request-context.js';
 import { KNOWLEDGE_TOOL, KNOWLEDGE_GUIDANCE, knowledgeQuery } from './knowledge-tool.js';
@@ -420,6 +421,7 @@ export class AgentLoop {
           Number.isFinite(request.maxTokens) ? Math.floor(request.maxTokens as number) : MAX_PROVIDER_OUTPUT_TOKENS,
         )),
       }, { ...tuningFor(actualProvider), ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}) });
+      boundedRequest.context = executionContext(boundedRequest.context, actualProvider, boundedRequest.reasoningEffort);
       let callLease: ReturnType<NonNullable<LoopCallbacks['reserveModelCall']>> | undefined;
       let settled = false;
       // One subscription turn can perform multiple internal model calls. Keep
@@ -503,15 +505,18 @@ export class AgentLoop {
         callLease = cb.reserveModelCall?.('native', Number.MAX_SAFE_INTEGER);
         const tuning = tuningFor(actualProvider);
         const preference = tuningInstructions(tuning);
+        const effort = request.reasoningEffort ?? tuning.reasoningEffort;
         const result = await actualProvider.runAgent({
           ...request,
           onTiming: cb.onProviderTiming,
           daybreakEnabled: options.daybreakEnabled === true,
-          ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : tuning.reasoningEffort ? { reasoningEffort: tuning.reasoningEffort } : {}),
-          ...(preference ? {
-            prompt: `${request.prompt}\n\n${preference}`,
-            ...(request.session ? { session: { ...request.session, instructions: `${request.session.instructions}\n\n${preference}` } } : {}),
-          } : {}),
+          ...(effort ? { reasoningEffort: effort } : {}),
+          prompt: [request.prompt, preference, executionMetadata(actualProvider, effort)].filter(Boolean).join('\n\n'),
+          ...(request.session ? { session: {
+            ...request.session,
+            context: executionContext(request.session.context, actualProvider, effort),
+            ...(preference ? { instructions: `${request.session.instructions}\n\n${preference}` } : {}),
+          } } : {}),
         });
         settled = true;
         const withinReservation = callLease?.finish(result.usage) ?? true;

@@ -25,6 +25,7 @@ export interface DiscordHost {
   models(providerId?: string): unknown;
   modelCatalog?(providerId: string): Promise<ProviderModelCatalog>;
   permissionCeiling(): PermissionMode;
+  lastExecution?(conversationId: string): { model?: string; effort?: string; at: number; ok: boolean } | undefined;
   readChatFile?(conversationId: string, path: string, offset: number, limit: number, version?: string, isolated?: boolean): unknown;
 }
 interface Settings { botDirectory: string; pythonPath: string; autoStart: boolean; mode: 'standalone' | 'legacy'; sandboxWslDistribution?: string }
@@ -256,7 +257,13 @@ export function createDiscordPlugin(host: DiscordHost, runtime = { spawn }): MrR
     if (message.action === 'status') {
       const publicMessage = `접근: ${isolated ? access === 'search' ? '인터넷 검색만 · PC 접근 불가' : '격리 작업 · 기존 PC 파일 접근 불가' : permission} · ${run ? '작업 중' : '요청 가능'}`;
       const preference = message.guildAdmin === true ? await assignedSelection(userScope).catch(() => undefined) : undefined;
-      return { ready, busy: !!run, activeCount: runs.size, canStart: runs.size < 2 && ![...runs.values()].some(r => !r.isolated) && (isolated || runs.size === 0) && ![...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`)), ...(preference ? { preference } : {}), canManageModels: message.guildAdmin === true, permission, access, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', publicMessage, message: preference ? `${publicMessage} · 관리자 모델: ${preference.model} · 추론: ${preference.effort}` : publicMessage };
+      const conversationId = ctx.storage.get<Record<string, string>>('conversations')?.[conversationKey];
+      const lastExecution = message.guildAdmin === true && conversationId ? host.lastExecution?.(conversationId) : undefined;
+      const executionMessage = lastExecution
+        ? `\n최근 종료 실행 (${new Date(lastExecution.at).toISOString()}): ${lastExecution.model ?? '모델 미확인'} · 전달한 추론: ${!lastExecution.effort ? '확인 불가 · 실행 옵션 기록 없음' : lastExecution.effort === 'auto' ? '자동 · 공급자 내부 기본값 미확인' : lastExecution.effort} · ${lastExecution.ok ? '완료' : '실패 또는 중지'}`
+        : '\n최근 종료 실행: 확인 가능한 기록 없음';
+      const privateMessage = message.guildAdmin === true ? `${preference ? `\n관리자 지정: ${preference.model} · 추론: ${preference.effort}` : '\n관리자 지정값 확인 불가'}${executionMessage}\n지정값과 실행값은 별개입니다. standard는 작업 분류이며 추론 강도가 아닙니다.` : '';
+      return { ready, busy: !!run, activeCount: runs.size, canStart: runs.size < 2 && ![...runs.values()].some(r => !r.isolated) && (isolated || runs.size === 0) && ![...runs.keys()].some(key => key.startsWith(`${message.guildId}:`) && key.endsWith(`:${message.userId}`)), ...(preference ? { preference } : {}), ...(lastExecution ? { lastExecution } : {}), canManageModels: message.guildAdmin === true, permission, access, effectivePermission: host.permissionCeiling() === 'read-only' ? 'read-only' : permission, tokenPolicy: 'audit-only', publicMessage, message: publicMessage + privateMessage };
     }
     if (message.action === 'access') {
       if (message.guildAdmin !== true) throw new Error('PC 접근 권한 변경은 서버 관리자만 할 수 있습니다.');

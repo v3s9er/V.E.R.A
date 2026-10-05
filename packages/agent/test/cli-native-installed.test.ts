@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { pooledNativeCodex, closeNativeWorkers } from '../src/ai/cli-native-pool.js';
 import { resolveCliInvocation, cliSubscriptionEnvironment } from '../src/ai/cli.js';
 import type { NativeAgentRequest } from '../src/ai/provider.js';
+import { executionContext } from '../src/ai/execution-metadata.js';
 const dir = mkdtempSync(join(tmpdir(), 'mrrobot-native-installed-'));
 mkdirSync(join(dir, 'codex'));
 const controller = new AbortController();
@@ -33,8 +34,9 @@ const server = createServer((req, res) => {
 });
 await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
 const cli = resolveCliInvocation('codex-cli', 'codex');
-const req: NativeAgentRequest = { prompt: 'fallback', cwd: dir, permissionMode: 'read-only', reasoningEffort: 'high', signal: controller.signal,
-  onStatus: t => statuses.push(t), session: { key: 'fixture-user-ticket', directory: dir, history: [], input: 'Remember synthetic-marker-742. Answer briefly.', instructions: 'Synthetic test. Answer without tools.', context: '' } };
+const reporting = { label: 'fixture', model: 'gpt-5.6-sol' };
+const req: NativeAgentRequest = { prompt: 'fallback', cwd: dir, permissionMode: 'read-only', reasoningEffort: 'xhigh', signal: controller.signal,
+  onStatus: t => statuses.push(t), session: { key: 'fixture-user-ticket', directory: dir, history: [], input: 'Remember synthetic-marker-742. Answer briefly.', instructions: 'Synthetic test. Answer without tools.', context: executionContext('', reporting, 'xhigh') } };
 const call = (req: NativeAgentRequest) => pooledNativeCodex({ command: process.execPath,
   prefixArgs: [fileURLToPath(new URL('./fixtures/codex-fixture-proxy.mjs', import.meta.url))],
   env: { ...cliSubscriptionEnvironment('codex-cli'), CODEX_HOME: join(dir, 'codex'), MRROBOT_FIXTURE_TRACE: '1', MRROBOT_FIXTURE_PORT: String((server.address() as any).port), MRROBOT_FIXTURE_COMMAND: cli.command, MRROBOT_FIXTURE_PREFIX: JSON.stringify(cli.prefixArgs) },
@@ -46,7 +48,7 @@ try {
   const a = await call({ ...req, onText: t => stream += t });
   assert.equal(a.text, 'synthetic answer 1'); assert.equal(stream, a.text);
   const coldMs = Math.round(performance.now() - started);
-  const second: NativeAgentRequest = { ...req, session: { ...req.session!, history: [{ role: 'user', content: req.session!.input }, { role: 'assistant', content: a.text }], input: 'What was the marker?' } };
+  const second: NativeAgentRequest = { ...req, reasoningEffort: 'high', session: { ...req.session!, history: [{ role: 'user', content: req.session!.input }, { role: 'assistant', content: a.text }], input: 'What was the marker?', context: executionContext('', reporting, 'high') } };
   const warm = performance.now();
   const b = await call(second);
   const warmMs = Math.round(performance.now() - warm);
@@ -57,7 +59,9 @@ try {
   assert.equal(bodies.length, 3);
   assert.ok(JSON.stringify(bodies[2].input).includes('synthetic-marker-742'), 'provider retains conversation after process restart');
   assert.ok(statuses.some(t => t.includes('세션 재사용')));
-  assert.ok(bodies.every(b => b.reasoning?.effort === 'high'), 'user reasoning choice preserved');
+  assert.deepEqual(bodies.map(b => b.reasoning?.effort), ['xhigh', 'high', 'high'], 'exact per-turn reasoning choice reaches the installed CLI provider request');
+  assert.match(JSON.stringify(bodies[0].input), /reasoning_effort=xhigh/);
+  assert.match(JSON.stringify(bodies[1].input), /reasoning_effort=high/);
   console.log(JSON.stringify({ installedNativeSessionTest: 'passed', coldMs, warmMs, turns: bodies.length, accountUsage: false }));
 } catch (error) {
   try { console.error(readFileSync(join(dir, 'codex', 'fixture-transport.jsonl'), 'utf8').slice(-12000)); } catch { /* no fixture trace */ }

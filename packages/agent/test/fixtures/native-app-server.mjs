@@ -16,6 +16,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (m.method !== 'turn/start') return;
   if (m.params.cyberAccessProgram !== undefined && !experimentalApi) return send({ id: m.id, error: { code: -32600, message: 'turn/start.cyberAccessProgram requires experimentalApi capability' } });
   const text = m.params.input[0].text;
+  const expectedEffort = [...text.matchAll(/EXPECT_EFFORT:(xhigh|high)/g)].at(-1)?.[1];
+  if (expectedEffort && (m.params.effort !== expectedEffort || !text.includes(`reasoning_effort=${expectedEffort}`))) throw Error('per-turn effort reporting mismatch');
   const expectedProgram = [...text.matchAll(/EXPECT_PROGRAM:(standard|daybreakBlue|daybreakRed)/g)].at(-1)?.[1];
   if (expectedProgram && m.params.cyberAccessProgram !== expectedProgram) throw Error('Daybreak program was not sent explicitly');
   if (count && text.includes('FIRST_PRIVATE_INPUT')) throw Error('history retransmitted');
