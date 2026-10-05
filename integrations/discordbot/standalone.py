@@ -121,6 +121,8 @@ def make_client(connection, thread_state, bridge_type, emit):
             bridge.refresh_allowed_guilds()
             bridge.gateway_ready = True
             emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
+            if hasattr(bridge.threads, 'schedule_control_refresh'):
+                bridge.threads.schedule_control_refresh()
 
         async def on_resumed(self):
             await self.on_ready()

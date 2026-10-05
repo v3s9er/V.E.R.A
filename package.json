@@ -1,6 +1,6 @@
 {
   "name": "mr-robot",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "license": "MIT",
   "description": "V.E.R.A — 모바일↔PC AI 에이전트 (Windows)",
@@ -52,7 +52,7 @@
     "test:sidebar-ui": "node --import tsx --test packages/web/test/project-navigation.test.ts && node packages/web/test/sidebar-navigation-ui.mjs",
     "test:ui-live": "npm run test:runtime-ui && node packages/web/test/conversation-flow-ui.mjs && node packages/web/test/agent-surface-ui.mjs && node packages/web/test/model-picker-ui.mjs && node packages/web/test/calendar-layout.mjs && node packages/web/test/observation-notice-ui.mjs && npm run test:sidebar-ui",
     "test:session-events": "tsx packages/agent/test/cli-session-events.test.ts && tsx --test packages/agent/test/cli-plain-text.test.ts packages/agent/test/runtime-efficiency.test.ts packages/web/test/chat-lifecycle.test.ts",
-    "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts",
+    "test:remote-security": "tsx packages/agent/test/chat-files-progress.test.ts && tsx packages/agent/test/discord-model-policy.test.ts && tsx packages/agent/test/discord-model-assignment.test.ts && tsx packages/agent/test/secure-files.test.ts && tsx packages/agent/test/secure-files-http.test.ts",
     "test:coordination": "node --import tsx --test packages/agent/test/subagents.test.ts packages/agent/test/coordination-loop.test.ts packages/agent/test/adaptive-orchestration.test.ts packages/agent/test/council.test.ts packages/agent/test/evidence.test.ts packages/agent/test/mcp-efficiency.test.ts packages/agent/test/tool-batch.test.ts packages/agent/test/context-packing.test.ts packages/agent/test/conversation-transcripts.test.ts",
     "test:tuning": "node --import tsx --test packages/agent/test/model-tuning.test.ts packages/agent/test/model-tuning-loop.test.ts packages/agent/test/tuning-datasets.test.ts packages/agent/test/tuning-rpc-security.test.ts packages/agent/test/chat-telemetry-regression.test.ts packages/web/test/model-tuning-form.test.ts",
     "test:performance": "node --import tsx --test packages/agent/test/performance-evaluation.test.ts packages/agent/test/performance-telemetry.test.ts && tsc -p scripts/performance-tsconfig.json",

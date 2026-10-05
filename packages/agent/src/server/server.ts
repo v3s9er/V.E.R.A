@@ -57,6 +57,7 @@ import { createTailscalePlugin } from '../plugins/tailscale.js';
 import { createDiscordPlugin } from '../plugins/discord.js';
 import { createLidDisplayPlugin } from '../plugins/lid-display.js';
 import { assertDiscordModelAllowed, parseDiscordModelPolicy } from '../plugins/discord-model-policy.js';
+import { assertDiscordAssignedModel, parseDiscordModelAssignment } from '../plugins/discord-model-assignment.js';
 import { createDockerPlugin } from '../plugins/docker.js';
 import { createManagedSandboxPlugin } from '../plugins/managed-sandbox.js';
 import { createCtfPlugin } from '../plugins/ctf.js';
@@ -94,7 +95,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.5';
+export const VERSION = '0.7.6';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
@@ -2513,6 +2514,8 @@ export class AgentServer {
       // Validate attacker-controlled policy input and cheap busy conditions
       // before consuming an admission-window start.
       requestedTokenPolicy(body.tokenPolicy);
+      const discordAssignment = auth.trustedDiscord && body.discordModelAssignment !== undefined ? parseDiscordModelAssignment(body.discordModelAssignment) : undefined;
+      if (discordAssignment && (body.providerId !== discordAssignment.providerId || body.providerModel !== discordAssignment.model || body.reasoningEffort !== discordAssignment.effort)) throw new Error('관리자 모델 지정과 실행 설정이 일치하지 않습니다.');
       // A connection can own several conversations; cancellation/approvals must
       // belong to the run, never a shared per-socket busy flag.
       const session = new ChatSession();
@@ -2683,7 +2686,10 @@ export class AgentServer {
             beforeModelCall: (source) => {
               // Record only after the existing Discord authorization succeeds.
               // A denied selection is not evidence that this model ran.
-              if (client.state.auth?.trustedDiscord) assertDiscordModelAllowed(parseDiscordModelPolicy(body.discordModelCeiling ?? 'default'), source.model);
+              if (client.state.auth?.trustedDiscord) {
+                if (discordAssignment) assertDiscordAssignedModel(discordAssignment, source);
+                else assertDiscordModelAllowed(parseDiscordModelPolicy(body.discordModelCeiling ?? 'default'), source.model);
+              }
               noteModelSource(source);
             },
             onProviderTiming: timing => { if (transport.length < 128) transport.push({ ...timing, atMs: Date.now() - runStartedAt }); },
@@ -2742,6 +2748,7 @@ export class AgentServer {
             nativeSessionDirectory: this.config.dir,
             tokenPolicy: effectiveTokenPolicy,
             trustedPermissionOverride: auth.trustedDiscord === true,
+            singleModelOnly: auth.trustedDiscord === true,
           },
         );
         session.signal()?.throwIfAborted();

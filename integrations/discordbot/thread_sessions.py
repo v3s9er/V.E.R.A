@@ -62,15 +62,11 @@ class Controls(SafeView):
     async def steer(self, interaction, button):
         await interaction.response.send_modal(SteerModal(self.manager))
 
-    @discord.ui.button(label='현재 설정', custom_id='mrrobot:thread:settings:v1')
+    @discord.ui.button(label='작업 상태', custom_id='mrrobot:thread:settings:v1')
     async def settings(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
         state = await self.manager.bridge.request(interaction, 'status')
-        await interaction.followup.send(state['message'], view=Settings(self.manager, state), ephemeral=True)
-
-    @discord.ui.button(label='모델 선택', style=discord.ButtonStyle.primary, custom_id='mrrobot:thread:model:v1', row=0)
-    async def model(self, interaction, button):
-        await self.manager.show_models(interaction)
+        await interaction.followup.send(state['message'], view=Settings(self.manager, state) if state.get('canManageModels') is True else None, ephemeral=True)
 
     @discord.ui.select(placeholder='PC 접근 권한 · 서버 관리자 전용', custom_id='mrrobot:thread:access:v1', row=1, options=[discord.SelectOption(label=label, value=value) for value, label in [('read-only', '읽기 전용'), ('ask', '변경 전 확인'), ('workspace', '작업 폴더 허용'), ('full', '전체 PC 허용 · 확인 없이 실행')]])
     async def access(self, interaction, select):
@@ -93,6 +89,17 @@ class SteerModal(discord.ui.Modal, title='진행 중 작업에 지시 추가'):
     async def on_submit(self, interaction):
         self.manager.owned(interaction)
         await self.manager.bridge.execute(interaction, 'steer', text=self.message.value)
+
+
+class LegacyModelControl(SafeView):
+    """Handle an old message safely; this view is never sent to users."""
+    def __init__(self, manager):
+        super().__init__(timeout=None)
+        self.manager = manager
+
+    @discord.ui.button(label='관리자 설정', custom_id='mrrobot:thread:model:v1')
+    async def model(self, interaction, button):
+        await self.manager.show_models(interaction)
 
 
 class Confirm(SafeView):
@@ -136,11 +143,13 @@ def model_reasoning_efforts(provider, model, capabilities):
 
 class ModelPicker(SafeView):
     """Paged selectors use opaque indexes, not truncated model IDs as values."""
-    def __init__(self, manager, owner_id, providers, preference):
+    def __init__(self, manager, owner_id, providers, preference, target_user_id=None, guild_id=None):
         super().__init__(timeout=300)
         self.manager, self.owner_id = manager, owner_id
+        self.target_user_id = target_user_id or owner_id
+        self.guild_id = guild_id
         self.providers = [p for p in providers if isinstance(p, dict) and p.get('providerId')][:200]
-        self.preference = preference
+        self.preference = dict(preference)
         self.provider_page = 0
         self.model_page = 0
         self.current_provider = next((p for p in self.providers if p['providerId'] == preference.get('providerId')), self.providers[0] if self.providers else None)
@@ -151,10 +160,9 @@ class ModelPicker(SafeView):
         self.warning = ''
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id:
+        if interaction.user.id != self.owner_id or self.guild_id is not None and interaction.guild_id != self.guild_id:
             return False
-        await self.manager.bridge.authorize(interaction)
-        self.manager.owned(interaction)
+        await self.manager.bridge.authorize(interaction, admin_only=True)
         return True
 
     async def load(self, interaction):
@@ -164,9 +172,6 @@ class ModelPicker(SafeView):
             try:
                 found = await self.manager.bridge.request(interaction, 'models', providerId=self.current_provider['providerId'], includeCapabilities=True)
                 if isinstance(found, dict):
-                    for field in ('modelCeiling', 'modelPolicyEnforced'):
-                        if field in found:
-                            self.current_provider[field] = found[field]
                     self.capabilities = found.get('modelCapabilities', {})
                     found = found.get('models', [])
                 if not isinstance(found, list):
@@ -176,19 +181,15 @@ class ModelPicker(SafeView):
             except Exception:
                 found = []
                 self.warning = '\n모델 발견 실패: PC에서 공급자 연결을 확인하고 허용 모델을 새로고침하세요.'
-            configured = self.current_provider.get('model')
-            selected = self.preference.get('model') if self.preference.get('providerId') == self.current_provider['providerId'] else None
-            # Never reinsert a stale selected/configured model above the live cap.
-            candidates = found if self.current_provider.get('modelPolicyEnforced') or self.current_provider.get('modelCeiling', 'unlimited') != 'unlimited' else [selected, configured, *found]
-            self.models = list(dict.fromkeys(m for m in candidates if isinstance(m, str) and 0 < len(m) <= 200))[:1000]
+            # Never offer guessed/stale defaults when live discovery failed.
+            self.models = list(dict.fromkeys(m for m in found if isinstance(m, str) and 0 < len(m) <= 200))[:1000]
         self.model_page = 0
         self.render()
 
     def caption(self):
         current = self.preference.get('model') or '기본 모델'
-        ceiling = self.current_provider.get('modelCeiling', 'unlimited') if self.current_provider else 'unlimited'
-        allowance = {'default': '기본 · GPT-6 Sol/Astra는 관리자 허용 필요', 'sol': 'GPT-6 Sol 이하', 'astra': 'GPT-6 Astra 이하 · Sol 포함', 'unlimited': '전체 모델'}.get(ceiling, ceiling + ' 이하')
-        return discord.utils.escape_mentions(f"모델 선택 · 현재 {current} · 상한 {ceiling}\n허용 범위: {allowance}\n모델 허용과 PC 접근 권한은 별개입니다. 공급자 → 모델을 고르면 이 티켓에 저장됩니다.{self.warning}")[:1800]
+        effort = self.preference.get('effort', 'auto')
+        return discord.utils.escape_mentions(f"관리자 전용 · 사용자 {self.target_user_id}\n선택: {current} · 추론: {effort}\n공급자 → 모델 → 추론을 선택하고 [저장]을 누르세요. 이 서버의 대상 사용자 모든 티켓에 적용됩니다. PC 접근 권한은 바뀌지 않습니다.{self.warning}")[:1800]
 
     def render(self):
         self.clear_items()
@@ -212,10 +213,9 @@ class ModelPicker(SafeView):
                 if effort not in model_reasoning_efforts(provider_snapshot, models_snapshot[int(models.values[0])], self.capabilities):
                     effort = 'auto'
                 preference = dict(providerId=provider_snapshot['providerId'], model=models_snapshot[int(models.values[0])], effort=effort)
-                await self.manager.bridge.request(interaction, 'settings', **preference)
                 self.preference = preference
                 self.render()
-                await interaction.edit_original_response(content='저장했습니다.\n' + self.caption(), view=self)
+                await interaction.edit_original_response(content='선택했습니다. 저장하면 적용됩니다.\n' + self.caption(), view=self)
             models.callback = model_changed
             self.add_item(models)
         selected_model = self.preference.get('model') if self.preference.get('providerId') == self.current_provider['providerId'] else self.current_provider.get('model')
@@ -226,10 +226,9 @@ class ModelPicker(SafeView):
             if self.preference.get('providerId') != self.current_provider['providerId'] or not self.preference.get('model'):
                 raise RuntimeError('먼저 위에서 사용할 모델을 선택하세요.')
             preference = {**self.preference, 'effort': reasoning.values[0]}
-            await self.manager.bridge.request(interaction, 'settings', **preference)
             self.preference = preference
             self.render()
-            await interaction.edit_original_response(content='저장했습니다.\n' + self.caption(), view=self)
+            await interaction.edit_original_response(content='선택했습니다. 저장하면 적용됩니다.\n' + self.caption(), view=self)
         reasoning.callback = effort_changed
         self.add_item(reasoning)
         for label, kind, delta, enabled in [('공급자 이전', 'provider', -1, self.provider_page > 0), ('공급자 다음', 'provider', 1, (self.provider_page + 1) * 25 < len(self.providers)), ('모델 이전', 'model', -1, self.model_page > 0), ('모델 다음', 'model', 1, (self.model_page + 1) * 25 < len(self.models))]:
@@ -243,7 +242,22 @@ class ModelPicker(SafeView):
                 await interaction.response.edit_message(content=self.caption(), view=self)
             button.callback = page
             self.add_item(button)
-        refresh = discord.ui.Button(label='허용 모델 새로고침', style=discord.ButtonStyle.secondary, row=4)
+        save = discord.ui.Button(label='저장', style=discord.ButtonStyle.primary, row=4, disabled=not self.preference.get('model') or self.preference.get('providerId') != self.current_provider['providerId'] or self.preference.get('model') not in self.models)
+        async def save_assignment(interaction):
+            await interaction.response.defer()
+            result = await self.manager.bridge.request(interaction, 'model-policy', mode='set', targetUserId=str(self.target_user_id), **self.preference)
+            await interaction.edit_original_response(content=result['message'] + '\n' + self.caption(), view=self)
+        save.callback = save_assignment
+        self.add_item(save)
+        reset = discord.ui.Button(label='PC 기본값으로', row=4)
+        async def reset_assignment(interaction):
+            await interaction.response.defer()
+            result = await self.manager.bridge.request(interaction, 'model-policy', mode='reset', targetUserId=str(self.target_user_id))
+            await interaction.edit_original_response(content=result['message'], view=None)
+            self.stop()
+        reset.callback = reset_assignment
+        self.add_item(reset)
+        refresh = discord.ui.Button(label='모델 새로고침', style=discord.ButtonStyle.secondary, row=4)
         async def refresh_models(interaction):
             await interaction.response.defer()
             providers = await self.manager.bridge.request(interaction, 'models')
@@ -263,6 +277,11 @@ class Settings(SafeView):
     def __init__(self, manager, state):
         super().__init__(timeout=180)
         self.manager, self.state = manager, state
+
+    async def interaction_check(self, interaction):
+        await self.manager.bridge.authorize(interaction, admin_only=True)
+        self.manager.owned(interaction)
+        return True
 
     @discord.ui.select(placeholder='PC 접근 권한', options=[discord.SelectOption(label=label, value=value) for value, label in [('read-only', '읽기 전용'), ('ask', '변경 전 확인'), ('workspace', '작업 폴더 허용'), ('full', '전체 PC 허용 · 확인 없이 실행')]])
     async def access(self, interaction, select):
@@ -334,10 +353,13 @@ class ThreadManager:
         self.cancel_epochs = {}
         self.latest_controls = {}
         self.controls_lock = asyncio.Lock()
+        self.controls_refresh = None
+        self.refreshed_controls = set()
 
     def install(self):
         self.bridge.client.add_view(Panel(self))
         self.bridge.client.add_view(Controls(self))
+        self.bridge.client.add_view(LegacyModelControl(self))
 
     def update_state(self, state):
         self.state = state
@@ -346,6 +368,34 @@ class ThreadManager:
                 _, view = self.latest_controls.pop(channel_id)
                 view.stop()
                 self.cancel_epochs.pop(channel_id, None)
+
+    def schedule_control_refresh(self):
+        if self.controls_refresh and not self.controls_refresh.done():
+            return
+        self.controls_refresh = asyncio.create_task(self.refresh_legacy_controls())
+        self.controls_refresh.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+
+    async def refresh_legacy_controls(self):
+        # Bounded migration of bot-owned controls only. Never erase messages,
+        # read user attachments, or reopen an archived/locked ticket.
+        for channel_id, session in list(self.state.get('sessions', {}).items())[:64]:
+            if channel_id in self.refreshed_controls or session.get('archived') or int(session['guildId']) not in self.bridge.allowed_guilds:
+                continue
+            try:
+                channel = await self.bridge.client.fetch_channel(int(channel_id))
+                if not isinstance(channel, discord.Thread) or channel.archived or channel.locked or str(channel.guild.id) != session['guildId'] or str(channel.parent_id) != session['parentId']:
+                    continue
+                async with self.controls_lock:
+                    async for message in channel.history(limit=100):
+                        if message.author.id != self.bridge.client.user.id:
+                            continue
+                        ids = {getattr(item, 'custom_id', '') for row in message.components for item in getattr(row, 'children', [])}
+                        if 'mrrobot:thread:model:v1' in ids:
+                            await message.edit(view=Controls(self))
+                self.refreshed_controls.add(channel_id)
+            except (discord.HTTPException, PermissionError):
+                # An unavailable ticket must not prevent the bot from starting.
+                continue
 
     async def send_controls(self, channel, content, **kwargs):
         async with self.controls_lock:
@@ -370,16 +420,16 @@ class ThreadManager:
         await self.bridge.authorize(interaction)
         self.owned(interaction)
         state = await self.bridge.request(interaction, 'status')
-        await self.send_controls(interaction.channel, state['message'])
+        await self.send_controls(interaction.channel, state.get('publicMessage', '작업 제어 메뉴입니다.'))
         await interaction.followup.send('제어 메뉴를 맨 아래로 가져왔습니다.', ephemeral=True)
 
-    async def show_models(self, interaction):
+    async def show_models(self, interaction, target_user_id=None):
         await interaction.response.defer(ephemeral=True)
-        await self.bridge.authorize(interaction)
-        self.owned(interaction)
-        state = await self.bridge.request(interaction, 'status')
+        await self.bridge.authorize(interaction, admin_only=True)
+        target_user_id = target_user_id or interaction.user.id
+        state = await self.bridge.request(interaction, 'model-policy', mode='show', targetUserId=str(target_user_id))
         providers = await self.bridge.request(interaction, 'models')
-        view = ModelPicker(self, interaction.user.id, providers, state.get('preference', {}))
+        view = ModelPicker(self, interaction.user.id, providers, state.get('preference', {}), target_user_id, interaction.guild_id)
         await view.load(interaction)
         await interaction.followup.send(view.caption() if providers else '등록된 공급자가 없습니다. PC 앱에서 먼저 연결하세요.', view=view, ephemeral=True)
 
@@ -694,6 +744,9 @@ class ThreadManager:
                 pass
 
     async def disconnected(self):
+        if self.controls_refresh and not self.controls_refresh.done():
+            self.controls_refresh.cancel()
+            await asyncio.gather(self.controls_refresh, return_exceptions=True)
         # Keep not-yet-started requests. Running PC jobs are cancelled by the host
         # and are never replayed automatically (they may have side effects).
         for _, _, status in self.queue:

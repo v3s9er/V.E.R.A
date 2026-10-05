@@ -85,7 +85,7 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.bridge.authorize(self.interaction), {'admin': False, 'allowed': True})
         with self.assertRaises(PermissionError):
             await self.bridge.authorize(self.interaction, admin_only=True)
-        for action in ['access', 'user-access', 'model-limit', 'thread.bind', 'thread.unbind', 'approve']:
+        for action in ['access', 'user-access', 'model-limit', 'model-policy', 'models', 'settings', 'thread.bind', 'thread.unbind', 'approve']:
             with patch('bridge.emit') as emit:
                 with self.assertRaises(PermissionError):
                     await self.bridge.request(self.interaction, action)
@@ -105,7 +105,7 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_permission_and_model_limit_requests_recheck_live_admin_before_emitting(self):
         self.role.permissions.administrator = False
-        for action in ['access', 'model-limit']:
+        for action in ['access', 'model-limit', 'model-policy', 'models', 'settings']:
             with patch('bridge.emit') as emit:
                 with self.assertRaises(PermissionError):
                     await self.bridge.request(self.interaction, action, mode='full', confirmFull=True, targetUserId='333333333333333333', ceiling='unlimited')
@@ -116,6 +116,13 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
         with patch('bridge.emit') as emit:
             with self.assertRaises(PermissionError):
                 await self.bridge.request(self.interaction, 'model-limit', targetUserId='333333333333333333', ceiling='sol')
+            emit.assert_not_called()
+
+    async def test_assignment_rejects_bot_target(self):
+        self.guild.fetch_member.return_value = NS(id=3, _roles=[9], bot=True)
+        with patch('bridge.emit') as emit:
+            with self.assertRaises(PermissionError):
+                await self.bridge.request(self.interaction, 'model-policy', targetUserId='333333333333333333', mode='show')
             emit.assert_not_called()
 
     async def test_dm_and_other_server_denied(self):

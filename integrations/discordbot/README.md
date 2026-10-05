@@ -33,9 +33,10 @@ features. New configurations default to standalone; existing users can select it
    needs application-command installation permission. `/robot` is upserted
    without deleting existing commands. Global command propagation may take time.
 
-Commands: `/robot ask message`, `/robot models`, `/robot status`, `/robot new`,
+Commands: `/robot ask message`, `/robot status`, `/robot new`,
 `/robot stop`, `/robot access`, `/robot result`, `/robot approval`.
-The ask command optionally accepts provider ID, model and effort.
+The ask command accepts text and an optional file, not model overrides.
+Administrators use `/robot-admin model user:@member` to assign provider/model/reasoning.
 Access selects read-only, ask, workspace or full per server/channel/user.
 Full requires `confirm_full:True` and grants that user's runs PC-wide access.
 Changes requiring approval show requester-bound, expiring approval/deny buttons.
@@ -67,55 +68,54 @@ Queue limits are 16 total/4 per thread; session limits are 64 total/20 per user.
 
 ## Security and limits
 
-### Per-user model grants (V.E.R.A 0.7.2)
+### Administrator-assigned models (V.E.R.A 0.7.6)
 
-Server administrators can run `/robot model-limit user:@member ceiling:sol`
-to allow **GPT-6 Sol and lower tiers**, or `ceiling:astra` to also allow
-**GPT-6 Astra**. Members then open `/robot model` in their own ticket and select
-the model. An already-open picker has **허용 모델 새로고침** to reload grants.
-`show` inspects the policy, `default` removes the explicit grant, and
-`unlimited` explicitly allows all models from the owner's registered providers.
-The policy is stored privately per guild/user, not per channel; opening/deleting
-tickets or restarting the bot does not reset it. Other users/guilds are isolated.
-Changes are refused while the target user's run is active. Existing ordinary
-model access is preserved, but ordinary members without an explicit grant cannot
-select GPT-6 Sol/Astra. An administrator's own default remains unrestricted;
-explicit administrator caps still apply. Previously saved `sol`/`astra` ceilings
-also count as grants. Older `unlimited` settings were stored as a missing entry,
-so their intent cannot be recovered: reissue an explicit grant for GPT-6 access.
-The plugin never grants a role or changes PC access as part of a model grant.
+1. A server Administrator runs `/robot-admin model user:@member`.
+2. In the private picker, select a registered provider, an available model and a
+   supported reasoning level, then press **저장**. Selection changes are drafts
+   until saved. **모델 새로고침** reloads the current account catalog.
+3. The assignment applies to that member's existing and new tickets in this
+   server, survives restart and does not change other members or servers.
+   Stop the target member's active work before changing an assignment.
+4. **PC 기본값으로** removes the explicit assignment. Without an assignment,
+   tickets use the PC owner's default provider/model with automatic reasoning.
 
-The explicit application ordering is `spark < mini < luna < terra < sol < astra`.
-Exact model IDs are gpt-5.3-codex-spark, gpt-5.4-mini, gpt-5.6-luna,
-gpt-5.6-terra, gpt-5.6-sol, gpt-6-sol, gpt-6-astra. Both Sol generations belong
-to the `sol` tier. This is an administration policy, not
-a benchmark ranking. Unknown IDs/aliases and other vendors (including Claude)
-are denied for limited users rather than guessed into a tier. `unlimited`
-explicitly permits all configured providers. Adding future model IDs requires an explicit
-policy update.
+Regular members do not receive model/reasoning selectors, model status fields
+or slash-command override options. `/robot-admin` is Administrator-only by
+default, and every operation also checks live permissions in Python and the
+Node host. Server command-visibility overrides are not authorization. Cached old
+buttons cannot bypass these checks. On reconnect, recent bot-owned model controls
+are replaced in up to 64 registered, open tickets (100 messages each); message
+content is preserved. Older messages may retain inert/guarded buttons.
 
-Catalogs and saved/direct selections are checked by the Node host against both
-the live available catalog and the current user policy. Limited
-requests resolve their provider/default explicitly. Every actual provider call
-through V.E.R.A's loop is checked again, including API/native execution and
-fallback providers. Discord runs do not inherit PC routing presets. Policy
-errors never silently upgrade or rewrite a user's chosen model.
+The old `/robot model`, `/robot models` and `/robot model-limit` public commands
+are retired. Stored ticket preferences and tier ceilings are retained on disk
+but no longer control execution; administrators must assign the desired exact
+model. **GPT-6 Sol/Astra** can be assigned when the connected account lists them,
+as can other providers' models. No tier inference or guessed model IDs are used.
 
-Both `/robot access` and `/robot model-limit` require live server Administrator
-membership; UI visibility alone is insufficient. Full PC access still needs
-explicit confirmation and cannot override the PC's global read-only lock.
-Since 0.4.15, allow_ai members may use isolated tickets. Administrators
-may edit their own limits. This is not a spend-security boundary against a user
-already authorized to run arbitrary PC commands or against model selection
-inside a third-party native CLI/plugin; those programs remain separate trust
-boundaries. No provider credentials are sent to Discord.
+The host validates the live catalog, provider and supported reasoning before
+saving and before running. Every V.E.R.A model call is checked against the exact
+assigned provider/model, including API/native calls; fallback to a different or
+lower model is rejected. Discord runs do not inherit PC routing presets, V.E.R.A
+helper agents, or advisor-to-executor handoffs. Subscription CLI execution and
+its own internal agent capabilities are unchanged. A single-model conversation
+can still make multiple tool turns and reuse its ticket session; this does not
+mean one model API call per message.
+Nonempty inline model/provider/reasoning overrides are rejected even for admins.
+
+Model assignment does not grant `allow_ai`, PC access or access to someone else's
+ticket contents. Access settings remain separate; full access requires explicit
+confirmation and cannot override the PC's global read-only lock. This is not a
+spend-security boundary against a trusted full-PC operator or model selection
+inside third-party native tools. Provider credentials are never sent to Discord.
 
 ### Recent-message controls (0.4.8)
 
 Every plain-chat receipt and final answer carries the ticket controls. Only the
 old controls are removed, not message content; old Views are disposed. Use
-`/robot controls` to bring the toolbar down or `/robot model` for the paged
-provider/model picker. Discovery uses the registered provider's model-list API,
+`/robot controls` to bring the toolbar down. Only administrators can open the
+private provider/model picker with `/robot-admin model`. Discovery uses the registered provider's model-list API,
 not arbitrary URLs. No PC credentials or provider keys reach Discord/Python.
 Access changes still require the existing checks and full-access confirmation.
 Stopping cancels a run; it is not pause/resume.
@@ -176,13 +176,13 @@ isolated tickets; it does not grant PC access or permission-policy management.
   trusted with the PC and its data. Administrator defaults to full. An explicit
   per-user restriction overrides the default, including an administrator's.
 - All policy commands require live Administrator permission in Python and the
-  host. `model-limit` continues to apply per user across all server tickets.
+  host. Administrator model assignments apply per user across all server tickets.
 - Existing full-access conversation histories and cached replies are never
   reused in isolated mode. No PC default workspace, long-term memory, native CLI tools,
   Computer API, generic plugins, MCP, screen or host shell is supplied to it.
 - Since 0.4.16, isolated users share the owner's registered providers and default
-  model, including Codex/Claude subscriptions. Existing per-user model ceilings
-  still apply. Provider access and computer authority are separate policies.
+  model, including Codex/Claude subscriptions. Since 0.7.6, administrator-assigned
+  exact models replace user-selectable ceilings. Provider access and computer authority are separate policies.
   Codex uses app-server with `environments: []` at both thread and turn boundaries,
   no discovered instructions and no native tools. Claude uses safe mode, no native
   tools and an empty strict MCP configuration in a fresh scratch directory.

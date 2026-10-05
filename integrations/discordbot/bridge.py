@@ -20,6 +20,7 @@ from presentation import result_text, wants_files, message_chunks
 from attachments import read_attachments, attachment_sources
 
 PREFIX = '__MR_ROBOT_DISCORD__'
+ADMIN_ACTIONS = {'access', 'user-access', 'model-limit', 'model-policy', 'models', 'settings', 'thread.bind', 'thread.unbind', 'thread.panel', 'approve'}
 _output_lock = threading.Lock()
 _bridge = None
 _reader_started = False
@@ -116,8 +117,6 @@ class Bridge:
             self.refresh_allowed_guilds()
         if interaction.guild_id not in self.allowed_guilds or not interaction.guild:
             raise PermissionError('등록된 Discord 서버에서만 사용할 수 있습니다. DM은 지원하지 않습니다.')
-        if hasattr(self, 'threads'):
-            self.threads.check_context(interaction)
         # Fetch current role assignments AND role permission bits, not cached
         # channel permissions. A renamed role or Manage Server is not Administrator.
         guild = await self.client.fetch_guild(interaction.guild_id)
@@ -130,6 +129,8 @@ class Bridge:
             raise PermissionError('Discord 서버의 관리자(Administrator) 권한이 필요합니다.')
         if not admin and not allowed:
             raise PermissionError('이용하려면 allow_ai 역할이 필요합니다.')
+        if hasattr(self, 'threads') and not (admin_only and admin):
+            self.threads.check_context(interaction)
         return {'admin': admin, 'allowed': allowed}
 
     async def authorize_ticket(self, interaction):
@@ -150,11 +151,12 @@ class Bridge:
         # Team apps have one explicit team owner; membership alone is not authority.
         self.owner = application.team.owner_id if application.team else application.owner.id
         group = app_commands.Group(name='robot', description='V.E.R.A 개인 티켓 에이전트', guild_only=True)
+        admin_group = app_commands.Group(name='robot-admin', description='V.E.R.A 관리자 전용 설정', guild_only=True, default_permissions=discord.Permissions(administrator=True))
 
         @group.command(name='ask', description='개인 티켓에서 AI 작업 요청 (allow_ai 필요)')
-        @app_commands.describe(message='작업 내용', provider='models에서 확인한 공급자 ID', model='모델 ID', effort='추론 강도 · 모델별 지원 단계는 /robot model에서 확인')
-        async def ask(interaction: discord.Interaction, message: str, provider: str = '', model: str = '', effort: str = '', file: discord.Attachment = None):
-            await self.execute(interaction, 'ask', text=message, providerId=provider, model=model, effort=effort, _attachments=[file] if file else [])
+        @app_commands.describe(message='작업 내용')
+        async def ask(interaction: discord.Interaction, message: str, file: discord.Attachment = None):
+            await self.execute(interaction, 'ask', text=message, _attachments=[file] if file else [])
 
         @group.command(name='stop', description='이 채널에서 요청한 작업 중지')
         async def stop(interaction: discord.Interaction):
@@ -172,7 +174,8 @@ class Bridge:
         async def status(interaction: discord.Interaction):
             await self.execute(interaction, 'status')
 
-        @group.command(name='models', description='사용 가능한 공급자와 모델 ID')
+        @admin_group.command(name='models', description='관리자: 연결된 공급자 목록 확인')
+        @app_commands.checks.has_permissions(administrator=True)
         async def models(interaction: discord.Interaction):
             await self.execute(interaction, 'models')
 
@@ -189,12 +192,11 @@ class Bridge:
         async def user_access(interaction: discord.Interaction, user: discord.Member, mode: str, confirm_full: bool = False):
             await self.execute(interaction, 'user-access', targetUserId=str(user.id), mode=mode, confirmFull=confirm_full)
 
-        @group.command(name='model-limit', description='관리자: 사용자별 GPT-6 Sol·Astra 등 모델 사용 허용')
+        @admin_group.command(name='model', description='사용자별 모델·추론 강도 지정')
         @app_commands.checks.has_permissions(administrator=True)
-        @app_commands.describe(user='모델 사용을 허용할 서버 사용자', ceiling='PC 접근 권한과 별개 · 이 서버의 모든 티켓에 적용')
-        @app_commands.choices(ceiling=[app_commands.Choice(name=label, value=value) for value, label in [('show', '현재 허용 범위 조회'), ('default', '기본값 · GPT-6 Sol/Astra 개별 허용 회수'), ('spark', 'Spark 이하'), ('mini', 'Mini 이하'), ('luna', 'Luna 이하'), ('terra', 'Terra 이하'), ('sol', 'GPT-6 Sol 이하 허용'), ('astra', 'GPT-6 Astra 이하 허용 · Sol 포함'), ('unlimited', '모든 모델 명시적 허용 · 모든 공급자')]])
-        async def model_limit(interaction: discord.Interaction, user: discord.Member, ceiling: str):
-            await self.execute(interaction, 'model-limit', targetUserId=str(user.id), ceiling=ceiling)
+        @app_commands.describe(user='모델·추론을 지정할 사용자 · 이 서버의 모든 티켓에 적용')
+        async def assign_model(interaction: discord.Interaction, user: discord.Member):
+            await self.threads.show_models(interaction, user.id)
 
         @group.command(name='result', description='긴 작업의 마지막 결과 다시 받기')
         async def result(interaction: discord.Interaction):
@@ -216,13 +218,9 @@ class Bridge:
         async def sessions(interaction: discord.Interaction):
             await self.threads.show_list(interaction)
 
-        @group.command(name='controls', description='이 티켓의 중지·권한·모델 메뉴를 맨 아래로 가져오기')
+        @group.command(name='controls', description='이 티켓의 작업 제어 메뉴를 맨 아래로 가져오기')
         async def controls(interaction: discord.Interaction):
             await self.threads.show_controls(interaction)
-
-        @group.command(name='model', description='이 티켓의 공급자·모델·추론 드롭다운 열기')
-        async def model_picker(interaction: discord.Interaction):
-            await self.threads.show_models(interaction)
 
         @self.tree.error
         async def on_command_error(interaction, error):
@@ -232,10 +230,12 @@ class Bridge:
             await sender(discord.utils.escape_mentions(text[:1500]), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
         self.tree.add_command(group)
-        # Merge the one owned root command through upsert. Never bulk-sync and
+        self.tree.add_command(admin_group)
+        # Merge only our two owned root commands through upsert. Never bulk-sync and
         # delete unrelated commands already registered by the existing bot.
         payload = group.to_dict(self.tree)
         await self.client.http.upsert_global_command(self.client.application_id, payload)
+        await self.client.http.upsert_global_command(self.client.application_id, admin_group.to_dict(self.tree))
         _bridge = self
         if not _reader_started:
             threading.Thread(target=self.read_stdin, daemon=True, name='MrRobotBridgeInput').start()
@@ -322,14 +322,14 @@ class Bridge:
             view=Approval(self, interaction.channel_id, request_id, interaction.user.id))
 
     async def request(self, interaction, action, **params):
-        authority = await self.authorize(interaction, admin_only=action in {'access', 'user-access', 'model-limit', 'thread.bind', 'thread.unbind', 'thread.panel', 'approve'})
+        authority = await self.authorize(interaction, admin_only=action in ADMIN_ACTIONS)
         if {'id', 'userId', 'channelId', 'guildId', 'guildAdmin', 'allowAi', 'isThread', 'action'} & params.keys():
             raise PermissionError('인증 필드는 요청에서 변경할 수 없습니다.')
         ticket_authorized = authority['allowed']
         if action == 'thread.register':
             await self.authorize_ticket(interaction)
             ticket_authorized = True
-        if action in {'model-limit', 'user-access'}:
+        if action in {'model-limit', 'model-policy', 'user-access'}:
             # Resolve live membership, not an arbitrary ID submitted by a client.
             target = await interaction.guild.fetch_member(int(params.get('targetUserId', '0')))
             if target.bot:
@@ -362,7 +362,7 @@ class Bridge:
         watch = None
         permission_revoked = False
         try:
-            starting_authority = await self.authorize(interaction)
+            starting_authority = await self.authorize(interaction, admin_only=action in ADMIN_ACTIONS)
             incoming = params.pop('_attachments', None)
             if incoming is None:
                 incoming = getattr(interaction, 'attachments', [])

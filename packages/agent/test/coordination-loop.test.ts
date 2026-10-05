@@ -74,6 +74,38 @@ async function workspace<T>(run: (directory: string) => Promise<T>): Promise<T> 
   finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
+for (const native of [false, true]) test(`Discord direct ${native ? 'native' : 'API'} execution has no helpers or PC preset`, () => workspace(async directory => {
+  let calls = 0;
+  const selected = provider({ type: native ? 'codex-cli' : 'openai-compatible', supportsTools: !native,
+    chat: async req => {
+      calls++; assert.ok(!req.tools?.some(t => t.name.startsWith('agent_')));
+      return result('single direct response');
+    },
+    chatIsolated: async () => { throw new Error('No helper may execute'); },
+    ...(native ? { runAgent: async (req: any) => {
+      calls++; assert.ok(!req.hostTools?.tools.some((t: any) => t.name.startsWith('agent_')));
+      assert.ok(!req.session?.instructions.includes('agent_spawn'));
+      assert.equal(req.session.key, 'discord-ticket');
+      return result('single direct response');
+    } } : {}),
+  });
+  const loop = new AgentLoop(registry(selected), {} as any);
+  const output = await loop.run([], 'Review this workspace', {}, [], {
+    workspacePath: directory, permissionMode: 'read-only', tokenPolicy: 'audit-only',
+    cacheKey: 'discord-ticket', nativeSessionDirectory: directory, singleModelOnly: true,
+    routing: { mode: 'quality', executionMode: 'vote', maxPremiumCalls: 12, escalationEnabled: false, roles: {}, graph: { nodes: [], edges: [] } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(output.text, 'single direct response');
+}));
+
+test('Discord direct text-only model cannot hand tools off to another model', () => workspace(async directory => {
+  const selected = provider({ supportsTools: false, chat: async () => { throw new Error('No advisor call'); } });
+  await assert.rejects(new AgentLoop(registry(selected), {} as any).run([], 'Read files in this workspace', {}, [], {
+    workspacePath: directory, permissionMode: 'read-only', singleModelOnly: true,
+  }), /다른 모델로 전환하지 않았습니다/);
+}));
+
 test('API main delegates two same-model isolated readers, receives bounded results, and owns final synthesis', () => workspace(async directory => {
   const accounting = instrument();
   const reads: Array<{ path: string; maximum: number }> = [];

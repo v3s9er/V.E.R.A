@@ -8,4 +8,4 @@ export function discordAccess(admin: boolean, policies: Record<string, unknown>,
   if (Object.hasOwn(policies, scope)) return parseDiscordAccess(policies[scope]);
   return admin ? 'full' : 'isolated';
 }
-export const DISCORD_ADMIN_ACTIONS = new Set(['access', 'user-access', 'model-limit', 'thread.bind', 'thread.unbind', 'thread.panel', 'approve']);
+export const DISCORD_ADMIN_ACTIONS = new Set(['access', 'user-access', 'model-limit', 'model-policy', 'settings', 'models', 'thread.bind', 'thread.unbind', 'thread.panel', 'approve']);

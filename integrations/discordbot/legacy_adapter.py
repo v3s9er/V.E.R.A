@@ -34,6 +34,7 @@ def run(settings, bridge_type, emit):
             bridge.refresh_allowed_guilds()
             bridge.gateway_ready = True
             emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
+            bridge.threads.schedule_control_refresh()
 
         async def resumed(client):
             if original_resumed:
@@ -42,6 +43,7 @@ def run(settings, bridge_type, emit):
             bridge.refresh_allowed_guilds()
             bridge.gateway_ready = True
             emit({'event': 'ready', 'owner': str(bridge.owner), 'guilds': [str(g) for g in bridge.allowed_guilds]})
+            bridge.threads.schedule_control_refresh()
 
         async def disconnected(client):
             emit({'event': 'disconnected'})

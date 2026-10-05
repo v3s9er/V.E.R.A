@@ -183,6 +183,8 @@ export interface RunOptions {
   permissionMode?: PermissionMode;
   /** Server-only Discord grant; ordinary RPC input cannot set this. */
   trustedPermissionOverride?: boolean;
+  /** Server-owned direct execution: no routing presets, delegation or advisor handoff. */
+  singleModelOnly?: boolean;
   /** null disables routing; a value applies a conversation-specific scenario. */
   routing?: RoutingPresetSettings | null;
   workspacePath?: string;
@@ -332,6 +334,7 @@ export class AgentLoop {
     extraTools: NeutralTool[] = [],
     options: RunOptions = {},
   ): Promise<LoopResult> {
+    if (options.singleModelOnly) options = { ...options, routing: null };
     cb.signal?.throwIfAborted();
     const fatalAbort = new AbortController();
     const runSignal = cb.signal
@@ -641,7 +644,7 @@ export class AgentLoop {
     // Native parents reserve their whole finite allowance. Do not lend that
     // reservation to concurrent children or silently switch a user's policy.
     // API parents settle each round first, so children use ordinary per-call leases.
-    const canCoordinate = (actualProvider: AiProvider, native: boolean) => !options.isolation
+    const canCoordinate = (actualProvider: AiProvider, native: boolean) => !options.singleModelOnly && !options.isolation
       && !selfContained
       && tuningFor(actualProvider).helperMode !== 'off'
       && (executionMode === 'single' && !scenario || executionMode === 'adaptive') && !!options.workspacePath
@@ -1339,6 +1342,7 @@ export class AgentLoop {
     }
     let advisor: { providerLabel: string; model: string } | undefined;
     if (!provider.supportsTools && tools.length > 0 && !(options.isolation && provider.chatIsolated)) {
+      if (options.singleModelOnly) throw new Error('관리자가 지정한 모델은 이 실행 방식에서 도구 작업을 지원하지 않습니다. 다른 모델로 전환하지 않았습니다. 관리자에게 설정 확인을 요청하세요.');
       const requestedAdvisor = provider;
       // This reservation is adjacent to the actual advisor invocation; merely
       // deciding that an advisor is useful must not spend premium budget.
