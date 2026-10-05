@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatConfigureResult, ChatConfirmRequest, ChatRunState, ConversationDetail, ConversationSummary, ConversationTokenPolicy, PermissionMode, ProviderInfo, ReasoningEffort, RoutingPreset, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
-import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership, ConversationSaveBarrier, reasoningEffortsForModel, conversationDisplayTitle, groupProjectConversations, parseCollapsedProjects } from '@mr-robot/shared';
+import { resolveProjectWorkspace, supportsDaybreak, watchChatSettlement, ChatRequestOwnership, ConversationSaveBarrier, reasoningEffortsForModel, conversationDisplayTitle, parseCollapsedProjects } from '@mr-robot/shared';
 import { Button, Input, Modal, Select, Spinner } from '../components/ui';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { ChatFiles } from '../components/ChatFiles';
@@ -157,9 +157,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const [projectScope, setProjectScope] = useState('*');
   const projectScopeRef = useRef('*');
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [createdConversationId, setCreatedConversationId] = useState<string>();
   useEffect(() => {
     if (!navigationOpen) return;
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setNavigationOpen(false); };
+    const close = (event: KeyboardEvent) => {
+      // Escape dismisses the topmost menu/dialog first and leaves its trigger visible.
+      if (event.key === 'Escape' && !document.querySelector('[role="menu"], [role="dialog"]')) setNavigationOpen(false);
+    };
     window.addEventListener('keydown', close); return () => window.removeEventListener('keydown', close);
   }, [navigationOpen]);
   const [input, setInput] = useState('');
@@ -174,6 +178,12 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   }, [collapseKey]);
   const toggleProjectGroup = (id: string): void => setCollapsedProjects(current => {
     const next = current.includes(id) ? current.filter(item => item !== id) : [...current, id];
+    try { localStorage.setItem(collapseKey, JSON.stringify(next)); } catch { /* optional UI preference */ }
+    return next;
+  });
+  const revealProjectGroup = (id: string): void => setCollapsedProjects(current => {
+    if (!current.includes(id)) return current;
+    const next = current.filter(item => item !== id);
     try { localStorage.setItem(collapseKey, JSON.stringify(next)); } catch { /* optional UI preference */ }
     return next;
   });
@@ -725,37 +735,53 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   useEffect(() => {
     if (!conversationMenu) return;
     const close = (): void => setConversationMenu(null);
+    const anchor = conversationMenuTriggerRef.current;
+    const anchorRect = anchor?.getBoundingClientRect();
+    const closeOnMovedAnchor = (): void => {
+      const next = anchor?.getBoundingClientRect();
+      // A queued scroll event from revealing the trigger may arrive after the
+      // menu opens. Dismiss only when its anchor actually moved or disappeared.
+      if (!anchor?.isConnected || !next || !anchorRect || Math.abs(next.top - anchorRect.top) > .5 || Math.abs(next.left - anchorRect.left) > .5) close();
+    };
     const key = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
       close();
       queueMicrotask(() => conversationMenuTriggerRef.current?.focus());
     };
-    const focusMenu = window.requestAnimationFrame(() => conversationMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus());
+    const focusMenu = window.requestAnimationFrame(() => conversationMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true }));
     window.addEventListener('pointerdown', close);
     window.addEventListener('blur', close);
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', closeOnMovedAnchor, true);
     window.addEventListener('keydown', key);
     return () => {
       window.cancelAnimationFrame(focusMenu);
       window.removeEventListener('pointerdown', close);
       window.removeEventListener('blur', close);
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', closeOnMovedAnchor, true);
       window.removeEventListener('keydown', key);
     };
   }, [conversationMenu]);
 
-  const createConversation = async (): Promise<void> => {
+  const createConversation = async (workspaceId?: string): Promise<void> => {
     if (creatingConversation.current) return;
     creatingConversation.current = true;
     const request = ++loadRequest.current;
     navigationPendingRef.current = true; setNavigationPending(true);
     try {
-      const created = await client.call('conversations.create', { workspaceId: projectScopeRef.current === '*' ? undefined : projectScopeRef.current }) as ConversationDetail;
+      // An inline project action has an explicit destination. The global action
+      // continues in the selected conversation's project, never a hidden filter.
+      const currentWorkspaceId = selectedRef.current?.workspaceId;
+      const validCurrentWorkspace = workspaces.some(project => project.id === currentWorkspaceId) ? currentWorkspaceId : undefined;
+      const destination = workspaceId ?? validCurrentWorkspace
+        ?? (projectScopeRef.current === '*' ? workspaces.find(project => project.isDefault)?.id : projectScopeRef.current);
+      const created = await client.call('conversations.create', { workspaceId: destination }) as ConversationDetail;
       setConversations((list) => [created, ...list.filter(c => c.id !== created.id)]);
       if (request !== loadRequest.current) return;
+      revealProjectGroup(created.workspaceId ?? '__unassigned__');
+      setCreatedConversationId(created.id);
       await loadConversation(created.id); setShowArchived(false);
     } catch (error) { if (request === loadRequest.current) setComposerError(error instanceof Error ? error.message : String(error)); }
     finally {
@@ -764,11 +790,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     }
   };
   const selectProject = async (id: string): Promise<void> => {
-    projectScopeRef.current = id; setProjectScope(id); setConversationMenu(null);
+    // The tree shows every project. Selecting one must not leave a hidden filter
+    // that redirects later pin/archive operations in a different project.
+    projectScopeRef.current = '*'; setProjectScope('*'); setConversationMenu(null);
     const target = conversations.find(c => id === '*' || c.workspaceId === id);
     try {
       if (target) await loadConversation(target.id);
-      else if (!showArchived) await createConversation();
+      else if (!showArchived) await createConversation(id === '*' ? undefined : id);
       else { selectedId.current = null; selectedRef.current = null; setSelected(null); setMessages([]); }
     } catch (error) { setComposerError(error instanceof Error ? error.message : String(error)); }
   };
@@ -1091,8 +1119,6 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const executionControlsDisabled = navigationPending || executionConfigSaving || !selected || selected.status === 'archived';
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageLimit);
   const visibleMessages = hiddenMessageCount > 0 ? messages.slice(-visibleMessageLimit) : messages;
-  const visibleConversations = conversations.filter(c => projectScope === '*' || c.workspaceId === projectScope);
-  const conversationGroups = groupProjectConversations(workspaces, visibleConversations, projectScope);
   const currentHistory = historyPage?.id === selected?.id ? historyPage?.info : selected?.history;
   const rememberHistoryAnchor = (): void => {
     const scroll = scroller.current;
@@ -1133,13 +1159,43 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
     }
   };
 
+  const renderConversation = (c: ConversationSummary): ReactNode => {
+    const running = runningIds.includes(c.id);
+    const queued = queuedIds.includes(c.id);
+    const title = conversationDisplayTitle(c, Boolean(c.id === selected?.id ? input.trim() : drafts.current.get(c.id)?.trim()));
+    return <div key={c.id} className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
+      onContextMenu={event => {
+        event.preventDefault();
+        conversationMenuTriggerRef.current = event.currentTarget.querySelector<HTMLButtonElement>('.conversation-more');
+        setConversationMenu({ conversation: c, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 214)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220)) });
+      }}>
+      <button type="button" className="conversation-item-main" data-conversation-id={c.id}
+        aria-current={selected?.id === c.id ? 'true' : undefined}
+        title={`${title}\n${new Date(c.updatedAt).toLocaleDateString()} · ${c.messageCount}개 메시지`}
+        onClick={() => void loadConversation(c.id)}>
+        {c.pinned && <svg className="conversation-pin" aria-label="고정됨" role="img" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"><path d="m6 2 7 7-3 0-2 2-3-3 2-2V3ZM5 11l-3 3" /></svg>}
+        <span className="conversation-title">{title}</span>
+        {running && <span className={`conversation-state-dot ${queued ? 'queued' : 'working'}`} role="img" aria-label={queued ? '대기 중' : '실행 중'} title={queued ? '대기 중' : '실행 중'} />}
+      </button>
+      <button type="button" className="conversation-more" aria-label={`${c.title} 메뉴`} aria-haspopup="menu"
+        aria-expanded={conversationMenu?.conversation.id === c.id} title="대화 메뉴"
+        onClick={event => {
+          event.stopPropagation();
+          conversationMenuTriggerRef.current = event.currentTarget;
+          const rect = event.currentTarget.getBoundingClientRect();
+          setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
+        }}><svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><circle cx="3" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="13" cy="8" r="1"/></svg></button>
+    </div>;
+  };
+
   return (
     <div className={`conversation-layout ${navigationOpen ? 'navigation-open' : ''}`}>
-      <div className="chat-navigation"><button type="button" aria-label="프로젝트와 대화 목록 열기" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>☰ <span>{workspaces.find(w => w.id === projectScope)?.name ?? 'V.E.R.A'}</span></button><button type="button" onClick={() => void createConversation()} aria-label="새 대화 만들기">＋</button></div>
+      <div className="chat-navigation"><button type="button" aria-label="프로젝트와 대화 목록 열기" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>☰ <span>{space === 'discord' ? 'Discord' : selectedWorkspace?.name ?? 'V.E.R.A'}</span></button>{space === 'personal' && <button type="button" onClick={() => void createConversation()} aria-label="새 대화 만들기">＋</button>}</div>
       {navigationOpen && <button className="navigation-scrim" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)} />}
       <aside className="conversation-list">
         <button className="navigation-close" aria-label="프로젝트 목록 닫기" onClick={() => setNavigationOpen(false)}>닫기 ×</button>
         <div className="conversation-brand"><span className="conversation-brand-mark"><BrandIcon /></span><b>V.E.R.A</b></div>
+        {space === 'personal' && <div className="conversation-list-head"><Button onClick={() => void createConversation()}>＋ 새 대화</Button></div>}
         <div className="conversation-spaces" role="tablist" aria-label="대화 공간">
           {(['personal', 'discord'] as const).map(key => <button key={key} role="tab" aria-selected={space === key} onClick={() => {
             if (space === key) return;
@@ -1150,39 +1206,13 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
             setSelected(null); setMessages([]); setConversations([]); setConversationMenu(null); setShowArchived(false); setSpace(key);
           }}>{key === 'personal' ? '내 대화' : 'Discord'}</button>)}
         </div>
-        {space === 'personal' && <ProjectNavigation projects={workspaces} conversations={conversations} active={projectScope} running={runningIds} onSelect={id => void selectProject(id)} onChanged={setWorkspaces} />}
-        <div className="conversation-list-head">{space === 'personal' ? <Button onClick={() => void createConversation()}>＋ 새 대화</Button> : <span className="conversation-space-label">티켓 대화 기록</span>}<button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? '진행 중' : '보관함'}</button></div>
-        <div className="conversation-items">
-          {conversationGroups.map(group => <section className="conversation-project-group" key={group.id}>
-          <button type="button" className="conversation-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={!collapsedProjects.includes(group.id)} onClick={() => toggleProjectGroup(group.id)}>
-            <span aria-hidden="true">{collapsedProjects.includes(group.id) ? '▸' : '▾'}</span><b>{group.name}</b><small>{group.conversations.length}</small>
-            {group.conversations.some(c => runningIds.includes(c.id)) && <span className="conversation-running" aria-label="프로젝트 작업 진행 중">실행 중</span>}
-          </button>
-          {!collapsedProjects.includes(group.id) && group.conversations.map((c) => <div
-            key={c.id}
-            className={`conversation-item ${selected?.id === c.id ? 'active' : ''}`}
-            onContextMenu={(event) => {
-              event.preventDefault();
-              conversationMenuTriggerRef.current = event.currentTarget.querySelector<HTMLButtonElement>('.conversation-more');
-              setConversationMenu({ conversation: c, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 214)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220)) });
-            }}
-          ><button type="button" className="conversation-item-main" data-conversation-id={c.id} onClick={() => void loadConversation(c.id)}><span className="conversation-title">{c.pinned && <span className="conversation-pin">📌</span>}{conversationDisplayTitle(c, Boolean(c.id === selected?.id ? input.trim() : drafts.current.get(c.id)?.trim()))}</span><span className="conversation-meta">{runningIds.includes(c.id) ? <span className="conversation-running">{queuedIds.includes(c.id) ? '대기 중' : '실행 중'}</span> : <>{new Date(c.updatedAt).toLocaleDateString()} · {c.messageCount}개 메시지</>}</span></button><button
-            type="button"
-            className="conversation-more"
-            aria-label={`${c.title} 메뉴`}
-            aria-haspopup="menu"
-            aria-expanded={conversationMenu?.conversation.id === c.id}
-            title="대화 메뉴"
-            onClick={(event) => {
-              event.stopPropagation();
-              conversationMenuTriggerRef.current = event.currentTarget;
-              const rect = event.currentTarget.getBoundingClientRect();
-              setConversationMenu({ conversation: c, x: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 214)), y: Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - 220)) });
-            }}
-          >•••</button></div>)}
-          </section>)}
-          {visibleConversations.length === 0 && (busy ? <RunTimeline run={{ ...runProgress, status }} busy={busy} executionMode={selectedExecutionMode} compact /> : <div className="conversation-empty">{showArchived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord에서 티켓을 열면 이 공간에 대화가 쌓입니다.' : '이 프로젝트의 대화가 없습니다.'}</div>)}
-        </div>
+        <ProjectNavigation key={`${activePc?.id ?? 'local'}:${space}`} projects={workspaces} conversations={conversations}
+          active={selected?.workspaceId ?? projectScope} running={runningIds} collapsed={collapsedProjects} selectedId={selected?.id}
+          onToggle={toggleProjectGroup} onSelect={id => void selectProject(id)} onChanged={setWorkspaces}
+          onNewConversation={id => void createConversation(id)} renderConversation={renderConversation}
+          createdConversationId={createdConversationId}
+          space={space} archived={showArchived} onToggleArchived={() => setShowArchived(value => !value)}
+          emptyContent={busy ? <RunTimeline run={{ ...runProgress, status }} busy={busy} executionMode={selectedExecutionMode} compact /> : undefined} />
         {profile}
       </aside>
 

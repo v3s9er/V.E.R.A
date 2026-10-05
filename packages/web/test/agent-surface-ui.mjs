@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chromium } from '@playwright/test';
+import { chromium, expect } from '@playwright/test';
 import { fixtureServer } from './fixture-server.mjs';
 const output = await mkdtemp(join(tmpdir(), 'mrrobot-surface-'));
 const server = await fixtureServer();
@@ -19,7 +19,8 @@ try {
     await page.getByLabel('대화 이름').waitFor();
     if (width <= 900) await page.getByLabel('프로젝트와 대화 목록 열기').click();
     const list = page.locator('.conversation-items');
-    assert.equal(await list.locator('.conversation-item').count(), 62);
+    await list.locator('[data-project-id="design"]').getByRole('button', { name: /더 보기/ }).click();
+    await expect(list.locator('.conversation-item')).toHaveCount(62);
     assert.ok(await list.locator('.conversation-item').evaluateAll(items => items.every(el => el.getBoundingClientRect().height >= 40)), 'long history rows must not collapse');
     await list.locator('.conversation-item').last().scrollIntoViewIfNeeded();
     await list.locator('.conversation-item-main').last().click();

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chromium } from '@playwright/test';
+import { chromium, expect } from '@playwright/test';
 import { fixtureServer } from './fixture-server.mjs';
 
 // Starts a private, ephemeral Vite fixture server. An isolated Edge profile is
@@ -20,6 +20,7 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(server.origin + '/test/runtime-preview.html?embedded');
     await page.getByLabel('대화 이름').waitFor();
+    const nav = async () => { if (!await page.locator('.conversation-list').isVisible()) await page.getByLabel('프로젝트와 대화 목록 열기').click(); };
     const screenshot = async name => page.screenshot({ path: join(output, `${width}x${height}-${name}.png`) });
     const check = async name => {
       const geometry = await page.evaluate(() => {
@@ -42,11 +43,14 @@ try {
     };
     try {
       await check('idle');
-      if (width <= 900) await page.getByLabel('프로젝트와 대화 목록 열기').click();
-      await page.getByRole('button', { name: /사용 가이드.*1/ }).click();
-      await page.getByRole('button', { name: '＋ 새 대화', exact: true }).click().catch(async () => {
-        if (width <= 900) { await page.getByLabel('프로젝트와 대화 목록 열기').click(); await page.getByRole('button', { name: '＋ 새 대화', exact: true }).click(); } else throw Error('new conversation not reachable');
-      });
+      await nav();
+      await page.locator('[data-conversation-id="chat-docs"]').click();
+      await page.locator('.context-trigger').filter({ hasText: '사용 가이드' }).waitFor();
+      await nav();
+      await page.getByRole('button', { name: '＋ 새 대화', exact: true }).click();
+      await expect(page.getByLabel('대화 이름', { exact: true })).toHaveValue('새 대화');
+      await expect(page.locator('.chat-input')).toBeEnabled();
+      assert.equal(await page.evaluate(() => window.runtimeFixture.calls.filter(call => call.method === 'conversations.create').at(-1).params.workspaceId), 'docs', 'new conversation follows the selected project');
       await page.locator('.chat-input').fill('테스트 작업');
       await page.getByRole('button', { name: '보내기', exact: true }).click();
       await page.locator('.run-panel.phase-working').waitFor();
@@ -62,7 +66,7 @@ try {
       await page.getByRole('button', { name: '보내기', exact: true }).waitFor();
       await page.locator('.run-panel summary').click();
       await check('cancelled');
-      if (width <= 900) await page.getByLabel('프로젝트와 대화 목록 열기').click();
+      await nav();
       await page.getByLabel('프로젝트 만들기', { exact: true }).click();
       await page.getByLabel('프로젝트 이름', { exact: true }).fill('UI 테스트 프로젝트');
       await page.getByRole('button', { name: '프로젝트 만들기', exact: true }).last().click();

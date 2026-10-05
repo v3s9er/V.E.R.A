@@ -8,3 +8,39 @@
 .pending-execution-config { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 7px 0; color: #d5c6ef; font-size: 11px; }
 .pending-execution-config span { flex: 1; min-width: 180px; }
 .pending-execution-config button { min-height: 30px; }
+
+/* One quiet navigation rail: metadata lives in tooltips, not a second row. */
+div.conversation-layout .conversation-list .conversation-list-head { align-self: stretch; padding: 4px 12px 10px; }
+div.conversation-layout .conversation-list .conversation-list-head .btn { min-height: 38px; font-size: 12px; font-weight: 500; text-align: left; justify-content: flex-start; padding-inline: 12px; border-radius: 9px; }
+div.conversation-layout .conversation-list .conversation-spaces { align-self: stretch; margin: 0 12px 4px; padding: 2px; border-color: #ffffff08; background: #ffffff02; }
+div.conversation-layout .conversation-list .conversation-spaces button { min-height: 32px; padding: 5px 10px; font-size: 11px; }
+div.conversation-layout .conversation-list .conversation-item { min-width: 0; max-width: none; min-height: 40px; margin: 0; padding: 0; border-radius: 7px; }
+div.conversation-layout .conversation-list .conversation-item:hover { transform: none; border-color: transparent; background: #ffffff06; }
+div.conversation-layout .conversation-list .conversation-item.active { color: #eeebf7; }
+div.conversation-layout .conversation-list .conversation-item-main { display: flex; flex-direction: row; align-items: center; gap: 7px; min-height: 40px; padding: 8px 35px 8px 10px; }
+div.conversation-layout .conversation-list .conversation-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 20px; font-weight: 400; }
+div.conversation-layout .conversation-list .conversation-item.active .conversation-title { font-weight: 500; }
+div.conversation-layout .conversation-list .conversation-pin { flex: 0 0 12px; width: 12px; height: 12px; margin: 0; color: #aaa2bd; filter: none; }
+div.conversation-layout .conversation-list .conversation-more { top: 5px; right: 3px; width: 28px; min-width: 28px; height: 28px; min-height: 28px; padding: 6px; opacity: 0; border-radius: 6px; }
+div.conversation-layout .conversation-list .conversation-more svg { width: 16px; height: 16px; }
+div.conversation-layout .conversation-list .conversation-item:hover .conversation-more,
+div.conversation-layout .conversation-list .conversation-item:focus-within .conversation-more,
+div.conversation-layout .conversation-list .conversation-more[aria-expanded="true"] { opacity: 1; }
+div.conversation-layout .conversation-list .conversation-item-main:focus-visible,
+div.conversation-layout .conversation-list .conversation-more:focus-visible { outline: 2px solid #ab9cde; outline-offset: -2px; }
+.conversation-state-dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; }
+.conversation-state-dot.working { background: #8ac6af; box-shadow: 0 0 0 3px #8ac6af12; }
+.conversation-state-dot.queued { background: #c7ad7c; }
+/* The narrow-screen drawer is layer 190; its menu must stay above it. */
+div.conversation-layout .conversation-context-menu { z-index: 210; }
+@media (max-width: 900px) {
+  div.conversation-layout.navigation-open .conversation-list { gap: 0; }
+  div.conversation-layout .conversation-list .conversation-brand { height: 44px; padding-right: 80px; }
+  div.conversation-layout .conversation-list .navigation-close { position: absolute; top: 12px; right: 12px; min-height: 44px; margin: 0; }
+}
+@media (hover: none), (pointer: coarse) {
+  div.conversation-layout .conversation-list .conversation-more { opacity: .8; width: 44px; height: 44px; top: 0; right: 0; padding: 14px; }
+  div.conversation-layout .conversation-list .conversation-item-main { min-height: 44px; padding-right: 47px; }
+  div.conversation-layout .conversation-list .conversation-list-head .btn,
+  div.conversation-layout .conversation-list .conversation-spaces button { min-height: 44px; }
+}

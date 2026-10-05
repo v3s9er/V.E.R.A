@@ -1,15 +1,38 @@
-import { useState } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import type { ConversationSummary, WorkspaceInfo } from '@mr-robot/shared';
 import { useMrRobot } from '../state';
 import { Button, Input, Modal } from './ui';
 import './ProjectNavigation.css';
 
-export function ProjectNavigation({ projects, conversations, active, running = [], onSelect, onChanged }: {
+const PREVIEW_COUNT = 5;
+const UNASSIGNED_GROUP = '__unassigned__';
+
+function NavigationIcon({ name }: { name: 'search' | 'folder' | 'chevron' | 'plus' | 'more' | 'close' }) {
+  return <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name === 'search' && <><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></>}
+    {name === 'folder' && <path d="M2.5 5.5h5l2 2h8v8.5h-15zM2.5 5.5V4h5l2 2h8v1.5" />}
+    {name === 'chevron' && <path d="m7.5 5 5 5-5 5" />}
+    {name === 'plus' && <path d="M10 4v12M4 10h12" />}
+    {name === 'more' && <><circle cx="4" cy="10" r=".7" /><circle cx="10" cy="10" r=".7" /><circle cx="16" cy="10" r=".7" /></>}
+    {name === 'close' && <path d="m5 5 10 10M15 5 5 15" />}
+  </svg>;
+}
+
+export function ProjectNavigation({ projects, conversations, active, running = [], collapsed, selectedId, onToggle, onSelect, onChanged, onNewConversation, renderConversation, space, archived, onToggleArchived, emptyContent, createdConversationId }: {
   projects: WorkspaceInfo[]; conversations: ConversationSummary[]; active: string;
   running?: string[];
+  collapsed: string[]; selectedId?: string;
+  onToggle: (id: string) => void;
   onSelect: (id: string) => void; onChanged: (projects: WorkspaceInfo[]) => void;
+  onNewConversation: (workspaceId?: string) => void;
+  renderConversation: (conversation: ConversationSummary) => ReactNode;
+  space: 'personal' | 'discord'; archived: boolean; onToggleArchived: () => void;
+  emptyContent?: ReactNode; createdConversationId?: string;
 }) {
   const { client } = useMrRobot();
+  const [search, setSearch] = useState('');
+  const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
+  useEffect(() => { if (createdConversationId) setSearch(''); }, [createdConversationId]);
   const [editing, setEditing] = useState<WorkspaceInfo | 'new' | null>(null);
   const [name, setName] = useState(''), [path, setPath] = useState(''), [instructions, setInstructions] = useState('');
   const [error, setError] = useState(''), [saving, setSaving] = useState(false), [confirmRemove, setConfirmRemove] = useState(false);
@@ -23,7 +46,7 @@ export function ProjectNavigation({ projects, conversations, active, running = [
     try {
       const project = await client.call(editing === 'new' ? 'projects.create' : 'projects.update', { id: editing === 'new' ? undefined : editing.id, name, path, instructions }) as WorkspaceInfo;
       onChanged([...projects.filter(item => item.id !== project.id), project]);
-      setEditing(null); onSelect(project.id);
+      setEditing(null); setSearch(''); onSelect(project.id);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setSaving(false); }
   };
@@ -36,14 +59,74 @@ export function ProjectNavigation({ projects, conversations, active, running = [
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setSaving(false); }
   };
-  return <section className="project-navigation" aria-label="프로젝트">
-    <div className="project-nav-heading"><span>프로젝트</span>{client.isAdmin && <button title="프로젝트 만들기" aria-label="프로젝트 만들기" onClick={() => open('new')}>＋</button>}</div>
-    <button className={`project-row ${active === '*' ? 'selected' : ''}`} onClick={() => onSelect('*')}><span>▤</span><b>모든 대화</b><small>{conversations.length}</small></button>
-    <div className="project-nav-items">
-      {projects.map(project => <div className="project-nav-item" key={project.id}>
-        <button className={`project-row ${active === project.id ? 'selected' : ''}`} onClick={() => onSelect(project.id)} title={project.path}><span>▱</span><b>{project.name}</b>{conversations.some(c => c.workspaceId === project.id && running.includes(c.id)) && <span className="project-running" aria-label="작업 진행 중">●</span>}<small>{conversations.filter(c => c.workspaceId === project.id).length}</small></button>
-        {client.isAdmin && <button className="project-edit" title={`${project.name} 설정`} aria-label={`${project.name} 프로젝트 설정`} onClick={() => open(project)}>···</button>}
-      </div>)}
+  const query = search.trim().toLocaleLowerCase();
+  const inSpace = conversations.filter(conversation => (conversation.origin === 'discord') === (space === 'discord'));
+  const knownProjects = new Set(projects.map(project => project.id));
+  const groups: Array<{ id: string; name: string; project?: WorkspaceInfo; conversations: ConversationSummary[] }> = space === 'discord'
+    ? [{ id: '__discord__', name: '티켓 대화 기록', conversations: inSpace }]
+    : [
+      ...projects.map(project => ({ id: project.id, name: project.name, project, conversations: inSpace.filter(conversation => conversation.workspaceId === project.id) })),
+      { id: UNASSIGNED_GROUP, name: '일반 대화', conversations: inSpace.filter(conversation => !conversation.workspaceId || !knownProjects.has(conversation.workspaceId)) },
+    ].filter(group => group.id !== UNASSIGNED_GROUP || group.conversations.length > 0);
+  const matchingGroups = groups.map(group => ({
+    ...group,
+    conversations: !query || group.name.toLocaleLowerCase().includes(query)
+      ? group.conversations
+      : group.conversations.filter(conversation => conversation.title.toLocaleLowerCase().includes(query)),
+  })).filter(group => !query || group.conversations.length > 0 || group.name.toLocaleLowerCase().includes(query));
+  const newConversation = (groupId: string, workspaceId?: string) => {
+    setSearch('');
+    if (collapsed.includes(groupId)) onToggle(groupId);
+    onNewConversation(workspaceId);
+  };
+  const renderGroupConversations = (group: typeof groups[number]) => {
+    const expanded = expandedGroups.includes(group.id);
+    const recentIds = new Set([...group.conversations].sort((first, second) => second.updatedAt - first.updatedAt).slice(0, PREVIEW_COUNT).map(conversation => conversation.id));
+    const visible = query || expanded ? group.conversations : group.conversations.filter(conversation => (
+      recentIds.has(conversation.id) || conversation.id === selectedId || running.includes(conversation.id) || conversation.pinned
+    ));
+    const hiddenCount = group.conversations.length - visible.length;
+    return <>
+      {visible.map(conversation => <Fragment key={conversation.id}>{renderConversation(conversation)}</Fragment>)}
+      {!query && (hiddenCount > 0 || expanded && group.conversations.length > PREVIEW_COUNT) && <button type="button" className="project-show-more" aria-expanded={expanded} onClick={() => setExpandedGroups(current => expanded ? current.filter(id => id !== group.id) : [...current, group.id])}>
+        {expanded ? '대화 접기' : `대화 ${hiddenCount}개 더 보기`}
+      </button>}
+      {group.conversations.length === 0 && (query || !emptyContent) && <p className="project-empty">{query ? '일치하는 대화가 없습니다.' : archived ? '보관한 대화가 없습니다.' : space === 'discord' ? 'Discord 티켓 대화가 여기에 표시됩니다.' : '아직 대화가 없습니다.'}</p>}
+    </>;
+  };
+  return <section className="project-navigation" aria-label={space === 'personal' ? '프로젝트와 대화' : 'Discord 대화'}>
+    <div className="project-search">
+      <NavigationIcon name="search" />
+      <input type="search" aria-label="대화 검색" placeholder="대화 검색" value={search} onChange={event => setSearch(event.target.value)} />
+      {search && <button type="button" className="project-icon-button" aria-label="검색 지우기" onClick={() => setSearch('')}><NavigationIcon name="close" /></button>}
+    </div>
+    <div className="project-nav-heading">
+      <span>{space === 'personal' ? '프로젝트' : '티켓 대화'}</span>
+      <div className="project-heading-actions">
+        <button type="button" className="project-archive-button" onClick={onToggleArchived}>{archived ? '진행 중' : '보관함'}</button>
+        {space === 'personal' && client.isAdmin && <button type="button" className="project-icon-button" title="프로젝트 만들기" aria-label="프로젝트 만들기" onClick={() => open('new')}><NavigationIcon name="plus" /></button>}
+      </div>
+    </div>
+    <div className="conversation-items project-tree">
+      {matchingGroups.map(group => space === 'discord'
+        ? <div className="project-ticket-list" key={group.id}>{renderGroupConversations(group)}</div>
+        : <section className="conversation-project-group" data-project-id={group.id} key={group.id}>
+          <div className={`project-tree-heading ${active === group.id || group.conversations.some(conversation => conversation.id === selectedId) ? 'selected' : ''}`}>
+            <button type="button" className="project-group-toggle" aria-label={`${group.name} 대화 접기/펼치기`} aria-expanded={Boolean(query) || !collapsed.includes(group.id)} title={group.project?.path ?? group.name} onClick={() => { if (!query) onToggle(group.id); }}>
+              <span className={`project-chevron ${query || !collapsed.includes(group.id) ? 'expanded' : ''}`}><NavigationIcon name="chevron" /></span>
+              <span className="project-folder-icon"><NavigationIcon name="folder" /></span>
+              <span className="project-group-name">{group.name}</span>
+              {group.conversations.some(conversation => running.includes(conversation.id)) && <span className="project-running" role="img" aria-label="프로젝트 작업 진행 중" title="작업 진행 중" />}
+            </button>
+            {group.project && <div className="project-tree-actions">
+              <button type="button" className="project-icon-button" title={`${group.name}에서 새 대화`} aria-label={`${group.name}에서 새 대화`} onClick={() => newConversation(group.id, group.project!.id)}><NavigationIcon name="plus" /></button>
+              {client.isAdmin && <button type="button" className="project-icon-button project-edit" title={`${group.name} 설정`} aria-label={`${group.name} 프로젝트 설정`} onClick={() => open(group.project!)}><NavigationIcon name="more" /></button>}
+            </div>}
+          </div>
+          {(query || !collapsed.includes(group.id)) && <div className="project-conversations">{renderGroupConversations(group)}</div>}
+        </section>)}
+      {!query && inSpace.length === 0 && emptyContent}
+      {matchingGroups.length === 0 && (query || !emptyContent) && <p className="project-empty" role="status">{query ? '일치하는 대화가 없습니다.' : archived ? '보관한 대화가 없습니다.' : '프로젝트를 만들고 대화를 시작하세요.'}</p>}
     </div>
     <Modal open={editing !== null} onClose={() => { if (!saving) setEditing(null); }} title={editing === 'new' ? '새 프로젝트' : '프로젝트 설정'}>
       <form className="project-form" onSubmit={event => { event.preventDefault(); void save(); }}>

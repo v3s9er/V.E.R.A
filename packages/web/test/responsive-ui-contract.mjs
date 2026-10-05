@@ -122,7 +122,9 @@ requireAll(chat, [
   'role="menuitem"',
   "event.key === 'ArrowDown'",
   "event.key === 'ArrowUp'",
-  "window.addEventListener('scroll', close, true)",
+  "window.addEventListener('scroll', closeOnMovedAnchor, true)",
+  'Math.abs(next.top - anchorRect.top)',
+  'focus({ preventScroll: true })',
   'Math.max(8, Math.min(event.clientX, window.innerWidth - 214))',
 ], 'conversation menu can escape the viewport or lose keyboard navigation');
 
