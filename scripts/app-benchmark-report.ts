@@ -18,8 +18,9 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
   if (!plan || !Array.isArray(plan.schedule) || !plan.schedule.length || plan.schedule.length > 10_000
     || !Array.isArray(plan.arms) || !plan.arms.length || new Set(plan.arms).size !== plan.arms.length
     || plan.arms.some((arm: unknown) => !['single', 'adaptive', 'ontology-adaptive'].includes(arm as string))
-    || !['aime', 'relations', 'arc2'].includes(plan.suite)
-    || (plan.suite !== 'relations' && plan.arms.includes('ontology-adaptive'))
+    || !['aime', 'relations', 'arc2', 'knowledge-recall'].includes(plan.suite)
+    || (!['relations', 'knowledge-recall'].includes(plan.suite) && plan.arms.includes('ontology-adaptive'))
+    || (plan.suite === 'knowledge-recall' && (plan.arms.length !== 1 || plan.arms[0] !== 'ontology-adaptive'))
     || typeof plan.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(plan.model)
     || !['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(plan.effort)
     || !Array.isArray(plan.tasks) || !plan.tasks.length || plan.tasks.length > 10_000
@@ -27,9 +28,14 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
     || envelope.planHash !== sha256(canonicalJson(plan)) || report?.planHash !== envelope.planHash
     || !Array.isArray(report.samples)) throw new Error('Invalid or mismatched evaluation evidence');
   const taskIds = new Set<string>();
+  const knowledgeInventory = new Map<string, { relationCount: number; relationsSha256: string }>();
   for (const task of plan.tasks) {
     if (typeof task?.id !== 'string' || !task.id || task.id.length > 200 || taskIds.has(task.id)) throw new Error('Invalid task inventory');
     taskIds.add(task.id);
+    if (plan.suite === 'knowledge-recall') {
+      if (!tokenCount(task.relationCount) || typeof task.relationsSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.relationsSha256)) throw new Error('Invalid knowledge-recall inventory');
+      knowledgeInventory.set(task.id, { relationCount: task.relationCount, relationsSha256: task.relationsSha256 });
+    }
   }
   const planned = new Map<string, Item>();
   for (const item of plan.schedule as Item[]) {
@@ -50,6 +56,13 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
       || !measurement(row.durationMs) || !(row.firstTextMs === null || measurement(row.firstTextMs))) throw new Error('Invalid or duplicate observed sample');
     if (row.completed && (row.route?.model !== plan.model || row.route?.effort !== plan.effort || row.nativeRouteObserved !== true
       || row.savedFinalMatches !== true || row.streamMatches !== true)) throw new Error('Observed execution invariants differ from plan');
+    if (row.completed && plan.suite === 'knowledge-recall') {
+      const expected = knowledgeInventory.get(row.taskId)!;
+      const setup = row.memorySetup;
+      if (setup?.verified !== true || setup.expectedRelations !== expected.relationCount
+        || setup.receiptCount !== expected.relationCount || setup.storedCount !== expected.relationCount
+        || setup.relationsSha256 !== expected.relationsSha256) throw new Error('Observed knowledge setup differs from plan');
+    }
     if (!Array.isArray(row.agentEvents) || row.agentEvents.some((event: any) => event.model !== undefined && event.model !== plan.model)) throw new Error('Helper model differs from plan');
     const usage = row.usage;
     if (!usage || !['reported', 'capped', 'reported-positive-aggregate', 'unknown'].includes(usage.reportStatus)) throw new Error('Invalid usage status');
@@ -107,7 +120,9 @@ export function renderAppBenchmarkReport(envelope: any, report: any): string {
     '| --- | ---: | ---: | ---: | ---: |');
   for (const arm of summary.arms) lines.push(`| ${cell(arm.arm)} | ${arm.consistent} / ${arm.independentTaskCount} (${arm.repetitions}회 반복) | ${number(arm.firstTextP50Ms === null ? null : arm.firstTextP50Ms / 1000, 2)}초 (${arm.firstTextCount}) | ${arm.usageKnown} / ${arm.expected} | ${arm.helperRunsObserved} / ${arm.expected} |`);
   lines.push('', '## 해석 범위', '',
-    summary.suite === 'relations'
+    summary.suite === 'knowledge-recall'
+      ? '- 저장 지식 검색의 합성 기능 회귀 검사입니다. 동일한 모델·설정·문제로 앱 버전 간 회귀를 비교하기 위한 것이며 실행 모드의 우열이나 공개 벤치마크 점수를 나타내지 않습니다.'
+      : summary.suite === 'relations'
       ? '- 합성 관계 문제의 기능 회귀 검사이며 공개 대회·리더보드 점수나 일반 추론 성능 점수가 아닙니다.'
       : '- 공개 문제의 로컬 회귀 검사이며 공식 대회·리더보드 점수가 아닙니다. 문제의 사전 학습 포함 여부는 보장하지 않습니다.',
     '- 반복 실행은 새로운 독립 문제가 아닙니다. 가장 잘 나온 답만 고르는 pass@k가 아니라 각 실행을 그대로 계산합니다.',

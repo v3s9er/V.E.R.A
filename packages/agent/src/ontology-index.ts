@@ -2,8 +2,18 @@ import type { MemoryItem } from '@mr-robot/shared';
 
 // Literal values such as status=ready must not become graph join keys.
 export const entityEdges: ReadonlySet<string> = new Set(['is_a', 'subclass_of', 'part_of', 'depends_on', 'requires', 'disjoint_with', 'owner', 'located_in']);
-const ascii = (value: string) => /^[a-z0-9_-]+$/.test(value);
+export const indexedKnowledgeTerm = (value: string) => /^[a-z0-9_-]+$/.test(value) || /[./]/.test(value);
 const normalized = (value: string) => value.normalize('NFKC').toLowerCase();
+// Queries keep compound identifiers atomic: @scope/missing must not silently
+// become a search for every @scope package. Index both the full identifier and
+// its components so an intentional broad query such as "scope" still works.
+const compoundTokens = (value: string): string[] =>
+  value.match(/@?[\p{L}\p{N}_-]+(?:[./]@?[\p{L}\p{N}_-]+)+|[\p{L}\p{N}_-]+/gu) ?? [];
+export const knowledgeQueryTokens = (value: string): string[] => compoundTokens(normalized(value));
+/** Callers supply normalized text. Plain records keep the original cheap path. */
+export const knowledgeIndexTokens = (value: string): string[] =>
+  [...new Set([...value.split(/[^\p{L}\p{N}_-]+/u).filter(Boolean),
+    ...(/[./]/.test(value) ? compoundTokens(value).filter(token => /[./]/.test(token)) : [])])];
 type Entry = { item: MemoryItem; entity: string; rest: string };
 export type KnowledgeMatch = { item: MemoryItem; score: number; entityScore: number };
 
@@ -29,7 +39,7 @@ export class KnowledgeIndex {
       bytes += 16;
     };
     const tokenize = (value: string, postings: Map<string, Set<number>>, index: number) => {
-      for (const token of new Set(value.split(/[^\p{L}\p{N}_-]+/u).filter(ascii))) {
+      for (const token of knowledgeIndexTokens(value).filter(indexedKnowledgeTerm)) {
         let members = postings.get(token);
         if (!members) { members = new Set(); postings.set(token, members); bytes += 192 + token.length * 2; }
         members.add(index); bytes += 48;
@@ -95,7 +105,7 @@ export class KnowledgeIndex {
     const entityScores = new Map<number, number>();
     const add = (scores: Map<number, number>, index: number, value: number) => scores.set(index, (scores.get(index) ?? 0) + value);
     for (const term of queryTerms) {
-      if (ascii(term)) {
+      if (indexedKnowledgeTerm(term)) {
         for (const index of this.entityTokens.get(term) ?? []) add(entityScores, index, 4);
       } else {
         // Substring recall, including Korean particles, cannot be replaced by
@@ -113,15 +123,19 @@ export class KnowledgeIndex {
       const entry = this.entries[index];
       let score = entityScore;
       for (const term of queryTerms) {
-        if (ascii(term) ? !this.entityTokens.get(term)?.has(index) && this.restTokens.get(term)?.has(index)
+        if (indexedKnowledgeTerm(term) ? !this.entityTokens.get(term)?.has(index) && this.restTokens.get(term)?.has(index)
           : !entry.entity.includes(term) && entry.rest.includes(term)) score++;
       }
       return { item: entry.item, score, entityScore };
     });
     if (entityOnly) return [];
     const textScores = new Map<number, number>();
-    for (const term of queryTerms) {
-      if (ascii(term)) for (const index of this.restTokens.get(term) ?? []) add(textScores, index, 1);
+    // If a named compound identifier is absent, generic words such as "status"
+    // must not turn the query into a dump of unrelated records. A document that
+    // actually mentions the full identifier remains eligible for text recall.
+    const identifiers = queryTerms.filter(term => /[./]/.test(term));
+    for (const term of identifiers.length ? identifiers : queryTerms) {
+      if (indexedKnowledgeTerm(term)) for (const index of this.restTokens.get(term) ?? []) add(textScores, index, 1);
       else for (let index = 0; index < this.entries.length; index++) if (this.entries[index].rest.includes(term)) add(textScores, index, 1);
     }
     return [...textScores].map(([index, score]) => ({ item: this.entries[index].item, score, entityScore: 0 }));

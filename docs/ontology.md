@@ -90,6 +90,11 @@ context has an input-token cost; usefulness and latency must be measured.
 - All scoped active assertions are eligible for indexed matching; no initial
   recency cutoff hides old relevant facts. At most 24 relevant seeds, 128
   connected assertions, six retrieval hops, eight closure rounds and 512 facts.
+  Starting in 0.7.8, directly named entities and their functional values are
+  considered before downstream branches. Narrow frontiers then precede broad
+  membership hubs, so unrelated siblings do not consume the whole assertion
+  budget before a short dependency proof is reached. This is a bounded retrieval
+  heuristic, not guaranteed complete graph search; dropped branches stay partial.
 - Every cyclic asserted premise is detected within the admitted graph. When
   necessary, one additional bounded clean closure recovers an independent valid
   proof. Invalid-only paths remain unresolved; alternative paths are not enumerated.
@@ -109,6 +114,12 @@ context has an input-token cost; usefulness and latency must be measured.
   combined rebuild path; observed facts never become an implicit override.
 - Korean particle forms keep the original token and an additional stem; entity
   IDs are never merged or rewritten. Cache-hit timing reflects the current lookup.
+- Scoped packages, slash paths and dotted identifiers are atomic query terms:
+  `@example/api` no longer seeds every `@example/*` record, and a missing identifier
+  cannot fall back to unrelated generic `status` text. Intentional component
+  searches still work. Exact mentions in document text remain eligible. Colons
+  remain prose separators, not identifier glue. The extra index postings have a
+  cold-build cost; shorter evidence packets are not a measured model-token claim.
 - Private telemetry records counts, bytes, retrieval duration and truncation, not
   fact/provenance bodies. Counts describe the selected graph, which may exceed the
   rendered subset under the prompt budget. The UI reports unresolved conflicts.

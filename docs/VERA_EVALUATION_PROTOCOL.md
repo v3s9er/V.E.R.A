@@ -229,6 +229,13 @@ These are design references, not imported implementations or promised effect siz
 
 ## Metadata-only report
 
+For the three-case stored-knowledge regression added in 0.7.8, see
+[the memory-only recall protocol](performance-evaluation.md#stored-knowledge-recall-regression).
+It compares frozen application versions using the same `ontology-adaptive` arm,
+not single-model versus orchestration performance. Facts are seeded through scoped
+memory RPC and verified before inference; no facts or answers are repeated in the
+task prompt. Its small smoke sample does not satisfy a general performance claim.
+
 ```powershell
 node --import tsx scripts/app-benchmark-report.ts PLAN.json REPORT.json NEW-SUMMARY.md
 ```

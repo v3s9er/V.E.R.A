@@ -8,14 +8,16 @@ export type Arm = 'single' | 'adaptive' | 'ontology-adaptive';
 export interface Relation { subject: string; predicate: string; object: string }
 export interface BenchmarkTask {
   id: string; prompt: string; relations: Relation[]; expected: number | string | ArcGrid[];
-  sourceSha256?: string; testInputs?: number;
+  sourceSha256?: string; testInputs?: number; recallCase?: 'exact' | 'absent' | 'hub'; answerLines?: number;
 }
 export interface BenchmarkOptions {
-  appPath: string; expectedVersion: string; suite: 'aime' | 'relations' | 'arc2'; cache?: string; year: number;
+  appPath: string; expectedVersion: string; suite: 'aime' | 'relations' | 'arc2' | 'knowledge-recall'; cache?: string; year: number;
   model: string; effort: string; arms: Arm[]; repetitions: number; deadlineMs: number;
   prefix: string; cli: string; planOnly: boolean; preflightOnly: boolean; allowUsage: boolean; seed: string;
   ids?: string[]; tokenPolicy: 'quality' | 'audit-only'; planHash?: string; arcSelection?: 'development' | 'locally-unused';
 }
+// Stay well below the product's 120 RPC messages per 10-second window during setup.
+export const KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS = 250;
 export const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -35,10 +37,11 @@ export function parseOptions(argv: string[]): BenchmarkOptions {
   if (!['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(raw.effort)) throw new Error('Explicit reasoning effort required');
   if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(raw['expected-version'])) throw new Error('Exact application version required');
   const suite = raw.suite ?? 'aime';
-  if (!['aime', 'relations', 'arc2'].includes(suite)) throw new Error('Unknown suite');
-  const arms = (raw.arms ?? (suite === 'relations' ? 'single,adaptive,ontology-adaptive' : 'single,adaptive')).split(',') as Arm[];
+  if (!['aime', 'relations', 'arc2', 'knowledge-recall'].includes(suite)) throw new Error('Unknown suite');
+  const arms = (raw.arms ?? (suite === 'knowledge-recall' ? 'ontology-adaptive' : suite === 'relations' ? 'single,adaptive,ontology-adaptive' : 'single,adaptive')).split(',') as Arm[];
   if (!arms.length || new Set(arms).size !== arms.length || arms.some(arm => !['single', 'adaptive', 'ontology-adaptive'].includes(arm))) throw new Error('Invalid benchmark arms');
-  if (suite !== 'relations' && arms.includes('ontology-adaptive')) throw new Error('AIME/ARC have no supplied ontology: use the separate relations suite');
+  if (suite === 'knowledge-recall' && (arms.length !== 1 || arms[0] !== 'ontology-adaptive')) throw new Error('Knowledge recall compares application versions using only ontology-adaptive');
+  if (['aime', 'arc2'].includes(suite) && arms.includes('ontology-adaptive')) throw new Error('AIME/ARC have no supplied ontology: use the separate relations suite');
   const integer = (name: string, fallback: number, min: number, max: number) => {
     const value = raw[name] === undefined ? fallback : Number(raw[name]);
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Invalid --${name}`);
@@ -48,20 +51,21 @@ export function parseOptions(argv: string[]): BenchmarkOptions {
   const planOnly = raw['plan-only'] === 'yes', preflightOnly = raw['preflight-only'] === 'yes', allowUsage = raw['allow-account-usage'] === 'yes';
   if (planOnly && preflightOnly) throw new Error('Choose one non-inference mode');
   if (!planOnly && !preflightOnly && !allowUsage) throw new Error('Execution requires --allow-account-usage yes');
-  if (suite !== 'relations' && !raw.cache) throw new Error('Pinned --cache required for public tasks');
+  if (['aime', 'arc2'].includes(suite) && !raw.cache) throw new Error('Pinned --cache required for public tasks');
+  if (suite === 'knowledge-recall' && (raw.cache || raw.year)) throw new Error('Knowledge recall uses generated memory facts; do not supply --cache or --year');
   const tokenPolicy = raw['token-policy'] ?? 'audit-only';
   if (!['quality', 'audit-only'].includes(tokenPolicy)) throw new Error('Invalid token policy');
   if (tokenPolicy !== 'audit-only' && arms.some(arm => arm !== 'single')) throw new Error('Adaptive helpers require --token-policy audit-only in the current product');
   if (raw['plan-hash'] && !/^[a-f0-9]{64}$/.test(raw['plan-hash'])) throw new Error('Invalid plan hash');
   const ids = raw.ids?.split(',');
   if (ids && (!ids.length || new Set(ids).size !== ids.length || ids.some(id => !(suite === 'arc2' ? /^[a-f0-9]{8}$/ : /^\d{4}-AIME-(I|II)-\d{2}$/).test(id)))) throw new Error('Invalid benchmark IDs');
-  if (ids && suite === 'relations') throw new Error('--ids is only for public development subsets');
+  if (ids && ['relations', 'knowledge-recall'].includes(suite)) throw new Error('--ids is only for public development subsets');
   if (suite === 'arc2') {
     if (!['development', 'locally-unused'].includes(raw['arc-selection'])) throw new Error('Explicit --arc-selection required');
     if ((raw['arc-selection'] === 'development') !== Boolean(ids)) throw new Error('Only ARC development selection requires explicit --ids');
     if (raw.year || raw.seed) throw new Error('ARC selection is frozen in its prepared cache; do not supply --year or --seed');
   } else if (raw['arc-selection']) throw new Error('--arc-selection is only for ARC');
-  return { appPath: resolve(raw['app-path']), expectedVersion: raw['expected-version'], suite: suite as BenchmarkOptions['suite'], cache: raw.cache && resolve(raw.cache), year: integer('year', 2022, 2022, 2024), model: raw.model, effort: raw.effort, arms, repetitions: integer('repetitions', 2, 1, 20), deadlineMs: integer('timeout-ms', suite === 'arc2' ? 600_000 : 300_000, 10_000, 1_200_000), prefix: resolve(raw['out-prefix']), cli: raw.cli ?? 'codex', planOnly, preflightOnly, allowUsage, seed: raw.seed ?? 'vera-relations-v1', ids, tokenPolicy: tokenPolicy as BenchmarkOptions['tokenPolicy'], planHash: raw['plan-hash'], arcSelection: raw['arc-selection'] as BenchmarkOptions['arcSelection'] };
+  return { appPath: resolve(raw['app-path']), expectedVersion: raw['expected-version'], suite: suite as BenchmarkOptions['suite'], cache: raw.cache && resolve(raw.cache), year: integer('year', 2022, 2022, 2024), model: raw.model, effort: raw.effort, arms, repetitions: integer('repetitions', 2, 1, 20), deadlineMs: integer('timeout-ms', suite === 'arc2' ? 600_000 : 300_000, 10_000, 1_200_000), prefix: resolve(raw['out-prefix']), cli: raw.cli ?? 'codex', planOnly, preflightOnly, allowUsage, seed: raw.seed ?? (suite === 'knowledge-recall' ? 'vera-knowledge-recall-v1' : 'vera-relations-v1'), ids, tokenPolicy: tokenPolicy as BenchmarkOptions['tokenPolicy'], planHash: raw['plan-hash'], arcSelection: raw['arc-selection'] as BenchmarkOptions['arcSelection'] };
 }
 
 function regularFile(path: string): void {
@@ -122,8 +126,58 @@ export function relationTasks(seed: string): BenchmarkTask[] {
     return { id: `relations-${index + 1}-${suffix}`, relations, expected: 'Q1: YES\nQ2: UNKNOWN\nQ3: CONFLICT\nQ4: UNKNOWN', prompt: `Use only these supplied dependency facts. depends_on is transitive; part_of alone does not imply depends_on. owner is single-valued and different assertions remain CONFLICT; no last-write-wins. Missing information means UNKNOWN.\n${relations.map(r => `${r.subject} | ${r.predicate} | ${r.object}`).join('\n')}\nDoes ${a} transitively depend on ${c}? Q1: YES, NO or UNKNOWN.\nDoes ${d} depend on ${c}? Q2: YES, NO or UNKNOWN.\nIs the owner of ${a} uniquely resolved? Q3: YES or CONFLICT.\nDo we know the owner of ${c}? Q4: YES or UNKNOWN.\nOutput exactly four Q1: VALUE through Q4: VALUE lines. You may inspect only supplied facts and the empty scratch workspace, and use configured helpers if worthwhile. No network, external files, answer keys or other conversations.` };
   });
 }
+/** Facts are seeded through scoped memory.add only; none are rendered into the question. */
+export function knowledgeRecallTasks(seed: string): BenchmarkTask[] {
+  const rules = 'Use only stored facts scoped to this project and conversation. Match complete entity identifiers exactly; similar names are different entities. depends_on is transitive; part_of alone does not imply depends_on. Different assertions for a single-valued status or owner remain CONFLICT; no last-write-wins. Report UNKNOWN for any unsupported claim. Do not substitute other entities or list unrelated facts. Local scratch and configured read-only helpers are allowed. No network, external files, other projects/conversations or answer keys.';
+  const tasks: BenchmarkTask[] = [];
+  for (const kind of ['exact', 'absent'] as const) {
+    const suffix = sha256(`${seed}:${kind}`).slice(0, 8), scope = `@recall_${suffix}`;
+    const target = `${scope}/name`, query = kind === 'exact' ? target : `${scope}/missing`;
+    const relations = [{ subject: target, predicate: 'status', object: 'blocked' },
+      ...Array.from({ length: 100 }, (_, i) => ({ subject: `${target}${i}`, predicate: 'status', object: 'ready' }))];
+    tasks.push({ id: `knowledge-recall-${kind}-${suffix}`, recallCase: kind, answerLines: 2, relations,
+      expected: `Q1: ${kind === 'exact' ? 'blocked' : 'UNKNOWN'}\nQ2: UNKNOWN`,
+      prompt: `${rules}\nFor ${query}, what status is supported by stored facts? Q1: the exact stored value, CONFLICT or UNKNOWN.\nFor that same entity, what owner is supported? Q2: the exact stored value, CONFLICT or UNKNOWN.\nOutput exactly two lines: Q1: VALUE and Q2: VALUE. Preserve the case of stored values.` });
+  }
+  const suffix = sha256(`${seed}:hub`).slice(0, 8), scope = `@recall_${suffix}`;
+  const target = `${scope}/service`, middle = `${scope}/queue`, core = `${scope}/store`, leaf = `${scope}/leaf`, hub = `${scope}/membership_${suffix}`;
+  const relations = [
+    { subject: target, predicate: 'depends_on', object: middle }, { subject: middle, predicate: 'depends_on', object: core },
+    { subject: core, predicate: 'depends_on', object: leaf }, { subject: leaf, predicate: 'status', object: 'blocked' },
+    { subject: leaf, predicate: 'status', object: 'ready' }, { subject: target, predicate: 'part_of', object: hub },
+    ...Array.from({ length: 200 }, (_, i) => ({ subject: `${scope}/sibling${i}`, predicate: 'part_of', object: hub })),
+  ];
+  tasks.push({ id: `knowledge-recall-hub-${suffix}`, recallCase: 'hub', answerLines: 3, relations,
+    expected: 'Q1: YES\nQ2: CONFLICT\nQ3: UNKNOWN',
+    prompt: `${rules}\nStarting only at ${target}, does the stored depends_on graph support a dependency path of exactly three edges? Q1: YES or UNKNOWN.\nFor the terminal entity reached by that path, is its status uniquely resolved? Q2: YES, CONFLICT or UNKNOWN.\nFor the starting entity, what owner is supported? Q3: the exact stored value, CONFLICT or UNKNOWN.\nOutput exactly three lines: Q1: VALUE, Q2: VALUE and Q3: VALUE.` });
+  return tasks;
+}
+
+/** Receipt + list read-back verifies setup independently of retrieval success or inference count. */
+export function verifyKnowledgeRecallSetup(relations: readonly Relation[], receipts: readonly any[], stored: unknown,
+  scope: { workspaceId: string; conversationId: string }) {
+  const matches = (item: any, relation: Relation) => item && typeof item.id === 'string' && item.id.length > 0
+    && item.workspaceId === scope.workspaceId && item.conversationId === scope.conversationId
+    && item.relationMode === 'fact' && !item.supersededBy && canonicalJson(item.relation) === canonicalJson(relation);
+  if (!relations.length || receipts.length !== relations.length || new Set(receipts.map(item => item?.id)).size !== relations.length
+    || receipts.some((item, i) => !matches(item, relations[i])) || !Array.isArray(stored)) throw new Error('memory_setup_mismatch');
+  const scoped = stored.filter(item => item && (!item.workspaceId || item.workspaceId === scope.workspaceId)
+    && (!item.conversationId || item.conversationId === scope.conversationId));
+  if (scoped.length !== relations.length || receipts.some((receipt, i) => {
+    const rows = scoped.filter(item => item.id === receipt.id);
+    return rows.length !== 1 || !matches(rows[0], relations[i]);
+  })) throw new Error('memory_setup_mismatch');
+  return { verified: true as const, expectedRelations: relations.length, receiptCount: receipts.length, storedCount: scoped.length,
+    relationsSha256: sha256(canonicalJson(relations)) };
+}
+
+export function assertKnowledgeTelemetry(suite: BenchmarkOptions['suite'], arm: Arm, knowledge: any): void {
+  // Missing-entity recall must be allowed to have zero asserted and inferred facts.
+  if (suite === 'relations' && arm === 'ontology-adaptive' && !(knowledge?.asserted > 0 && knowledge?.inferred > 0)) throw new Error('ontology_not_observed');
+}
 export function loadTasks(options: BenchmarkOptions): BenchmarkTask[] {
   if (options.suite === 'relations') return relationTasks(options.seed);
+  if (options.suite === 'knowledge-recall') return knowledgeRecallTasks(options.seed);
   if (options.suite === 'arc2') {
     const cache = readArcCache(options.cache!);
     if (cache.selection.kind !== options.arcSelection) throw new Error('ARC selection label differs from prepared cache');
@@ -138,11 +192,17 @@ export function loadTasks(options: BenchmarkOptions): BenchmarkTask[] {
 export function gradeTask(task: BenchmarkTask, text: string): { passed: boolean; failure: string | null } {
   if (Array.isArray(task.expected)) return gradeArc(text, task.expected);
   if (typeof task.expected === 'number') { const result = gradeAime(text, task.expected); return { passed: result.passed, failure: result.failure }; }
-  return { passed: text.trim() === task.expected, failure: text.trim() === task.expected ? null : /^Q1: .+\nQ2: .+\nQ3: .+\nQ4: .+$/.test(text.trim()) ? 'wrong_answer' : 'answer_format' };
+  const format = task.answerLines ? new RegExp(`^${Array.from({ length: task.answerLines }, (_, i) => `Q${i + 1}: .+`).join('\n')}$`) : /^Q1: .+\nQ2: .+\nQ3: .+\nQ4: .+$/;
+  return { passed: text.trim() === task.expected, failure: text.trim() === task.expected ? null : format.test(text.trim()) ? 'wrong_answer' : 'answer_format' };
 }
 export function publicTask(task: BenchmarkTask) { return { id: task.id, promptSha256: sha256(task.prompt), relationsSha256: sha256(canonicalJson(task.relations)),
+  ...(task.recallCase ? { recallCase: task.recallCase, relationCount: task.relations.length, representation: 'scoped-memory-only' } : {}),
   ...(task.sourceSha256 ? { sourceSha256: task.sourceSha256, testInputs: task.testInputs, representation: 'text-grid' } : {}) }; }
 export function datasetProvenance(options: BenchmarkOptions) {
+  if (options.suite === 'knowledge-recall') return { source: 'independently-generated-knowledge-recall-v1', seed: options.seed,
+    split: 'synthetic-functional-regression', heldOut: false, taskCount: 3, representation: 'scoped-memory-only',
+    comparison: 'same suite and ontology-adaptive arm across frozen application versions; not mode superiority',
+    contamination: 'Deterministic synthetic fixtures for three known recall failure modes; repetitions are not independent tasks or a general accuracy benchmark.' };
   if (options.suite === 'arc2') {
     const cache = readArcCache(options.cache!);
     return { source: ARC_SOURCE, revision: ARC_REVISION, split: options.arcSelection === 'locally-unused' ? 'predeclared-locally-unused-public-subset' : 'explicit-development-subset', heldOut: false,

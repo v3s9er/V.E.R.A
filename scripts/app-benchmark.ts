@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { ConfigStore } from '../packages/agent/src/config.js';
-import { assertFreshOutputs, assertWorkspacePermission, canonicalJson, datasetProvenance, gradeTask, hashFiles, loadTasks, parseOptions, publicTask, schedule, sha256, usageCounts, validateAppPath, type Arm } from './app-benchmark-protocol.js';
+import { KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS, assertFreshOutputs, assertKnowledgeTelemetry, assertWorkspacePermission, canonicalJson, datasetProvenance, gradeTask, hashFiles, loadTasks, parseOptions, publicTask, schedule, sha256, usageCounts, validateAppPath, verifyKnowledgeRecallSetup, type Arm } from './app-benchmark-protocol.js';
 
 // Reviewed against App.tsx's wizardVersion < 5 gate, DependencySetup.tsx's
 // auto-install guard and server.ts dependencies.complete. This affects only the
@@ -20,7 +20,7 @@ const REFERENCE_FILES = ['packages/agent/src/server/server.ts', 'packages/agent/
 
 export async function main(argv: string[]): Promise<void> {
   if (argv.length === 1 && argv[0] === '--help') {
-    console.log('Actual V.E.R.A application benchmark (private local regression, not an official score).\nRequired: --app-path STAGE_OR_EXE --expected-version VERSION --model EXACT_ID --effort high --out-prefix NEW_PREFIX\nAIME: --suite aime --cache FILE --year 2022 [--ids ID,ID]; relations: --suite relations [--seed NAME]\nARC: --suite arc2 --cache FILE --arc-selection locally-unused|development [--ids ID,ID for development]\nOptional: --arms single,adaptive --repetitions 2 --timeout-ms 300000 (ARC default 600000) --token-policy audit-only --cli codex\nPlanning: --plan-only yes (no launch or inference). Preflight: --preflight-only yes (app launch/catalog, no inference). Execution: --allow-account-usage yes [--plan-hash SHA256]. A new output prefix is required for each invocation.');
+    console.log('Actual V.E.R.A application benchmark (private local regression, not an official score).\nRequired: --app-path STAGE_OR_EXE --expected-version VERSION --model EXACT_ID --effort high --out-prefix NEW_PREFIX\nAIME: --suite aime --cache FILE --year 2022 [--ids ID,ID]; relations: --suite relations [--seed NAME]\nARC: --suite arc2 --cache FILE --arc-selection locally-unused|development [--ids ID,ID for development]\nKnowledge recall: --suite knowledge-recall [--seed NAME]; only ontology-adaptive; 3 memory-only cases, default 2 repetitions (6 calls). Compare frozen application versions with the same seed/settings, not execution modes.\nOptional: --arms single,adaptive --repetitions 2 --timeout-ms 300000 (ARC default 600000) --token-policy audit-only --cli codex\nPlanning: --plan-only yes (no launch or inference). Preflight: --preflight-only yes (app launch/catalog, no inference). Execution: --allow-account-usage yes [--plan-hash SHA256]. A new output prefix is required for each invocation.');
     return;
   }
   const options = parseOptions(argv), appInput = validateAppPath(options.appPath), tasks = loadTasks(options);
@@ -41,7 +41,10 @@ export async function main(argv: string[]): Promise<void> {
     permissionMode: 'workspace', daybreakEnabled: false, concurrency: 1, retries: 0, officialScore: false,
     dependencyWizardVersion: BENCHMARK_DEPENDENCY_WIZARD_VERSION, dependencyInstallation: 'disabled-by-isolated-first-run-state',
     shell: 'Local development Electron loads the frozen stage or installed app.asar with a fresh user-data-dir; the installed executable is not opened.',
-    ontology: options.suite === 'relations' ? 'Same given facts in every prompt; extra scoped fact retrieval only in ontology-adaptive.' : 'not-applicable',
+    ontology: options.suite === 'knowledge-recall' ? 'Facts only in project/conversation-scoped memory.add records; receipts and list read-back verified before chat.start. No facts or reference answers in task prompts.'
+      : options.suite === 'relations' ? 'Same given facts in every prompt; extra scoped fact retrieval only in ontology-adaptive.' : 'not-applicable',
+    ...(options.suite === 'knowledge-recall' ? { comparison: 'Frozen application versions using identical task seed, model, effort, repetitions and ontology-adaptive arm. No execution-mode superiority claim.',
+      memorySetupPacingMs: KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS, memorySetupTiming: 'Wait before every memory.add RPC, outside inference duration and deadline.' } : {}),
     limits: ['Fresh isolated app home and workspace per sample; no answer keys in model requests or workspace.', 'Native tools use normal product permissions, not an OS sandbox; external retrieval is forbidden by task instructions.', 'AB/BA order reverses per repetition; three arms rotate and reverse. Caches/provider load are not completely controlled.', 'Same model, effort, token policy and wall deadline; adaptive can spend more total tokens. Not equal compute or a claim of held-out generalization.'] };
   const planHash = sha256(canonicalJson(plan));
   if (options.planHash && options.planHash !== planHash) throw new Error('Frozen plan hash mismatch');
@@ -170,6 +173,7 @@ export async function main(argv: string[]): Promise<void> {
     writeFileSync(`${options.prefix}.progress.jsonl`, '', { flag: 'wx' });
     if (options.preflightOnly) { report.complete = true; report.preflightOnly = true; report.provenanceValid = true; invariant(); return; }
     for (const item of plan.schedule) {
+      report.preflightStage = 'case_setup';
       invariant();
       if (await page.locator('.dependency-modal').count()) throw new Error('dependency_wizard_not_suppressed');
       if ((await call('chat.runs')).length) throw new Error('unexpected_active_run');
@@ -182,9 +186,17 @@ export async function main(argv: string[]): Promise<void> {
       const conversation = await call('conversations.create', { title: `Evaluation ${item.taskId} ${item.arm} ${item.repetition + 1}`, ...settings });
       active = conversation.id;
       assertWorkspacePermission((await call('conversations.get', { id: active })).permissionMode);
-      if (item.arm === 'ontology-adaptive') for (const relation of task.relations) await call('memory.add', { workspaceId: project.id, conversationId: active, relationMode: 'fact', relation, source: 'Same supplied synthetic benchmark facts; no reference answer' });
-      activeSample = { ...item, conversationId: active, projectId: project.id, firstTextMs: null, durationMs: 0, completed: false, passed: false, failure: null, toolEvents: [], agentEvents: [] };
+      report.preflightStage = 'memory_setup';
+      const receipts: any[] = [];
+      if (item.arm === 'ontology-adaptive') for (const relation of task.relations) {
+        if (options.suite === 'knowledge-recall') await new Promise(resolveWait => setTimeout(resolveWait, KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS));
+        receipts.push(await call('memory.add', { workspaceId: project.id, conversationId: active, relationMode: 'fact', relation, source: 'Same supplied synthetic benchmark facts; no reference answer' }));
+      }
+      const memorySetup = options.suite === 'knowledge-recall'
+        ? verifyKnowledgeRecallSetup(task.relations, receipts, await call('memory.list'), { workspaceId: project.id, conversationId: active! }) : undefined;
+      activeSample = { ...item, conversationId: active, projectId: project.id, ...(memorySetup ? { memorySetup } : {}), firstTextMs: null, durationMs: 0, completed: false, passed: false, failure: null, toolEvents: [], agentEvents: [] };
       report.samples.push(activeSample); streamed = ''; doneUsage = undefined; eventError = undefined; agentSignatures = new Map();
+      report.preflightStage = 'sample_execution';
       started = performance.now();
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; void call!('chat.cancel', { conversationId: active }).catch(() => {}); }, options.deadlineMs);
@@ -211,8 +223,7 @@ export async function main(argv: string[]): Promise<void> {
         else if (response.route?.model !== options.model || response.route?.effort !== options.effort || telemetry?.model !== options.model || telemetry?.agents?.some((agent: any) => agent.model !== options.model)) throw new Error('model_or_effort_mismatch');
         else if (!activeSample.savedFinalMatches || !activeSample.streamMatches) throw new Error('stream_or_persistence_mismatch');
         else if (!activeSample.nativeRouteObserved) throw new Error('native_route_not_observed');
-        else if (item.arm === 'ontology-adaptive' && !(telemetry?.knowledge?.asserted > 0 && telemetry?.knowledge?.inferred > 0)) throw new Error('ontology_not_observed');
-        else { activeSample.completed = true; Object.assign(activeSample, gradeTask(task, response.text)); }
+        else { assertKnowledgeTelemetry(options.suite, item.arm, telemetry?.knowledge); activeSample.completed = true; Object.assign(activeSample, gradeTask(task, response.text)); }
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
         activeSample.failure = timedOut ? 'deadline' : ['approval_required', 'worker_model_mismatch', 'model_or_effort_mismatch', 'stream_or_persistence_mismatch', 'native_route_not_observed', 'ontology_not_observed', 'event_limit'].includes(message) ? message : 'transport_or_execution';

@@ -71,3 +71,21 @@ Service load, regional/network changes, prompt caching, model revision and Windo
 See [the measured September 23 report](performance-results-2026-09-23.md) for actual observations and their evidence boundaries.
 
 For external public tasks, use the separate [BFCL subset workflow](external-agent-benchmarks.md). It reports tool-call accuracy and held-out effort comparisons, not this suite's tiny instruction-following score or an official leaderboard score. Its strict custom grader, pinned upstream hashes and disjoint partitions are covered by `npm run test:benchmarks`.
+
+## Stored-knowledge recall regression
+
+The `knowledge-recall` suite tests production retrieval through the real desktop renderer and `chat.start`, not a direct provider call. It contains three synthetic tasks: an exact scoped identifier among lookalikes, an absent scoped identifier, and a dependency chain with conflicting terminal facts beside a large shared-membership hub. The givens exist only in project/conversation-scoped `memory.add` records; task prompts do not repeat them. Setup receipts and read-back hashes must match before inference. Seeding is paced at 250 ms per record to respect the application's request limit; setup time is excluded from inference timing.
+
+```powershell
+# Freeze each binary separately; use the same seed, exact model, effort and repetition count.
+node --import tsx scripts/app-benchmark.ts --app-path PATH_TO_FROZEN_STAGE_OR_EXE --expected-version VERSION --suite knowledge-recall --model EXACT_MODEL --effort high --repetitions 2 --timeout-ms 120000 --out-prefix release/validation/recall-plan --plan-only yes
+# Use a new output prefix and the returned plan hash when executing the same options.
+node --import tsx scripts/app-benchmark.ts --app-path PATH_TO_FROZEN_STAGE_OR_EXE --expected-version VERSION --suite knowledge-recall --model EXACT_MODEL --effort high --repetitions 2 --timeout-ms 120000 --out-prefix release/validation/recall-run --plan-hash PLAN_SHA256 --allow-account-usage yes
+
+# No inference: baseline source versus current retrieval on 24 parameterized fixtures.
+node --import tsx scripts/benchmark-knowledge-recall.ts --baseline FULL_COMMIT_SHA --out release/validation/recall-algorithm.json
+```
+
+Only the `ontology-adaptive` arm is supported by this suite. Compare app versions, not execution modes. A development Electron runtime loads the frozen stage or installed archive in a fresh profile; this is not an in-place test of the user's running profile. Normal product tools remain available, so a model may recover from weak initial retrieval by using a tool. That recovery counts as a successful answer, not proof that the initial evidence packet was correct. Record both layers separately.
+
+Three cases, even repeated, are not sufficient for the live-performance promotion criteria above. The 0.7.8 change is a targeted correctness fix supported by deterministic regression tests; its small actual-app comparison is a smoke test, not a general accuracy, latency or leaderboard claim. Raw local evaluation evidence remains private and is not included in releases. This separation follows the [OpenAI evaluation guidance](https://developers.openai.com/api/docs/guides/evaluation-best-practices) on task-specific evaluation rather than relying on an overall impression.

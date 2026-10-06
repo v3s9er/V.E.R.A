@@ -14,6 +14,19 @@ function fixture() {
   return { envelope: { plan, planHash }, report: { planHash, complete: true, provenanceValid: true, stopped: null, activeRunsAfter: 0, samples } };
 }
 
+function knowledgeRecallFixture(repetitions = 2) {
+  const base = fixture();
+  const relationsSha256 = sha256('PRIVATE_RELATIONS');
+  const plan = { ...base.envelope.plan, suite: 'knowledge-recall', arms: ['ontology-adaptive'], repetitions,
+    tasks: [{ id: 'recall', relationCount: 101, relationsSha256 }],
+    schedule: Array.from({ length: repetitions }, (_, repetition) => ({ taskId: 'recall', arm: 'ontology-adaptive', repetition })) };
+  const planHash = sha256(canonicalJson(plan));
+  const samples = plan.schedule.map(item => ({ ...structuredClone(base.report.samples[0]!), ...item,
+    memorySetup: { verified: true, expectedRelations: 101, receiptCount: 101, storedCount: 101, relationsSha256,
+      receipts: ['PRIVATE_MEMORY_RECEIPT'], relations: ['PRIVATE_RELATION'] } }));
+  return { envelope: { plan, planHash }, report: { ...base.report, planHash, samples } };
+}
+
 test('correct denominators, repetition consistency, and no double-counted cache/worker usage', () => {
   const { envelope, report } = fixture();
   report.samples[0]!.agentEvents = [{ usage: { totalTokens: 999 } }] as any;
@@ -109,4 +122,67 @@ test('unknown numeric zeros and fractional tokens are rejected; capped usage is 
   assert.throws(() => summarizeAppBenchmark(x.envelope, x.report));
   Object.assign(x.report.samples[0]!.usage, { promptTokens: 50, completionTokens: 50, totalTokens: 100, reportStatus: 'capped' });
   assert.equal(summarizeAppBenchmark(x.envelope, x.report).arms[0].totalTokens, null);
+});
+
+test('knowledge recall accepts verified scoped setup and ordinary repetition bounds', () => {
+  for (const repetitions of [1, 2, 20]) {
+    const { envelope, report } = knowledgeRecallFixture(repetitions);
+    const result = summarizeAppBenchmark(envelope, report);
+    assert.equal(result.complete, true);
+    assert.equal(result.arms.length, 1);
+    assert.equal(result.arms[0].arm, 'ontology-adaptive');
+    assert.equal(result.arms[0].expected, repetitions);
+    assert.equal(result.arms[0].consistent, 1);
+  }
+  for (const repetitions of [0, 21]) {
+    const { envelope, report } = knowledgeRecallFixture(repetitions);
+    assert.throws(() => summarizeAppBenchmark(envelope, report));
+  }
+});
+
+test('knowledge recall rejects unsupported arms and malformed frozen inventories', () => {
+  const mutations: Array<(plan: any) => void> = [
+    plan => { plan.arms = ['single']; },
+    plan => { plan.arms = ['adaptive']; },
+    plan => { plan.arms = ['ontology-adaptive', 'single']; },
+    plan => { delete plan.tasks[0].relationCount; },
+    plan => { plan.tasks[0].relationCount = -1; },
+    plan => { plan.tasks[0].relationCount = 1.5; },
+    plan => { plan.tasks[0].relationsSha256 = 'not-a-sha256'; },
+  ];
+  for (const mutate of mutations) {
+    const x = knowledgeRecallFixture(); mutate(x.envelope.plan);
+    x.envelope.planHash = x.report.planHash = sha256(canonicalJson(x.envelope.plan));
+    assert.throws(() => summarizeAppBenchmark(x.envelope, x.report));
+  }
+});
+
+test('completed knowledge recall rejects missing, unverified or mismatched memory setup', () => {
+  const mutations: Array<(row: any) => void> = [
+    row => { delete row.memorySetup; },
+    row => { row.memorySetup.verified = false; },
+    row => { row.memorySetup.expectedRelations = 100; },
+    row => { row.memorySetup.receiptCount = 100; },
+    row => { row.memorySetup.storedCount = 102; },
+    row => { row.memorySetup.relationsSha256 = sha256('different-relations'); },
+  ];
+  for (const mutate of mutations) {
+    const x = knowledgeRecallFixture(); mutate(x.report.samples[0]);
+    assert.throws(() => summarizeAppBenchmark(x.envelope, x.report), /knowledge setup/);
+  }
+  const x = knowledgeRecallFixture();
+  Object.assign(x.report.samples[0]!, { completed: false, passed: false, failure: 'memory_setup_mismatch', memorySetup: undefined });
+  x.report.complete = false;
+  assert.equal(summarizeAppBenchmark(x.envelope, x.report).arms[0].passed, 1);
+});
+
+test('knowledge recall report exports metadata only and states synthetic version comparison scope', () => {
+  const { envelope, report } = knowledgeRecallFixture();
+  const markdown = renderAppBenchmarkReport(envelope, report);
+  assert.doesNotMatch(markdown, /PRIVATE_/);
+  assert.match(markdown, /저장 지식 검색의 합성 기능 회귀/);
+  assert.match(markdown, /앱 버전 간 회귀/);
+  assert.match(markdown, /실행 모드의 우열이나 공개 벤치마크 점수를 나타내지/);
+  assert.doesNotMatch(markdown, /공개 문제의 로컬 회귀/);
+  assert.equal(summarizeAppBenchmark(envelope, report).officialScore, false);
 });

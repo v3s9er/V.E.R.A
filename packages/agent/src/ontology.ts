@@ -1,5 +1,5 @@
 import type { MemoryItem, KnowledgeMetrics } from '@mr-robot/shared';
-import { KnowledgeIndex, entityEdges } from './ontology-index.js';
+import { KnowledgeIndex, entityEdges, indexedKnowledgeTerm, knowledgeIndexTokens, knowledgeQueryTokens } from './ontology-index.js';
 
 type Triple = NonNullable<MemoryItem['relation']>;
 export interface KnowledgeFact extends Triple { evidence: string[]; rules: string[]; status: 'asserted' | 'inferred' | 'unresolved' }
@@ -10,21 +10,21 @@ const pair = (t: Triple) => JSON.stringify([t.subject, t.predicate]);
 const functional = new Set(['located_in', 'owner', 'status']);
 const transitive = new Set(['subclass_of', 'part_of', 'depends_on']);
 const MAX_ASSERTIONS = 128, MAX_FACTS = 512, MAX_CONTEXT_BYTES = 7000;
-const terms = (s: string) => [...new Set(s.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter(Boolean).flatMap(token => {
+const terms = (s: string) => [...new Set(knowledgeQueryTokens(s).flatMap(token => {
   // Keep the original as well: this is recall assistance, not entity identity rewriting.
   const stem = token.replace(/(?:에서|에게|으로|와|과|의|은|는|이|가|을|를|에)$/u,'');
-  return stem !== token && (stem.length >= 2 || /^[a-z0-9_-]+$/.test(stem)) ? [token,stem] : [token];
+  return stem !== token && (stem.length >= 2 || indexedKnowledgeTerm(stem)) ? [token,stem] : [token];
 }))].slice(0, 128);
 const norm = (s: string) => s.normalize('NFKC').toLowerCase();
 function scorer(queryTerms: string[]) {
-  const ascii = queryTerms.filter(t => /^[a-z0-9_-]+$/.test(t));
-  const unicode = queryTerms.filter(t => !/^[a-z0-9_-]+$/.test(t));
+  const exact = queryTerms.filter(indexedKnowledgeTerm);
+  const unicode = queryTerms.filter(t => !indexedKnowledgeTerm(t));
   return (entity: string, rest = '') => {
     // Tokenize each candidate once, not once per query term or sort comparison.
-    const entityWords = new Set(entity.split(/[^\p{L}\p{N}_-]+/u));
-    const restWords = new Set(rest.split(/[^\p{L}\p{N}_-]+/u));
+    const entityWords = new Set(knowledgeIndexTokens(entity));
+    const restWords = new Set(knowledgeIndexTokens(rest));
     let score = 0;
-    for (const t of ascii) score += entityWords.has(t) ? 4 : restWords.has(t) ? 1 : 0;
+    for (const t of exact) score += entityWords.has(t) ? 4 : restWords.has(t) ? 1 : 0;
     for (const t of unicode) score += entity.includes(t) ? 4 : rest.includes(t) ? 1 : 0;
     return score;
   };
@@ -103,12 +103,13 @@ function retrieveFromIndex(index: KnowledgeIndex, query: string, start: number):
   const recentFirst = (a: MemoryItem, b: MemoryItem) => b.updatedAt-a.updatedAt || a.id.localeCompare(b.id);
   const bestFirst = (a: Candidate, b: Candidate) => b.score-a.score || recentFirst(a.item,b.item);
   const entitySeeds: Candidate[] = [], textSeeds: Candidate[] = [];
+  const entityMatchIds = new Set<string>(), textMatchIds = new Set<string>();
   let entityMatches = 0, textMatches = 0;
   // Exact-token postings avoid rescanning unrelated saved claims. Unicode
   // substring queries retain a full candidate scan for unchanged recall.
   for (const { item, score, entityScore } of index.matches(queryTerms)) {
-    if (entityScore > 0) { entityMatches++; retainBest(entitySeeds,{item,score},24,bestFirst); }
-    else if (score > 0) { textMatches++; retainBest(textSeeds,{item,score},24,bestFirst); }
+    if (entityScore > 0) { entityMatches++; entityMatchIds.add(item.id); retainBest(entitySeeds,{item,score},24,bestFirst); }
+    else if (score > 0) { textMatches++; textMatchIds.add(item.id); retainBest(textSeeds,{item,score},24,bestFirst); }
   }
   const seeds = entitySeeds.length ? entitySeeds : textSeeds;
   if (!seeds.length) return finish();
@@ -117,31 +118,59 @@ function retrieveFromIndex(index: KnowledgeIndex, query: string, start: number):
   const entities = new Set<string>();
   const add = (item: MemoryItem) => { selected.set(item.id,item); entities.add(item.relation!.subject); if (entityEdges.has(item.relation!.predicate)) entities.add(item.relation!.object); };
   for (const { item } of seeds) add(item);
-  // Connected facts, including contradictory values, not a full memory dump.
-  const visited = new Set<string>();
-  for (let hop = 0; hop < 6; hop++) {
+  // Expand narrow evidence chains before high-degree hubs (e.g. every package
+  // part_of one workspace). Breadth-first recency selection previously filled
+  // the entire budget with siblings before reaching a requested dependency.
+  // This is admission priority only: relation rules and uncertainty stay intact.
+  const frontier = new Map([...entities].map(entity => [entity, 0]));
+  const visited = new Map<string, number>();
+  const neighbors = new Map<string, readonly MemoryItem[]>();
+  const priorities = new Map<string, number>();
+  const priority = (entity: string) => {
+    if (!priorities.has(entity)) priorities.set(entity, scoreText(norm(entity)));
+    return priorities.get(entity)!;
+  };
+  const adjacent = (entity: string) => {
+    let rows = neighbors.get(entity);
+    if (!rows) { rows = index.neighbors(entity); neighbors.set(entity, rows); }
+    return rows;
+  };
+  const enqueue = (entity: string, hop: number) => {
+    if (hop >= 6 || (visited.get(entity) ?? Infinity) <= hop) return;
+    frontier.set(entity, Math.min(frontier.get(entity) ?? Infinity, hop));
+  };
+  while (frontier.size) {
+    const [entity, hop] = [...frontier].sort((a, b) => priority(b[0])-priority(a[0]) || adjacent(a[0]).length-adjacent(b[0]).length
+      || a[1]-b[1] || a[0].localeCompare(b[0]))[0];
+    frontier.delete(entity); visited.set(entity, hop);
     const next: MemoryItem[] = [], seen = new Set<string>();
     const capacity = MAX_ASSERTIONS-selected.size;
-    for (const entity of [...entities]) {
-      if (visited.has(entity)) continue;
-      visited.add(entity);
-      for (const item of index.neighbors(entity)) {
-        if (selected.has(item.id) || seen.has(item.id)) continue;
-        seen.add(item.id);
-        retainBest(next,item,capacity,recentFirst);
+    for (const item of adjacent(entity)) {
+      if (selected.has(item.id)) {
+        enqueue(item.relation!.subject, hop+1);
+        if (entityEdges.has(item.relation!.predicate)) enqueue(item.relation!.object, hop+1);
+        continue;
       }
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      // Direct functional values must stay together before traversing branches;
+      // an older conflicting status/owner must not lose to newer tree edges.
+      retainBest(next,item,capacity,(a,b) => Number(b.relation!.subject === entity && functional.has(b.relation!.predicate))
+        - Number(a.relation!.subject === entity && functional.has(a.relation!.predicate)) || recentFirst(a,b));
     }
     if (seen.size > next.length) result.metrics.truncated = true;
-    for (const item of next) add(item);
-    if (!next.length) break;
-    if (hop === 5 && [...entities].some(entity => !visited.has(entity)
-      && index.neighbors(entity).some(item => !selected.has(item.id)))) result.metrics.truncated = true;
+    for (const item of next) {
+      add(item);
+      enqueue(item.relation!.subject, hop+1);
+      if (entityEdges.has(item.relation!.predicate)) enqueue(item.relation!.object, hop+1);
+    }
   }
+  if ([...entities].some(entity => !visited.has(entity)
+    && adjacent(entity).some(item => !selected.has(item.id)))) result.metrics.truncated = true;
   // Disconnected positive matches beyond seed capacity were not examined.
   if (seedMatches > seeds.length) {
-    const selectedMatches = [...selected.values()].filter(item => entitySeeds.length
-      ? scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`)) > 0
-      : scoreText(norm(`${item.relation!.subject} ${entityEdges.has(item.relation!.predicate) ? item.relation!.object : ''}`),norm(`${item.relation!.predicate} ${item.text} ${item.tags.join(' ')}`)) > 0).length;
+    const matchedIds = entitySeeds.length ? entityMatchIds : textMatchIds;
+    const selectedMatches = [...selected.keys()].filter(id => matchedIds.has(id)).length;
     if (selectedMatches < seedMatches) result.metrics.truncated = true;
   }
   const facts = new Map<string, KnowledgeFact>();

@@ -95,7 +95,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.7';
+export const VERSION = '0.7.8';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
