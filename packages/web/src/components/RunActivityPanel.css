@@ -79,6 +79,7 @@
   .run-panel summary { padding: 6px 9px; }
   .run-panel-heading small { font-size:10px; }
   .run-panel p { display:none; }
+  .run-panel p.run-work-notice { display:block; }
   .run-panel[open] .run-panel-content { max-height: min(180px, 30dvh); }
   .conversation-layout .chat-inputbar.composer-minimal { margin-bottom: 6px; }
 }

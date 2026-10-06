@@ -35,7 +35,8 @@ test('native loop preserves scope and uses explicit chat effort over the profile
   const result = await loop.run([], 'Answer directly', {}, [], { workspacePath: 'C:/fixture-only', permissionMode: 'read-only', tokenPolicy: 'audit-only', cacheKey: 'synthetic', nativeSessionDirectory: 'C:/fixture-only', reasoningEffort: 'high' });
   assert.equal(received?.permissionMode, 'read-only'); assert.equal(received?.reasoningEffort, 'high');
   assert.match(received?.session?.instructions ?? '', /be concise/);
-  assert.equal(received?.hostTools, undefined); assert.equal(result.route?.effort, 'high');
+  assert.equal(received?.nativeDelegation, undefined);
+  assert.ok(received?.hostTools?.tools.every(tool => tool.name.startsWith('work_'))); assert.equal(result.route?.effort, 'high');
 });
 
 test('an unsupported active profile fails before admission or provider execution', async () => {

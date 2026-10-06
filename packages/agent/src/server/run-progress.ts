@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isObservationLimitedStatus } from '@mr-robot/shared';
-import type { ChatRunActivity, ChatRunPhase, ChatRunState, CoordinationAgent } from '@mr-robot/shared';
+import type { ChatRunActivity, ChatRunPhase, ChatRunState, CoordinationAgent, WorkOntologySummary } from '@mr-robot/shared';
 
 const TERMINAL = new Set<ChatRunPhase>(['completed', 'failed', 'cancelled']);
 /** Run-local, bounded, host-owned state. No raw tool inputs or hidden reasoning.
@@ -19,11 +19,13 @@ export class RunProgress {
   private firstTextAt?: number;
   private serial = 0;
   private agents = new Map<string, CoordinationAgent>();
+  private work?: WorkOntologySummary;
   constructor(private now = Date.now) { this.startedAt = this.updatedAt = now(); }
   transition(phase: ChatRunPhase) {
     if (TERMINAL.has(this.phase) || (this.phase === 'cancelling' && !TERMINAL.has(phase))) return;
     this.phase = phase;
     this.updatedAt = this.now();
+    if ((phase === 'failed' || phase === 'cancelled') && this.work) this.work = { ...this.work, verified: 0, stale: true };
     if (TERMINAL.has(phase)) for (const item of this.activity) if (item.state === 'running') {
       // Model completion is not proof that an unacknowledged tool succeeded.
       item.state = 'error'; item.finishedAt = this.updatedAt;
@@ -82,11 +84,23 @@ export class RunProgress {
     });
     this.updatedAt = this.now();
   }
-  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'activityTruncated' | 'activityHadErrors' | 'observationLimited' | 'partialText' | 'partialTextTruncated' | 'agents'> {
+  workUpdate(summary: WorkOntologySummary): void {
+    if (TERMINAL.has(this.phase) || this.phase === 'cancelling') return;
+    // Never spread model input, paths, acceptance strings or arbitrary extras.
+    const count = (value: number, max: number) => Number.isSafeInteger(value) && value >= 0 && value <= max;
+    if (![summary.total, summary.reported, summary.verified, summary.blocked].every(n => count(n, 12))
+      || ![summary.checksPassed, summary.checksFailed].every(n => count(n, 32))
+      || summary.reported > summary.total || summary.verified > summary.reported || summary.blocked > summary.total) return;
+    this.work = { total: summary.total, reported: summary.reported, verified: summary.verified,
+      blocked: summary.blocked, checksPassed: summary.checksPassed, checksFailed: summary.checksFailed, stale: summary.stale === true };
+    this.updatedAt = this.now();
+  }
+  snapshot(): Pick<ChatRunState, 'runId' | 'phase' | 'updatedAt' | 'activity' | 'activityTruncated' | 'activityHadErrors' | 'observationLimited' | 'partialText' | 'partialTextTruncated' | 'agents' | 'work'> {
     return { runId: this.runId, phase: this.phase, updatedAt: this.updatedAt,
       activity: this.activity.map(item => ({ ...item })), activityTruncated: this.activityTruncated, activityHadErrors: this.activityHadErrors,
       observationLimited: this.observationLimited,
       partialText: this.partialText, partialTextTruncated: this.partialTextTruncated,
+      ...(this.work ? { work: { ...this.work } } : {}),
       agents: [...this.agents.values()].map(agent => ({ ...agent, usage: { ...agent.usage } })) };
   }
 }

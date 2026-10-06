@@ -8,6 +8,7 @@ import { classifyCliFailure } from './cli-failure.js';
 import { CliSessionEvents, NativeRawToolEvents, sanitizeNativeRawNotification } from './cli-session-events.js';
 import { NativeToolEvents } from './native-tool-events.js';
 import { NativeRunScheduler } from './native-run-scheduler.js';
+import { NativeDelegationEvents, nativeDelegationConfig, nativeDelegationLimit, sanitizeNativeDelegationRequest } from './native-delegation.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { nativeHistory } from './native-history.js';
 import { normalizeProviderUsageReport, type NativeAgentRequest, type ProviderResult, type ProviderTiming, type Turn } from './provider.js';
@@ -88,6 +89,7 @@ class NativeWorker {
     toolAbort: AbortController; toolCalls: Set<string>; pendingTool?: string; toolTimer?: NodeJS.Timeout;
     toolEvents: NativeToolEvents;
     rawToolEvents: NativeRawToolEvents;
+    delegation?: NativeDelegationEvents;
   };
   private rawEventsSupported = true;
   private rawEventsActive = false;
@@ -103,15 +105,16 @@ class NativeWorker {
     const config: Record<string, unknown> = {
       mcp_servers: {}, 'apps._default.enabled': false, developer_instructions: '',
       project_doc_max_bytes: 0, 'features.plugins': false, 'features.remote_plugin': false,
-      'features.hooks': false, 'features.memories': false, 'features.multi_agent': false,
-      'features.multi_agent_v2': false, 'features.skip_host_skill_discovery': true,
+      'features.hooks': false, 'features.memories': false, 'features.skip_host_skill_discovery': true,
       'features.skill_search': false, 'features.skill_mcp_dependency_install': false,
       'features.shell_snapshot': false, 'features.remote_control': false, 'features.apps': false,
       'sandbox_workspace_write.writable_roots': [],
+      agents: {}, ...nativeDelegationConfig(options.req, options.model),
     };
     this.child = spawn(options.command, [...options.prefixArgs, 'app-server', '--listen', 'stdio://', '--strict-config',
       ...Object.entries(config).flatMap(([k, v]) => ['-c', `${k}=${v && typeof v === 'object' && !Array.isArray(v) ? '{}' : JSON.stringify(v)}`])],
-    { env: options.env, cwd: options.req.cwd, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    { env: options.env, cwd: options.req.cwd, windowsHide: true, shell: false,
+      detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     this.retirement = new CliProcessRetirement(this.child, options.env);
     this.child.on('error', () => this.close(new Error('네이티브 세션을 시작하지 못했습니다. CLI 설치를 확인하세요.')));
     this.child.on('close', () => this.close(new Error('네이티브 연결이 종료되었습니다. 다시 요청하세요.')));
@@ -125,7 +128,8 @@ class NativeWorker {
         const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
         if (!line.trim()) continue;
         try {
-          const message = sanitizeNativeRawNotification(JSON.parse(line));
+          const decoded = JSON.parse(line);
+          const message = sanitizeNativeDelegationRequest(decoded) ?? sanitizeNativeRawNotification(decoded);
           if (message) this.receive(message);
         }
         catch (error) { this.close(error instanceof SyntaxError ? new Error('네이티브 세션 응답을 처리하지 못했습니다.') : error instanceof Error ? error : new Error('네이티브 연결 검증 오류'));
@@ -165,7 +169,8 @@ class NativeWorker {
         usage: normalizeProviderUsageReport({}), deltas: new Map(), phases: new Map(), completed: new Map(), streamed: new Map(), applied: [],
         timingStart, reused: !!this.checkpoint, timings: new Set(), output: '',
         toolAbort: new AbortController(), toolCalls: new Set(), toolEvents,
-        rawToolEvents: new NativeRawToolEvents((method, item) => toolEvents.accept(method, item)) };
+        rawToolEvents: new NativeRawToolEvents((method, item) => toolEvents.accept(method, item)),
+        ...(req.nativeDelegation ? { delegation: new NativeDelegationEvents(nativeDelegationLimit(req), this.model, req.reasoningEffort, req.onTool) } : {}) };
       this.mark('worker');
       this.active.unsubscribe = req.steering?.subscribe(() => this.steer());
       req.signal?.addEventListener('abort', abort, { once: true });
@@ -225,6 +230,12 @@ class NativeWorker {
   private finish() {
     const a = this.active;
     if (!a?.turnCompleted || a.steering || a.cancelling || a.pendingTool) return;
+    try { a.delegation?.assertSettled(); }
+    catch (error) { this.close(error instanceof Error ? error : new Error('네이티브 보조 작업 완료 검증 실패')); return; }
+    const delegationEnabled = !!a.delegation;
+    // App-server parent usage is not documented as including all descendants.
+    // Keep reported parent counters, but never claim complete child accounting.
+    if (delegationEnabled && a.usage.reportStatus === 'reported') a.usage = { ...a.usage, reportStatus: 'missing' };
     const s = a.req.session!;
     this.checkpoint = { thread: this.thread, history: fingerprints([...s.history, { role: 'user', content: s.input },
       ...a.applied.map(content => ({ role: 'user' as const, content })), { role: 'assistant', content: a.text }]), context: digest(s.context), usage: a.total, at: Date.now() };
@@ -232,8 +243,20 @@ class NativeWorker {
     catch { this.status('답변 완료 · 세션 저장 실패, 다음 요청은 대화 기록으로 복구합니다'); this.checkpoint = undefined; this.thread = ''; }
     this.mark('completed'); this.events.complete();
     this.release(); this.active = undefined; this.lastUsed = Date.now();
-    this.idle = setTimeout(() => this.close(), IDLE_MS); this.idle.unref();
-    a.resolve({ text: a.text, toolCalls: [], usage: a.usage });
+    const result: ProviderResult = { text: a.text, toolCalls: [], usage: a.usage };
+    if (delegationEnabled) {
+      // Retire the entire owned process tree, including any unobserved nested
+      // native work, before reporting success. Resume the saved main thread on
+      // the next call instead of leaving auxiliary sessions warm indefinitely.
+      this.close();
+      void this.retirement.waitUntilClosed().then(() => {
+        if (a.req.signal?.aborted) a.reject(new Error('네이티브 작업이 중지되었습니다.'));
+        else a.resolve(result);
+      }, error => a.reject(error));
+    } else {
+      this.idle = setTimeout(() => this.close(), IDLE_MS); this.idle.unref();
+      a.resolve(result);
+    }
   }
   private openThread() {
     const req = this.active!.req;
@@ -280,6 +303,24 @@ class NativeWorker {
   }
   private receive(m: any) {
     const active = this.active;
+    const incomingThread = m.params?.threadId ?? m.params?.thread?.id;
+    const expectedParent = this.thread || this.checkpoint?.thread;
+    if (active?.delegation && expectedParent && typeof incomingThread === 'string' && incomingThread !== expectedParent) {
+      // Child notifications may precede the correlated spawn completion. They
+      // never select a thread, stream into the parent, supply usage, or grant a
+      // host tool. Unknown child RPC requests are denied individually without
+      // aborting a valid main-thread operation.
+      if (m.id !== undefined && m.method) this.send({ id: m.id, error: { code: -32601,
+        message: 'Host capabilities and interactive approvals belong only to the parent thread.' } });
+      else if (m.method === 'thread/started') active.delegation.observeChildThread(m.params?.thread, expectedParent);
+      return;
+    }
+    if (active?.delegation && !expectedParent && m.method === 'thread/started' && m.params?.thread?.parentThreadId != null) {
+      // A child notification cannot select the primary thread while its RPC
+      // response is still pending. Its parent metadata is checked on adoption.
+      active.delegation.observeChildThread(m.params.thread, '');
+      return;
+    }
     if (active?.cancelling) {
       if (m.method === 'turn/completed' && this.events.accept(m)) this.close(new Error('네이티브 작업이 중지되었습니다.'));
       return; // No stale output or steering acknowledgements after cancellation.
@@ -344,7 +385,10 @@ class NativeWorker {
       return;
     }
     if (!this.events.accept(m)) return;
-    if (m.method === 'rawResponseItem/completed') {
+    if (m.method === 'item/nativeDelegation/requested') {
+      if (!a.delegation || m.params?.threadId !== this.thread || m.params?.turnId !== a.turn) throw new Error('네이티브 보조 작업 요청의 부모 실행 검증에 실패했습니다.');
+      a.delegation.requested(m.params);
+    } else if (m.method === 'rawResponseItem/completed') {
       a.rawToolEvents.accept(m.params.item);
     } else if (m.method === 'thread/tokenUsage/updated') {
       const u = m.params?.tokenUsage?.total;
@@ -369,6 +413,12 @@ class NativeWorker {
       }
     } else if (m.method === 'item/started' || m.method === 'item/completed') {
       const item = m.params?.item;
+      if (item?.type === 'collabAgentToolCall' || item?.type === 'subAgentActivity') {
+        if (!a.delegation) throw new Error('허용되지 않은 네이티브 보조 작업을 차단했습니다.');
+        if (m.params?.threadId !== this.thread || m.params?.turnId !== a.turn) throw new Error('네이티브 보조 작업의 부모 실행 식별자가 누락되었습니다.');
+        if (item.type === 'subAgentActivity') a.delegation.activity(m.method, item, this.thread);
+        else a.delegation.accept(m.method, item, this.thread);
+      }
       a.toolEvents.accept(m.method, item);
       if (item?.type === 'agentMessage' && m.method === 'item/started' && typeof item.id === 'string') {
         if (a.phases.size > 128) return this.close(new Error('네이티브 메시지 개수 초과'));
@@ -431,6 +481,7 @@ class NativeWorker {
   private release() { const a = this.active; if (a) {
     a.toolEvents.finish();
     a.rawToolEvents.clear();
+    a.delegation?.finish();
     clearTimeout(a.timer); clearInterval(a.heartbeat); clearTimeout(a.interruptTimer); clearTimeout(a.steering?.timer);
     a.unsubscribe?.(); a.req.signal?.removeEventListener('abort', a.abort);
     clearTimeout(a.toolTimer); a.toolAbort.abort(); a.req.hostTools?.dispose();
@@ -439,13 +490,24 @@ class NativeWorker {
     if (this.closed) return;
     if (this.active) this.mark('failed');
     this.closed = true; clearTimeout(this.idle); this.release();
-    if (this.active) {
+    const interrupted = this.active;
+    if (interrupted) {
       try { this.store.set(this.key); } catch { /* checkpoint was cleared before the turn */ }
-      this.active.reject(error ?? new Error('네이티브 연결이 종료되었습니다.')); this.active = undefined;
+      this.active = undefined;
     }
     this.buffer = ''; this.checkpoint = undefined;
     if (workers.get(this.key) === this) workers.delete(this.key);
     this.retirement.retire();
+    if (interrupted) {
+      const failure = error ?? new Error('네이티브 연결이 종료되었습니다.');
+      // Do not release the caller's execution/admission lock while native
+      // helpers can still have side effects. This also covers cancellation
+      // before their spawn event has arrived; opt-in alone requires draining.
+      if (interrupted.delegation) void this.retirement.waitUntilClosed().then(() => interrupted.reject(failure), () => {
+        interrupted.reject(new Error(`${failure.message} 이전 네이티브 실행 종료를 확인하지 못했습니다.`));
+      });
+      else interrupted.reject(failure);
+    }
   }
 }
 
@@ -460,10 +522,12 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   const epoch = runtimeEpoch;
   const s = options.req.session;
   if (!s || options.req.permissionMode === 'ask') throw new Error('검증된 네이티브 세션과 실행 승인이 필요합니다.');
+  const delegationLimit = nativeDelegationLimit(options.req);
   if (options.req.hostTools?.tools.some(t => !(options.req.hostTools!.authorize?.(t.name, options.req.permissionMode) ?? options.req.permissionMode === 'full'))) throw new Error('현재 권한에서 허용되지 않은 연결 도구입니다.');
   options.req.signal?.throwIfAborted();
   const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
-    digest(options.env), resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null, options.req.daybreakEnabled === true]);
+    digest(options.env), resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null,
+    options.req.daybreakEnabled === true, delegationLimit, delegationLimit ? options.req.reasoningEffort ?? 'auto' : null]);
   const release = await scheduler.acquire(key, options.req.signal, position => options.req.onStatus?.(`네이티브 실행 대기 · ${position}번째 · 앞선 작업 완료 시 자동 시작`));
   mark('queue');
   try { while (true) {

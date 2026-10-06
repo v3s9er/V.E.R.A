@@ -23,7 +23,7 @@ function provider(overrides: Partial<AiProvider> = {}): AiProvider {
     ping: async () => ({ ok: true }), models: async () => ['selected-model'], ...overrides };
 }
 function registry(selected: AiProvider) {
-  return { default: () => selected, getForModel: (id: string, model: string) => {
+  return { default: () => selected, costTier: () => 0, getForModel: (id: string, model: string) => {
     assert.equal(id, selected.id); assert.equal(model, selected.model); return selected;
   } } as any;
 }
@@ -169,7 +169,9 @@ test('API main delegates two same-model isolated readers, receives bounded resul
   assert.equal(output.turns.at(-1)?.content, output.text);
 }));
 
-for (const mode of ['read-only', 'workspace'] as const) test(`native audit-only enables registered coordination at ${mode} without desktop capability`, () => workspace(async directory => {
+const explicitHostCoordination = { mode: 'quality' as const, executionMode: 'adaptive' as const, roles: {}, escalationEnabled: false, maxPremiumCalls: 6,
+  graph: { nodes: [{ id: 'main', kind: 'model' as const, role: 'general' as const, label: 'Main', x: 0, y: 0 }], edges: [] } };
+for (const mode of ['read-only', 'workspace'] as const) test(`explicit adaptive native preset enables registered coordination at ${mode} without desktop capability`, () => workspace(async directory => {
   const accounting = instrument();
   let nativeCalls = 0, helperCalls = 0;
   const selected = provider({ type: 'codex-cli', supportsTools: false,
@@ -196,7 +198,7 @@ for (const mode of ['read-only', 'workspace'] as const) test(`native audit-only 
   });
   const loop = new AgentLoop(registry(selected), {} as any);
   const output = await loop.run([], 'Review this workspace', accounting.callbacks, [], { workspacePath: directory,
-    permissionMode: mode, tokenPolicy: 'audit-only', cacheKey: 'native-parent', nativeSessionDirectory: directory });
+    permissionMode: mode, tokenPolicy: 'audit-only', cacheKey: 'native-parent', nativeSessionDirectory: directory, routing: explicitHostCoordination });
   assert.equal(output.text, 'native final'); assert.equal(nativeCalls, 1); assert.equal(helperCalls, 1);
   assert.deepEqual(accounting.kinds, ['native', 'api']);
   assert.deepEqual(accounting.counts(), { admitted: 2, settled: 2, live: 0 });
@@ -207,7 +209,8 @@ for (const tokenPolicy of ['adaptive', 'economy', 'standard', 'quality'] as cons
   const selected = provider({ type: 'codex-cli', supportsTools: false,
     chatIsolated: async () => { throw new Error('finite native helper must not run'); },
     runAgent: async req => {
-      assert.equal(req.hostTools, undefined); assert.ok(!req.session?.instructions.includes('agent_spawn'));
+      assert.equal(req.nativeDelegation, undefined);
+      assert.ok(!req.hostTools?.tools.some(t => t.name.startsWith('agent_'))); assert.ok(!req.session?.instructions.includes('agent_spawn'));
       return result('single native execution');
     },
   });
@@ -226,7 +229,7 @@ for (const mode of ['read-only', 'workspace'] as const) test(`native app-server 
   });
   try {
     const output = await new AgentLoop(registry(selected), {} as any).run([], 'Review the mock fixture', {}, [], {
-      workspacePath: directory, permissionMode: mode, tokenPolicy: 'audit-only', cacheKey: 'mock-native', nativeSessionDirectory: directory,
+      workspacePath: directory, permissionMode: mode, tokenPolicy: 'audit-only', cacheKey: 'mock-native', nativeSessionDirectory: directory, routing: explicitHostCoordination,
     });
     assert.equal(output.text, 'Native transport synthesis.');
     assert.equal(output.usage.promptTokens, 13); assert.equal(output.usage.completionTokens, 7);

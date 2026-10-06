@@ -7,19 +7,21 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { ConfigStore } from '../packages/agent/src/config.js';
 import { KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS, assertFreshOutputs, assertKnowledgeTelemetry, assertWorkspacePermission, canonicalJson, datasetProvenance, gradeTask, hashFiles, loadTasks, parseOptions, publicTask, schedule, sha256, usageCounts, validateAppPath, verifyKnowledgeRecallSetup, type Arm } from './app-benchmark-protocol.js';
+import { finishWorkEvidence, gradeWorkEvidence, newWorkEvidence, observeWorkProgress, observeWorkTool, prepareWorkWorkspace, workRouteMatches } from './app-benchmark-work.js';
 
 // Reviewed against App.tsx's wizardVersion < 5 gate, DependencySetup.tsx's
 // auto-install guard and server.ts dependencies.complete. This affects only the
 // fresh benchmark home: it does not assert that missing dependencies are installed.
 export const BENCHMARK_DEPENDENCY_WIZARD_VERSION = 5;
 
-const SOURCE_FILES = ['scripts/app-benchmark.ts', 'scripts/app-benchmark-protocol.ts', 'scripts/benchmark-aime-data.ts', 'scripts/benchmark-arc-data.ts', 'package-lock.json',
+const SOURCE_FILES = ['scripts/app-benchmark.ts', 'scripts/app-benchmark-protocol.ts', 'scripts/app-benchmark-work.ts', 'scripts/benchmark-aime-data.ts', 'scripts/benchmark-arc-data.ts', 'package-lock.json',
   'packages/agent/src/config.ts', 'packages/agent/src/secrets.ts', 'packages/agent/src/evaluation/performance-metrics.ts'];
 const REFERENCE_FILES = ['packages/agent/src/server/server.ts', 'packages/agent/src/ai/loop.ts', 'packages/agent/src/ai/coordination-tools.ts',
   'packages/agent/src/ai/subagents.ts', 'packages/agent/src/ai/cli.ts', 'packages/agent/src/ai/cli-session-events.ts', 'packages/agent/src/ontology.ts'];
 
 export async function main(argv: string[]): Promise<void> {
   if (argv.length === 1 && argv[0] === '--help') {
+    console.log('Work ontology: --suite work-ontology; only --arms single --model gpt-6-sol --effort high (requested). Default product routing with no preset: artifact cases require native/high; greeting requires text with actual low/high recorded. Three cases, default 2 repetitions. Execution requires --plan-hash from a prior plan-only run.');
     console.log('Actual V.E.R.A application benchmark (private local regression, not an official score).\nRequired: --app-path STAGE_OR_EXE --expected-version VERSION --model EXACT_ID --effort high --out-prefix NEW_PREFIX\nAIME: --suite aime --cache FILE --year 2022 [--ids ID,ID]; relations: --suite relations [--seed NAME]\nARC: --suite arc2 --cache FILE --arc-selection locally-unused|development [--ids ID,ID for development]\nKnowledge recall: --suite knowledge-recall [--seed NAME]; only ontology-adaptive; 3 memory-only cases, default 2 repetitions (6 calls). Compare frozen application versions with the same seed/settings, not execution modes.\nOptional: --arms single,adaptive --repetitions 2 --timeout-ms 300000 (ARC default 600000) --token-policy audit-only --cli codex\nPlanning: --plan-only yes (no launch or inference). Preflight: --preflight-only yes (app launch/catalog, no inference). Execution: --allow-account-usage yes [--plan-hash SHA256]. A new output prefix is required for each invocation.');
     return;
   }
@@ -45,7 +47,11 @@ export async function main(argv: string[]): Promise<void> {
       : options.suite === 'relations' ? 'Same given facts in every prompt; extra scoped fact retrieval only in ontology-adaptive.' : 'not-applicable',
     ...(options.suite === 'knowledge-recall' ? { comparison: 'Frozen application versions using identical task seed, model, effort, repetitions and ontology-adaptive arm. No execution-mode superiority claim.',
       memorySetupPacingMs: KNOWLEDGE_RECALL_MEMORY_ADD_INTERVAL_MS, memorySetupTiming: 'Wait before every memory.add RPC, outside inference duration and deadline.' } : {}),
-    limits: ['Fresh isolated app home and workspace per sample; no answer keys in model requests or workspace.', 'Native tools use normal product permissions, not an OS sandbox; external retrieval is forbidden by task instructions.', 'AB/BA order reverses per repetition; three arms rotate and reverse. Caches/provider load are not completely controlled.', 'Same model, effort, token policy and wall deadline; adaptive can spend more total tokens. Not equal compute or a claim of held-out generalization.'] };
+    ...(options.suite === 'work-ontology' ? { workAcceptance: 'Exact artifact bytes, actual work tool receipts, and host work summaries for artifact cases. Greeting requires no work tools/ledger. Model completion prose is never artifact acceptance evidence.',
+      workRoutingPresetId: null, workCasePolicy: 'Use default product routing: artifact cases require native/high; short greeting requires same-model text with actual low or high recorded. Requested high stays saved. Child delegation is not required.',
+      workObservationLimit: 'Native tool arguments/results remain private. Dependency graph and check definitions are covered by core deterministic tests, not independently reconstructed by this application suite.',
+      workspaceFixtureTiming: 'Synthetic stale input is seeded before the inference timer. Final artifacts are checked after the measured response and persistence read-back.' } : {}),
+    limits: ['Fresh isolated app home and workspace per sample; no answer keys in model requests or workspace.', 'Native tools use normal product permissions, not an OS sandbox; external retrieval is forbidden by task instructions.', 'AB/BA order reverses per repetition; three arms rotate and reverse. Caches/provider load are not completely controlled.', options.suite === 'work-ontology' ? 'Same selected model and requested high effort; actual greeting effort may be lowered by product policy and is reported separately. Not equal compute or a general agent score.' : 'Same model, effort, token policy and wall deadline; adaptive can spend more total tokens. Not equal compute or a claim of held-out generalization.'] };
   const planHash = sha256(canonicalJson(plan));
   if (options.planHash && options.planHash !== planHash) throw new Error('Frozen plan hash mismatch');
   mkdirSync(dirname(options.prefix), { recursive: true });
@@ -119,8 +125,10 @@ export async function main(argv: string[]): Promise<void> {
         void call?.('chat.cancel', { conversationId: active }).catch(() => {});
       }
       if (event.event === 'chat.tool') {
+        if (activeSample.workEvidence) observeWorkTool(activeSample.workEvidence, data);
         activeSample.toolEvents.push({ atMs: elapsedMs, name: typeof data.name === 'string' ? data.name.slice(0, 120) : 'unknown', status: ['start', 'done', 'error'].includes(data.status) ? data.status : 'unknown', elapsedMs: Number.isFinite(data.elapsedMs) ? data.elapsedMs : undefined });
       }
+      if (event.event === 'chat.progress' && activeSample.workEvidence) observeWorkProgress(activeSample.workEvidence, data.work);
       if (event.event === 'chat.progress' && Array.isArray(data.agents)) for (const agent of data.agents) {
         if (agent.model && agent.model !== options.model) eventError = 'worker_model_mismatch';
         const summary = { agentId: String(agent.agentId ?? '').slice(0, 128), model: agent.model, state: agent.state, sequence: agent.sequence, turns: agent.turns, usage: usageCounts(agent.usage) };
@@ -163,7 +171,7 @@ export async function main(argv: string[]): Promise<void> {
     const permissionProbePath = mkdtempSync(join(scratchBase, 'permission-probe-'));
     const permissionProject = await call('projects.create', { name: 'Benchmark permission preflight', path: permissionProbePath });
     const permissionConversation = await call('conversations.create', { title: 'No-inference permission preflight', workspaceId: permissionProject.id,
-      providerId: 'app-benchmark-codex', providerModel: options.model, routingPresetId: presets.single, permissionMode: 'workspace', tokenPolicy: options.tokenPolicy });
+      providerId: 'app-benchmark-codex', providerModel: options.model, routingPresetId: options.suite === 'work-ontology' ? null : presets.single, permissionMode: 'workspace', tokenPolicy: options.tokenPolicy });
     try { assertWorkspacePermission((await call('conversations.get', { id: permissionConversation.id })).permissionMode); }
     finally { await call('conversations.update', { id: permissionConversation.id, status: 'archived' }); }
     report.preflight = { inference: false, appVersion: status.version, exactModelAvailable: true, isolatedHomeVerified: true, sameModelPresetsVerified: true, effectivePermissionMode: 'workspace', scratchRootsScoped: true,
@@ -179,13 +187,16 @@ export async function main(argv: string[]): Promise<void> {
       if ((await call('chat.runs')).length) throw new Error('unexpected_active_run');
       const task = tasks.find(candidate => candidate.id === item.taskId)!;
       const workspace = mkdtempSync(join(scratchBase, 'case-'));
+      if (task.work) prepareWorkWorkspace(task.work, workspace);
       const project = await call('projects.create', { name: `Evaluation ${item.taskId} ${item.arm}`, path: workspace,
         instructions: 'Independent benchmark. Only the current supplied evidence and this fresh scratch workspace are authorized. Local computation is allowed. No network, account/private files, other projects/conversations or answer keys. Do not persist guesses. Follow the requested final output format.' });
       const settings = { workspaceId: project.id, providerId: 'app-benchmark-codex', providerModel: options.model,
-        routingPresetId: presets[item.arm], reasoningEffort: options.effort, daybreakEnabled: false, permissionMode: 'workspace', tokenPolicy: options.tokenPolicy };
+        routingPresetId: options.suite === 'work-ontology' ? null : presets[item.arm], reasoningEffort: options.effort, daybreakEnabled: false, permissionMode: 'workspace', tokenPolicy: options.tokenPolicy };
       const conversation = await call('conversations.create', { title: `Evaluation ${item.taskId} ${item.arm} ${item.repetition + 1}`, ...settings });
       active = conversation.id;
-      assertWorkspacePermission((await call('conversations.get', { id: active })).permissionMode);
+      const preparedConversation = await call('conversations.get', { id: active });
+      assertWorkspacePermission(preparedConversation.permissionMode);
+      if (task.work && (preparedConversation.routingPresetId || preparedConversation.reasoningEffort !== options.effort)) throw new Error('work_case_policy_mismatch');
       report.preflightStage = 'memory_setup';
       const receipts: any[] = [];
       if (item.arm === 'ontology-adaptive') for (const relation of task.relations) {
@@ -194,7 +205,7 @@ export async function main(argv: string[]): Promise<void> {
       }
       const memorySetup = options.suite === 'knowledge-recall'
         ? verifyKnowledgeRecallSetup(task.relations, receipts, await call('memory.list'), { workspaceId: project.id, conversationId: active! }) : undefined;
-      activeSample = { ...item, conversationId: active, projectId: project.id, ...(memorySetup ? { memorySetup } : {}), firstTextMs: null, durationMs: 0, completed: false, passed: false, failure: null, toolEvents: [], agentEvents: [] };
+      activeSample = { ...item, conversationId: active, projectId: project.id, ...(memorySetup ? { memorySetup } : {}), ...(task.work ? { workEvidence: newWorkEvidence() } : {}), firstTextMs: null, durationMs: 0, completed: false, passed: false, failure: null, toolEvents: [], agentEvents: [] };
       report.samples.push(activeSample); streamed = ''; doneUsage = undefined; eventError = undefined; agentSignatures = new Map();
       report.preflightStage = 'sample_execution';
       started = performance.now();
@@ -212,6 +223,7 @@ export async function main(argv: string[]): Promise<void> {
         activeSample.toolCalls = telemetry?.toolCalls ?? null;
         activeSample.transport = telemetry?.transport ?? [];
         activeSample.nativeRouteObserved = activeSample.transport.some((timing: any) => timing.transport === 'codex-native');
+        if (task.work) activeSample.nativeOnly = activeSample.nativeRouteObserved && activeSample.transport.every((timing: any) => timing.transport === 'codex-native');
         activeSample.knowledge = telemetry?.knowledge ?? null;
         activeSample.route = response.route && { model: response.route.model, effort: response.route.effort };
         activeSample.answerSha256 = typeof response.text === 'string' ? sha256(response.text) : null;
@@ -220,13 +232,21 @@ export async function main(argv: string[]): Promise<void> {
         if (eventError) throw new Error(eventError);
         if (timedOut) activeSample.failure = 'deadline';
         else if (!response.ok) activeSample.failure = 'product_run_failed';
-        else if (response.route?.model !== options.model || response.route?.effort !== options.effort || telemetry?.model !== options.model || telemetry?.agents?.some((agent: any) => agent.model !== options.model)) throw new Error('model_or_effort_mismatch');
+        else if (response.route?.model !== options.model || (!task.work && response.route?.effort !== options.effort) || telemetry?.model !== options.model || telemetry?.agents?.some((agent: any) => agent.model !== options.model)) throw new Error('model_or_effort_mismatch');
         else if (!activeSample.savedFinalMatches || !activeSample.streamMatches) throw new Error('stream_or_persistence_mismatch');
-        else if (!activeSample.nativeRouteObserved) throw new Error('native_route_not_observed');
-        else { assertKnowledgeTelemetry(options.suite, item.arm, telemetry?.knowledge); activeSample.completed = true; Object.assign(activeSample, gradeTask(task, response.text)); }
+        else if (!task.work && !activeSample.nativeRouteObserved) throw new Error('native_route_not_observed');
+        else if (task.work && !workRouteMatches(task.work.acceptance.kind, activeSample.route, activeSample.transport)) throw new Error('work_route_mismatch');
+        else {
+          assertKnowledgeTelemetry(options.suite, item.arm, telemetry?.knowledge);
+          activeSample.completed = true;
+          if (task.work) {
+            finishWorkEvidence(activeSample.workEvidence, task.work, workspace, response.work);
+            Object.assign(activeSample, gradeWorkEvidence(task.work.acceptance, activeSample.workEvidence));
+          } else Object.assign(activeSample, gradeTask(task, response.text));
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
-        activeSample.failure = timedOut ? 'deadline' : ['approval_required', 'worker_model_mismatch', 'model_or_effort_mismatch', 'stream_or_persistence_mismatch', 'native_route_not_observed', 'ontology_not_observed', 'event_limit'].includes(message) ? message : 'transport_or_execution';
+        activeSample.failure = timedOut ? 'deadline' : ['approval_required', 'worker_model_mismatch', 'model_or_effort_mismatch', 'stream_or_persistence_mismatch', 'native_route_not_observed', 'work_route_mismatch', 'ontology_not_observed', 'event_limit'].includes(message) ? message : 'transport_or_execution';
         if (!timedOut) report.stopped = activeSample.failure;
       } finally {
         clearTimeout(timer);

@@ -8,7 +8,7 @@ import { colors } from '../theme';
 export function RunTimeline({ run, busy, executionMode }: { run: ChatRunState | null; busy: boolean; executionMode?: RoutingExecutionMode }) {
   const view = runPresentation({ ...run, busy });
   const rows = runTimeline(run ?? {});
-  const execution = executionPresentation(executionMode, run?.agents);
+  const execution = executionPresentation(executionMode, run?.agents, run?.activity);
   return <View style={s.card} accessibilityLabel="실시간 작업 로그">
     <Text style={s.heading}>✦ {view.heading}</Text>
     <View accessibilityLabel="선택한 실행 방식과 실제 보조 작업"><Text style={s.detail}>{execution.selected}</Text><Text style={s.note}>{execution.detail}</Text><Text style={s.note}>{execution.observed}</Text></View>
@@ -18,6 +18,7 @@ export function RunTimeline({ run, busy, executionMode }: { run: ChatRunState | 
       <Text style={s.state}>{timelineStateLabel(row.state, view.terminal)}</Text>
     </View>)}
     <Text accessibilityLiveRegion="polite" style={s.detail}>{view.detail}</Text>
+    {view.workNotice && <Text style={s.note}>{view.workNotice}</Text>}
     {!rows.length && <Text style={s.note}>아직 도구·보조 실행 이벤트가 없습니다.</Text>}
   </View>;
 }

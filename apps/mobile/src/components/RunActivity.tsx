@@ -13,7 +13,7 @@ export function RunActivity({ run, busy, compact = false, executionMode }: { run
   useEffect(() => setOpen(false), [run?.conversationId]);
   if (!busy && !run?.phase) return null;
   const view = runPresentation({ ...run, busy }, now);
-  const execution = executionPresentation(executionMode, run?.agents);
+  const execution = executionPresentation(executionMode, run?.agents, run?.activity);
   return <>
     <TouchableOpacity accessibilityRole="button" accessibilityLabel={compact && view.observationNotice ? '작업 진행 기록 펼치기 · 일부 도구 기록 제공 안 됨' : '작업 진행 기록 펼치기'} accessibilityHint={`${view.heading}. ${view.detail}. ${view.observationNotice}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(true)} style={[s.dock, compact && s.compact]}>
       <Text style={{ color: view.hasErrors || view.state === 'failed' ? colors.err : colors.accent2 }}>{view.state === 'completed' ? (view.hasErrors ? '!' : '✓') : '✦'}</Text>
@@ -28,6 +28,7 @@ export function RunActivity({ run, busy, compact = false, executionMode }: { run
           <ScrollView contentContainerStyle={s.content}>
             <Text style={s.title}>{view.heading} {view.elapsed}</Text><Text style={s.detail}>{view.detail}</Text>
             {view.observationNotice && <Text style={s.detail}>{view.observationNotice}</Text>}
+            {view.workNotice && <Text style={s.detail}>{view.workNotice}{'\n'}명시한 파일 조건만 검사한 결과이며, 전체 작업의 정확도를 보증하지 않습니다.</Text>}
             <Text style={s.detail}>{execution.selected} · {execution.detail}</Text><Text style={s.detail}>{execution.observed}</Text>
             {run?.agents?.map(agent => <View key={agent.agentId} style={s.row}><Text style={s.title}>{agentActivityLabel(agent.label)} · {AGENT_STATE_LABELS[agent.state]}</Text><Text style={s.detail}>{agent.model || '모델 확인 중'}</Text><Text style={s.detail}>{agent.usage.promptTokens + agent.usage.completionTokens > 0 ? `입력 ${agent.usage.promptTokens.toLocaleString()} · 출력 ${agent.usage.completionTokens.toLocaleString()} 토큰` : '토큰 사용량 미보고'}</Text></View>)}
             {run?.activity?.map(item => <View key={item.id} style={s.row}><Text style={[s.title, item.state === 'error' && { color: colors.err }]}>{item.state === 'done' ? '✓' : item.state === 'error' ? '!' : '·'} {activityLabel(item.label)}</Text><Text style={s.detail}>{item.state === 'error' ? '오류 · ' : ''}{item.finishedAt ? `${Math.max(0, (item.finishedAt - item.startedAt) / 1000).toFixed(1)}초` : view.terminal ? '완료 미확인' : '진행 중'}</Text></View>)}

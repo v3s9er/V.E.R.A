@@ -142,6 +142,9 @@ export interface NativeAgentRequest {
   daybreakEnabled?: boolean;
   /** Host-only capability, never deserialized from remote requests. */
   hostTools?: NativeHostTools;
+  /** Host-only opt-in for owner-local native helpers. Defaults are not a model
+   * allowlist; never enable for isolated or administrator-model-locked users. */
+  nativeDelegation?: { maxAgents?: number };
   prompt: string;
   /** Host-only conversation identity and verified transcript, never a client CLI thread id. */
   session?: { key: string; directory: string; history: Turn[]; input: string; instructions: string; context: string };

@@ -27,6 +27,17 @@ export class CliProcessRetirement {
     closing.set(this, { runtime: this.runtime, done: this.done });
     terminateProcessTree(this.child, true);
   }
+  /** Await this owned process only. Active run admission must not be coupled
+   * to unrelated workers which happen to share the same subscription home. */
+  async waitUntilClosed(): Promise<void> {
+    if (this.closed) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([this.done, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('이전 구독 세션이 종료 중입니다. 잠시 후 다시 요청하세요.')), 5000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
 }
 
 export async function waitForCliRetirements(env: NodeJS.ProcessEnv, signal?: AbortSignal) {

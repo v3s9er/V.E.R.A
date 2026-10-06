@@ -243,6 +243,8 @@ export interface ToolCallRecord {
 export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
+  /** Incomplete native child coverage must remain incomplete after aggregation. */
+  reportStatus?: 'reported' | 'missing' | 'invalid' | 'capped';
   /** Host-accounted usage after applying conservative pre-call reservation floors. */
   accountedTokens?: number;
   /** Input tokens served from a provider-side prompt cache. */
@@ -450,6 +452,8 @@ export interface ChatRunState {
   partialText?: string;
   partialTextTruncated?: boolean;
   agents?: import('./coordination.js').CoordinationAgent[];
+  /** Only declared file checks, not proof that the entire user request is correct. */
+  work?: import('./ontology.js').WorkOntologySummary;
 }
 
 export type ChatRunPhase = 'starting' | 'working' | 'answering' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';

@@ -1,5 +1,6 @@
 import type { ChatRunActivity, ChatRunPhase, RoutingExecutionMode } from './protocol.js';
 import type { CoordinationAgent } from './coordination.js';
+import type { WorkOntologySummary } from './ontology.js';
 
 const PHASES: Record<ChatRunPhase, string> = {
   starting: '요청 준비', working: '도구로 작업 중', answering: '답변 작성 중',
@@ -23,6 +24,11 @@ const TOOLS: Record<string, string> = {
   screenshot: '화면 확인', mouse_click: '화면 조작',
   desktop_open_browser: '브라우저 열기', desktop_windows: '앱 창 확인', desktop_observe: '화면 읽기', desktop_act: '화면 조작',
   web_search: '웹 검색', web_fetch: '웹 문서 읽기',
+  work_plan: '작업·선행 관계 정리', work_update: '작업 상태 기록', work_check: '명시한 파일 조건 검사', work_status: '작업 근거 확인',
+  native_agent_spawn: '구독 에이전트 보조 작업 시작', native_agent_wait: '구독 보조 작업 결과 대기',
+  native_agent_message: '구독 보조 작업 지시', native_agent_close: '구독 보조 작업 종료',
+  native_agent_resume: '구독 보조 작업 재개', native_agent_followup: '구독 보조 작업 이어서 지시',
+  native_agent_interrupt: '구독 보조 작업 중지', native_agent_list: '구독 보조 작업 상태 확인',
 };
 export const AGENT_STATE_LABELS: Record<CoordinationAgent['state'], string> = {
   queued: '대기', running: '작업 중', completed: '완료', failed: '오류', cancelled: '중지',
@@ -74,7 +80,7 @@ const EXECUTION_MODES: Record<RoutingExecutionMode, { label: string; detail: str
 };
 
 /** Selection is a policy, not evidence that helpers ran or that verification succeeded. */
-export function executionPresentation(mode: RoutingExecutionMode | undefined, agents: CoordinationAgent[] = []) {
+export function executionPresentation(mode: RoutingExecutionMode | undefined, agents: CoordinationAgent[] = [], activity: ChatRunActivity[] = []) {
   const selected = mode ? EXECUTION_MODES[mode] : undefined;
   const current = currentAgents(agents);
   const counts = (state: CoordinationAgent['state']) => current.filter(agent => agent.state === state).length;
@@ -88,12 +94,27 @@ export function executionPresentation(mode: RoutingExecutionMode | undefined, ag
   return {
     selected: selected ? `선택: ${selected.label}` : '선택한 실행 방식 확인 중',
     detail: selected?.detail ?? '저장된 시나리오를 불러오고 있어요.',
-    observed: observed ? `관측된 보조 작업: ${observed}` : '보조 실행 이벤트 없음',
+    observed: observed ? `관측된 보조 작업: ${observed}` : activity.some(item => item.label === 'native_agent_spawn')
+      ? '구독 에이전트 내부 보조 실행 관측 · 토큰 합계 제공 여부 미확인' : '보조 실행 이벤트 없음',
   };
 }
 /** Only host-owned identifiers, never raw arguments, responses, or hidden reasoning. */
 export function activityLabel(label: string): string {
   return TOOLS[label] ?? (/^[a-zA-Z][\w./:-]{0,99}$/.test(label) ? label : '도구 작업');
+}
+
+/** Acceptance is deliberately narrower than model quality or overall success. */
+export function workPresentation(work?: WorkOntologySummary): string {
+  if (!work?.total) return '';
+  const values = [work.total, work.reported, work.verified, work.blocked, work.checksPassed, work.checksFailed];
+  if (!values.every(n => Number.isSafeInteger(n) && n >= 0 && n <= 32) || work.total > 12
+    || work.reported > work.total || work.verified > work.reported) return '';
+  return [
+    `모델 완료 보고 ${work.reported}/${work.total}`,
+    work.stale ? '파일 조건 재확인 필요' : `명시한 파일 조건 확인 ${work.verified}/${work.total}`,
+    work.checksFailed ? `조건 불일치 ${work.checksFailed}개` : '',
+    work.blocked ? `선행 작업·근거 대기 ${work.blocked}개` : '',
+  ].filter(Boolean).join(' · ');
 }
 /** Pure, replay-safe reducer. React may evaluate a state updater twice. */
 export function mergeToolActivity<T extends { key: string; callId?: string; name: string; status: 'start' | 'done' | 'error' }>(items: T[], event: T): T[] {
@@ -111,13 +132,15 @@ export function runPresentation(run: {
   phase?: ChatRunPhase; activity?: ChatRunActivity[]; agents?: CoordinationAgent[];
   activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean; queued?: boolean;
   startedAt?: number; updatedAt?: number; busy: boolean; status?: string;
+  work?: WorkOntologySummary;
 }, now = Date.now()) {
   const state = run.phase ?? (run.busy ? 'starting' : 'completed');
   const terminal = ['completed', 'failed', 'cancelled'].includes(state);
   const activity = run.activity ?? [], agents = currentAgents(run.agents ?? []);
   const toolErrors = activity.filter(item => item.state === 'error').length;
   const errors = toolErrors + agents.filter(agent => agent.state === 'failed').length;
-  const hasErrors = errors > 0 || run.activityHadErrors === true;
+  const workNotice = workPresentation(run.work);
+  const hasErrors = errors > 0 || run.activityHadErrors === true || (!!workNotice && (run.work?.checksFailed ?? 0) > 0);
   const observationLimited = run.observationLimited === true || isObservationLimitedStatus(run.status);
   const observationNotice = observationLimited ? '일부 내부 도구 기록은 이 연결에서 제공되지 않습니다' : '';
   // Legacy hosts omit the flags. A full 32-row tail cannot establish that no
@@ -156,6 +179,6 @@ export function runPresentation(run: {
   const end = terminal ? run.updatedAt : now;
   const seconds = run.startedAt && end ? Math.max(0, Math.floor((end - run.startedAt) / 1000)) : undefined;
   const elapsed = seconds === undefined ? '' : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-  return { state, terminal, errors, hasErrors, historyNotice, observationNotice, heading,
+  return { state, terminal, errors, hasErrors, historyNotice, observationNotice, workNotice, heading,
     detail: !terminal && hiddenErrorNotice ? `${detail} · ${hiddenErrorNotice}` : detail, elapsed };
 }

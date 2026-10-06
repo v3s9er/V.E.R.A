@@ -12,7 +12,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   } else if (message.method === 'thread/start') {
     const { sandbox, dynamicTools } = message.params;
     if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error('unexpected native authority');
-    registered = dynamicTools.some(tool => tool.name === 'agent_spawn') && dynamicTools.every(tool => tool.name.startsWith('agent_'));
+    registered = dynamicTools.some(tool => tool.name === 'agent_spawn') && dynamicTools.every(tool => tool.name.startsWith('agent_') || ['work_plan', 'work_update', 'work_check', 'work_status'].includes(tool.name));
     if (!registered) throw new Error('expected only registered coordination tools');
     send({ id: message.id, result: { thread: { id: threadId } } });
   } else if (message.method === 'turn/start') {

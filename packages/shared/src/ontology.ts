@@ -19,3 +19,14 @@ export interface KnowledgeMetrics {
   retrievalMs: number;
   truncated: boolean;
 }
+
+/** Run-local, host-observed acceptance counts. Never user content or authority. */
+export interface WorkOntologySummary {
+  total: number;
+  reported: number;
+  verified: number;
+  blocked: number;
+  checksPassed: number;
+  checksFailed: number;
+  stale?: boolean;
+}

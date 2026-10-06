@@ -95,7 +95,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.8';
+export const VERSION = '0.7.9';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
@@ -2706,6 +2706,7 @@ export class AgentServer {
               progress.tool(info); sendRunEvent('chat.tool', { conversationId, ...info }); publishProgress();
             },
             onAgentUpdate: agent => { progress.agent(agent); publishProgress(); },
+            onWorkUpdate: work => { progress.workUpdate(work); publishProgress(); },
             onStatus: (status) => {
               progress.status(status);
               const active = this.activeRuns.get(conversationId);
@@ -2779,7 +2780,7 @@ export class AgentServer {
         progress.transition('completed'); publishProgress();
         try { this.runJournal.finish(progress.runId, 'completed'); } catch { this.logger.error('Run completion metadata could not be saved; do not automatically replay this run.'); }
         sendRunEvent('chat.done', { conversationId, text: result.text, usage: result.usage, route: result.route, conversation: updated });
-        return { ok: true, conversationId, text: result.text, route: result.route };
+        return { ok: true, conversationId, text: result.text, route: result.route, ...(progress.snapshot().work ? { work: progress.snapshot().work } : {}) };
       } catch (err) {
         const rawMessage = err instanceof Error ? err.message : String(err);
         // Only label an error as a user cancellation when this run's abort

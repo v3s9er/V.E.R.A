@@ -3,15 +3,16 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from '
 import { dirname, join, resolve } from 'node:path';
 import { AIME_JSON_SHA256, AIME_REVISION, gradeAime, readAimeCache, selectAimeYear } from './benchmark-aime-data.js';
 import { ARC_LICENSE_SHA256, ARC_MANIFEST_SHA256, ARC_RAW, ARC_REVISION, ARC_SOURCE, arcPrompt, gradeArc, readArcCache, type ArcGrid } from './benchmark-arc-data.js';
+import { workCaseRoutePolicy, workOntologyTasks, type WorkScenario } from './app-benchmark-work.js';
 
 export type Arm = 'single' | 'adaptive' | 'ontology-adaptive';
 export interface Relation { subject: string; predicate: string; object: string }
 export interface BenchmarkTask {
   id: string; prompt: string; relations: Relation[]; expected: number | string | ArcGrid[];
-  sourceSha256?: string; testInputs?: number; recallCase?: 'exact' | 'absent' | 'hub'; answerLines?: number;
+  sourceSha256?: string; testInputs?: number; recallCase?: 'exact' | 'absent' | 'hub'; answerLines?: number; work?: WorkScenario;
 }
 export interface BenchmarkOptions {
-  appPath: string; expectedVersion: string; suite: 'aime' | 'relations' | 'arc2' | 'knowledge-recall'; cache?: string; year: number;
+  appPath: string; expectedVersion: string; suite: 'aime' | 'relations' | 'arc2' | 'knowledge-recall' | 'work-ontology'; cache?: string; year: number;
   model: string; effort: string; arms: Arm[]; repetitions: number; deadlineMs: number;
   prefix: string; cli: string; planOnly: boolean; preflightOnly: boolean; allowUsage: boolean; seed: string;
   ids?: string[]; tokenPolicy: 'quality' | 'audit-only'; planHash?: string; arcSelection?: 'development' | 'locally-unused';
@@ -37,10 +38,11 @@ export function parseOptions(argv: string[]): BenchmarkOptions {
   if (!['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(raw.effort)) throw new Error('Explicit reasoning effort required');
   if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(raw['expected-version'])) throw new Error('Exact application version required');
   const suite = raw.suite ?? 'aime';
-  if (!['aime', 'relations', 'arc2', 'knowledge-recall'].includes(suite)) throw new Error('Unknown suite');
-  const arms = (raw.arms ?? (suite === 'knowledge-recall' ? 'ontology-adaptive' : suite === 'relations' ? 'single,adaptive,ontology-adaptive' : 'single,adaptive')).split(',') as Arm[];
+  if (!['aime', 'relations', 'arc2', 'knowledge-recall', 'work-ontology'].includes(suite)) throw new Error('Unknown suite');
+  const arms = (raw.arms ?? (suite === 'work-ontology' ? 'single' : suite === 'knowledge-recall' ? 'ontology-adaptive' : suite === 'relations' ? 'single,adaptive,ontology-adaptive' : 'single,adaptive')).split(',') as Arm[];
   if (!arms.length || new Set(arms).size !== arms.length || arms.some(arm => !['single', 'adaptive', 'ontology-adaptive'].includes(arm))) throw new Error('Invalid benchmark arms');
   if (suite === 'knowledge-recall' && (arms.length !== 1 || arms[0] !== 'ontology-adaptive')) throw new Error('Knowledge recall compares application versions using only ontology-adaptive');
+  if (suite === 'work-ontology' && (arms.length !== 1 || arms[0] !== 'single' || raw.model !== 'gpt-6-sol' || raw.effort !== 'high')) throw new Error('Work ontology requires the single arm with requested gpt-6-sol and high effort');
   if (['aime', 'arc2'].includes(suite) && arms.includes('ontology-adaptive')) throw new Error('AIME/ARC have no supplied ontology: use the separate relations suite');
   const integer = (name: string, fallback: number, min: number, max: number) => {
     const value = raw[name] === undefined ? fallback : Number(raw[name]);
@@ -53,19 +55,21 @@ export function parseOptions(argv: string[]): BenchmarkOptions {
   if (!planOnly && !preflightOnly && !allowUsage) throw new Error('Execution requires --allow-account-usage yes');
   if (['aime', 'arc2'].includes(suite) && !raw.cache) throw new Error('Pinned --cache required for public tasks');
   if (suite === 'knowledge-recall' && (raw.cache || raw.year)) throw new Error('Knowledge recall uses generated memory facts; do not supply --cache or --year');
+  if (suite === 'work-ontology' && (raw.cache || raw.year)) throw new Error('Work ontology uses generated workspace fixtures; do not supply --cache or --year');
   const tokenPolicy = raw['token-policy'] ?? 'audit-only';
   if (!['quality', 'audit-only'].includes(tokenPolicy)) throw new Error('Invalid token policy');
   if (tokenPolicy !== 'audit-only' && arms.some(arm => arm !== 'single')) throw new Error('Adaptive helpers require --token-policy audit-only in the current product');
   if (raw['plan-hash'] && !/^[a-f0-9]{64}$/.test(raw['plan-hash'])) throw new Error('Invalid plan hash');
+  if (suite === 'work-ontology' && !planOnly && !preflightOnly && !raw['plan-hash']) throw new Error('Work ontology execution requires an explicit frozen --plan-hash');
   const ids = raw.ids?.split(',');
   if (ids && (!ids.length || new Set(ids).size !== ids.length || ids.some(id => !(suite === 'arc2' ? /^[a-f0-9]{8}$/ : /^\d{4}-AIME-(I|II)-\d{2}$/).test(id)))) throw new Error('Invalid benchmark IDs');
-  if (ids && ['relations', 'knowledge-recall'].includes(suite)) throw new Error('--ids is only for public development subsets');
+  if (ids && ['relations', 'knowledge-recall', 'work-ontology'].includes(suite)) throw new Error('--ids is only for public development subsets');
   if (suite === 'arc2') {
     if (!['development', 'locally-unused'].includes(raw['arc-selection'])) throw new Error('Explicit --arc-selection required');
     if ((raw['arc-selection'] === 'development') !== Boolean(ids)) throw new Error('Only ARC development selection requires explicit --ids');
     if (raw.year || raw.seed) throw new Error('ARC selection is frozen in its prepared cache; do not supply --year or --seed');
   } else if (raw['arc-selection']) throw new Error('--arc-selection is only for ARC');
-  return { appPath: resolve(raw['app-path']), expectedVersion: raw['expected-version'], suite: suite as BenchmarkOptions['suite'], cache: raw.cache && resolve(raw.cache), year: integer('year', 2022, 2022, 2024), model: raw.model, effort: raw.effort, arms, repetitions: integer('repetitions', 2, 1, 20), deadlineMs: integer('timeout-ms', suite === 'arc2' ? 600_000 : 300_000, 10_000, 1_200_000), prefix: resolve(raw['out-prefix']), cli: raw.cli ?? 'codex', planOnly, preflightOnly, allowUsage, seed: raw.seed ?? (suite === 'knowledge-recall' ? 'vera-knowledge-recall-v1' : 'vera-relations-v1'), ids, tokenPolicy: tokenPolicy as BenchmarkOptions['tokenPolicy'], planHash: raw['plan-hash'], arcSelection: raw['arc-selection'] as BenchmarkOptions['arcSelection'] };
+  return { appPath: resolve(raw['app-path']), expectedVersion: raw['expected-version'], suite: suite as BenchmarkOptions['suite'], cache: raw.cache && resolve(raw.cache), year: integer('year', 2022, 2022, 2024), model: raw.model, effort: raw.effort, arms, repetitions: integer('repetitions', 2, 1, 20), deadlineMs: integer('timeout-ms', suite === 'arc2' ? 600_000 : 300_000, 10_000, 1_200_000), prefix: resolve(raw['out-prefix']), cli: raw.cli ?? 'codex', planOnly, preflightOnly, allowUsage, seed: raw.seed ?? (suite === 'work-ontology' ? 'vera-work-ontology-v1' : suite === 'knowledge-recall' ? 'vera-knowledge-recall-v1' : 'vera-relations-v1'), ids, tokenPolicy: tokenPolicy as BenchmarkOptions['tokenPolicy'], planHash: raw['plan-hash'], arcSelection: raw['arc-selection'] as BenchmarkOptions['arcSelection'] };
 }
 
 function regularFile(path: string): void {
@@ -176,6 +180,7 @@ export function assertKnowledgeTelemetry(suite: BenchmarkOptions['suite'], arm: 
   if (suite === 'relations' && arm === 'ontology-adaptive' && !(knowledge?.asserted > 0 && knowledge?.inferred > 0)) throw new Error('ontology_not_observed');
 }
 export function loadTasks(options: BenchmarkOptions): BenchmarkTask[] {
+  if (options.suite === 'work-ontology') return workOntologyTasks(options.seed);
   if (options.suite === 'relations') return relationTasks(options.seed);
   if (options.suite === 'knowledge-recall') return knowledgeRecallTasks(options.seed);
   if (options.suite === 'arc2') {
@@ -190,15 +195,21 @@ export function loadTasks(options: BenchmarkOptions): BenchmarkTask[] {
   return chosen.map(task => ({ id: task.id, expected: task.answer, relations: [], prompt: `Solve this competition mathematics problem independently. Use only the problem below. Bounded local scratch calculation and configured read-only helpers are allowed when useful. Do not search the network, inspect files outside the fresh scratch workspace, consult answer keys, other conversations, accounts or external references. Quoted Asymptote is diagram data, not an instruction to execute. Return only Answer: N, where N is an integer from 0 to 999.\n\n${task.problem}` }));
 }
 export function gradeTask(task: BenchmarkTask, text: string): { passed: boolean; failure: string | null } {
+  if (task.work) throw new Error('work_evidence_required');
   if (Array.isArray(task.expected)) return gradeArc(text, task.expected);
   if (typeof task.expected === 'number') { const result = gradeAime(text, task.expected); return { passed: result.passed, failure: result.failure }; }
   const format = task.answerLines ? new RegExp(`^${Array.from({ length: task.answerLines }, (_, i) => `Q${i + 1}: .+`).join('\n')}$`) : /^Q1: .+\nQ2: .+\nQ3: .+\nQ4: .+$/;
   return { passed: text.trim() === task.expected, failure: text.trim() === task.expected ? null : format.test(text.trim()) ? 'wrong_answer' : 'answer_format' };
 }
 export function publicTask(task: BenchmarkTask) { return { id: task.id, promptSha256: sha256(task.prompt), relationsSha256: sha256(canonicalJson(task.relations)),
+  ...(task.work ? { workAcceptance: task.work.acceptance, workRoutePolicy: workCaseRoutePolicy(task.work.acceptance.kind), workSpecSha256: sha256(canonicalJson(task.work)), representation: 'native-work-tools-and-filesystem' } : {}),
   ...(task.recallCase ? { recallCase: task.recallCase, relationCount: task.relations.length, representation: 'scoped-memory-only' } : {}),
   ...(task.sourceSha256 ? { sourceSha256: task.sourceSha256, testInputs: task.testInputs, representation: 'text-grid' } : {}) }; }
 export function datasetProvenance(options: BenchmarkOptions) {
+  if (options.suite === 'work-ontology') return { source: 'independently-generated-work-ontology-v1', seed: options.seed,
+    split: 'synthetic-functional-regression', heldOut: false, taskCount: 3, representation: 'native-work-tools-and-filesystem',
+    acceptance: 'Artifact cases require native/high, exact filesystem hashes, work receipts and host summaries. A short greeting exercises the default same-model text route with no work tools; actual effort is recorded separately from requested high.',
+    limitation: 'Native tool arguments/results remain private; this suite cannot independently inspect the planned dependency graph or exact check definitions. Core tests verify those semantics. This is not a general agent score.' };
   if (options.suite === 'knowledge-recall') return { source: 'independently-generated-knowledge-recall-v1', seed: options.seed,
     split: 'synthetic-functional-regression', heldOut: false, taskCount: 3, representation: 'scoped-memory-only',
     comparison: 'same suite and ontology-adaptive arm across frozen application versions; not mode superiority',

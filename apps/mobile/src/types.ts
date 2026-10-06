@@ -172,6 +172,7 @@ export interface ToolEvent {
 }
 
 export interface ChatRunState {
+  work?: import('../../../packages/shared/src/ontology').WorkOntologySummary;
   conversationId: string;
   running: boolean;
   startedAt?: number;

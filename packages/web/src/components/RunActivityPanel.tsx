@@ -1,17 +1,18 @@
 import { useEffect, useState } from 'react';
 import './RunActivityPanel.css';
 import { activityLabel, agentActivityLabel, AGENT_STATE_LABELS, executionPresentation, runPresentation } from '@mr-robot/shared';
-import type { ChatRunActivity, ChatRunPhase, CoordinationAgent, RoutingExecutionMode } from '@mr-robot/shared';
+import type { ChatRunActivity, ChatRunPhase, CoordinationAgent, RoutingExecutionMode, WorkOntologySummary } from '@mr-robot/shared';
 
-export function RunActivityPanel({ phase, activity = [], activityTruncated, activityHadErrors, observationLimited, queued, agents = [], startedAt, updatedAt, busy, status, executionMode }: {
+export function RunActivityPanel({ phase, activity = [], activityTruncated, activityHadErrors, observationLimited, queued, agents = [], work, startedAt, updatedAt, busy, status, executionMode }: {
   phase?: ChatRunPhase; activity?: ChatRunActivity[]; agents?: CoordinationAgent[]; startedAt?: number; updatedAt?: number; busy: boolean; status?: string; executionMode?: RoutingExecutionMode;
   activityTruncated?: boolean; activityHadErrors?: boolean; observationLimited?: boolean; queued?: boolean;
+  work?: WorkOntologySummary;
 }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => { if (!busy) return; setNow(Date.now()); const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, [busy]);
   if (!busy && !phase && !activity.length && !agents.length) return null;
-  const view = runPresentation({ phase, activity, activityTruncated, activityHadErrors, observationLimited, queued, agents, startedAt, updatedAt, busy, status }, now);
-  const execution = executionPresentation(executionMode, agents);
+  const view = runPresentation({ phase, activity, activityTruncated, activityHadErrors, observationLimited, queued, agents, work, startedAt, updatedAt, busy, status }, now);
+  const execution = executionPresentation(executionMode, agents, activity);
   const { state, heading } = view;
   const hasErrors = view.hasErrors;
   return <details className={`run-panel phase-${state}${hasErrors ? ' has-errors' : ''}`}>
@@ -19,6 +20,7 @@ export function RunActivityPanel({ phase, activity = [], activityTruncated, acti
       <span className="run-panel-heading"><b role="status">{heading}</b><small>{view.detail}</small>{view.observationNotice && <small className="run-observation-notice" role="note">{view.observationNotice}</small>}</span>{view.elapsed && <time className="run-panel-time" aria-label={`경과 ${view.elapsed}`}>{view.elapsed}</time>}<span className="run-panel-chevron">⌄</span>
     </summary>
     <div className="run-panel-content">
+    {view.workNotice && <p className="run-work-notice" role="status">{view.workNotice}<br />계획에 명시한 파일 조건만 확인합니다. 전체 답변의 정확도나 테스트 통과를 보증하지 않습니다.</p>}
     <p>{execution.selected} · {execution.detail}<br />{execution.observed}</p>
     {agents.length > 0 && <ol className="run-agent-list" aria-label="에이전트별 작업 진행">
       {agents.map(agent => <li key={agent.agentId} className={`run-agent ${agent.state}`}>

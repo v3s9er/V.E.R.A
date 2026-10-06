@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { canonicalJson, sha256 } from './app-benchmark-protocol.js';
+import { gradeWorkEvidence, validWorkAcceptance, workCaseRoutePolicy, workRouteMatches, type WorkAcceptance } from './app-benchmark-work.js';
 
 type Item = { taskId: string; arm: string; repetition: number };
 const measurement = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -18,9 +19,10 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
   if (!plan || !Array.isArray(plan.schedule) || !plan.schedule.length || plan.schedule.length > 10_000
     || !Array.isArray(plan.arms) || !plan.arms.length || new Set(plan.arms).size !== plan.arms.length
     || plan.arms.some((arm: unknown) => !['single', 'adaptive', 'ontology-adaptive'].includes(arm as string))
-    || !['aime', 'relations', 'arc2', 'knowledge-recall'].includes(plan.suite)
+    || !['aime', 'relations', 'arc2', 'knowledge-recall', 'work-ontology'].includes(plan.suite)
     || (!['relations', 'knowledge-recall'].includes(plan.suite) && plan.arms.includes('ontology-adaptive'))
     || (plan.suite === 'knowledge-recall' && (plan.arms.length !== 1 || plan.arms[0] !== 'ontology-adaptive'))
+    || (plan.suite === 'work-ontology' && (plan.arms.length !== 1 || plan.arms[0] !== 'single' || plan.model !== 'gpt-6-sol' || plan.effort !== 'high'))
     || typeof plan.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(plan.model)
     || !['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(plan.effort)
     || !Array.isArray(plan.tasks) || !plan.tasks.length || plan.tasks.length > 10_000
@@ -29,12 +31,18 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
     || !Array.isArray(report.samples)) throw new Error('Invalid or mismatched evaluation evidence');
   const taskIds = new Set<string>();
   const knowledgeInventory = new Map<string, { relationCount: number; relationsSha256: string }>();
+  const workInventory = new Map<string, WorkAcceptance>();
   for (const task of plan.tasks) {
     if (typeof task?.id !== 'string' || !task.id || task.id.length > 200 || taskIds.has(task.id)) throw new Error('Invalid task inventory');
     taskIds.add(task.id);
     if (plan.suite === 'knowledge-recall') {
       if (!tokenCount(task.relationCount) || typeof task.relationsSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.relationsSha256)) throw new Error('Invalid knowledge-recall inventory');
       knowledgeInventory.set(task.id, { relationCount: task.relationCount, relationsSha256: task.relationsSha256 });
+    }
+    if (plan.suite === 'work-ontology') {
+      if (!validWorkAcceptance(task.workAcceptance) || typeof task.workSpecSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.workSpecSha256)
+        || canonicalJson(task.workRoutePolicy) !== canonicalJson(workCaseRoutePolicy(task.workAcceptance.kind))) throw new Error('Invalid work-ontology inventory');
+      workInventory.set(task.id, task.workAcceptance);
     }
   }
   const planned = new Map<string, Item>();
@@ -54,7 +62,7 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
     if (!planned.has(key(row)) || observed.has(key(row)) || typeof row.passed !== 'boolean'
       || typeof row.completed !== 'boolean' || (row.passed && (!row.completed || row.failure !== null))
       || !measurement(row.durationMs) || !(row.firstTextMs === null || measurement(row.firstTextMs))) throw new Error('Invalid or duplicate observed sample');
-    if (row.completed && (row.route?.model !== plan.model || row.route?.effort !== plan.effort || row.nativeRouteObserved !== true
+    if (row.completed && (row.route?.model !== plan.model || (plan.suite !== 'work-ontology' && (row.route?.effort !== plan.effort || row.nativeRouteObserved !== true))
       || row.savedFinalMatches !== true || row.streamMatches !== true)) throw new Error('Observed execution invariants differ from plan');
     if (row.completed && plan.suite === 'knowledge-recall') {
       const expected = knowledgeInventory.get(row.taskId)!;
@@ -62,6 +70,13 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
       if (setup?.verified !== true || setup.expectedRelations !== expected.relationCount
         || setup.receiptCount !== expected.relationCount || setup.storedCount !== expected.relationCount
         || setup.relationsSha256 !== expected.relationsSha256) throw new Error('Observed knowledge setup differs from plan');
+    }
+    if (row.completed && plan.suite === 'work-ontology') {
+      const acceptance = workInventory.get(row.taskId)!;
+      const native = acceptance.kind !== 'greeting';
+      if (row.nativeOnly !== native || row.nativeRouteObserved !== native || !workRouteMatches(acceptance.kind, row.route, row.transport)) throw new Error('Observed work route differs from plan');
+      const grade = gradeWorkEvidence(acceptance, row.workEvidence);
+      if (row.passed !== grade.passed || row.failure !== grade.failure) throw new Error('Observed work acceptance contradicts evidence');
     }
     if (!Array.isArray(row.agentEvents) || row.agentEvents.some((event: any) => event.model !== undefined && event.model !== plan.model)) throw new Error('Helper model differs from plan');
     const usage = row.usage;
@@ -103,15 +118,22 @@ export function summarizeAppBenchmark(envelope: any, report: any) {
       tokensPerSuccess: totalTokens !== null && passed > 0 ? totalTokens / passed : null,
       helperRunsObserved: rows.filter(row => Array.isArray(row.agentEvents) && row.agentEvents.length > 0).length };
   });
+  const workRoutes: Array<{ kind: WorkAcceptance['kind']; effort: string; transport: string; count: number }> = [];
+  if (plan.suite === 'work-ontology') for (const row of observed.values()) {
+    if (!row.completed) continue;
+    const kind = workInventory.get(row.taskId)!.kind, effort = row.route.effort, transport = workCaseRoutePolicy(kind).transport;
+    const previous = workRoutes.find(item => item.kind === kind && item.effort === effort && item.transport === transport);
+    if (previous) previous.count++; else workRoutes.push({ kind, effort, transport, count: 1 });
+  }
   return { complete, planHash: envelope.planHash as string, model: String(plan.model), effort: String(plan.effort),
-    suite: String(plan.suite), arms, officialScore: false as const };
+    suite: String(plan.suite), arms, ...(plan.suite === 'work-ontology' ? { workRoutes } : {}), officialScore: false as const };
 }
 
 export function renderAppBenchmarkReport(envelope: any, report: any): string {
   const summary = summarizeAppBenchmark(envelope, report);
   const lines = ['# V.E.R.A 실제 앱 평가', '',
     `상태: ${summary.complete ? '계획된 실행 완료 · 해시 고정 확인' : '미완료 — 누락 실행도 계획 분모에 포함'}`,
-    `문제군: ${cell(summary.suite)} · 모델: ${cell(summary.model)} · 추론: ${cell(summary.effort)}`, '',
+    `문제군: ${cell(summary.suite)} · 모델: ${cell(summary.model)} · ${summary.suite === 'work-ontology' ? '요청 추론' : '추론'}: ${cell(summary.effort)}`, '',
     '| 실행 정책 | 정답 / 계획 | 미실행 | 응답 완료 p50 / p95 | 총 토큰 | 정답 1회당 토큰 |',
     '| --- | ---: | ---: | ---: | ---: | ---: |'];
   for (const arm of summary.arms) lines.push(`| ${cell(arm.arm)} | ${arm.passed} / ${arm.expected} | ${arm.missing} | ${number(arm.completionP50Ms === null ? null : arm.completionP50Ms / 1000, 2)} / ${number(arm.completionP95Ms === null ? null : arm.completionP95Ms / 1000, 2)}초 | ${number(arm.totalTokens)} | ${number(arm.tokensPerSuccess, 1)} |`);
@@ -119,8 +141,15 @@ export function renderAppBenchmarkReport(envelope: any, report: any): string {
     '| 실행 정책 | 모든 반복에서 정답인 문제 | 첫 답변 p50 (관측 수) | 사용량 확인 수 | 보조 작업 관측 실행 수 |',
     '| --- | ---: | ---: | ---: | ---: |');
   for (const arm of summary.arms) lines.push(`| ${cell(arm.arm)} | ${arm.consistent} / ${arm.independentTaskCount} (${arm.repetitions}회 반복) | ${number(arm.firstTextP50Ms === null ? null : arm.firstTextP50Ms / 1000, 2)}초 (${arm.firstTextCount}) | ${arm.usageKnown} / ${arm.expected} | ${arm.helperRunsObserved} / ${arm.expected} |`);
+  if (summary.workRoutes) {
+    lines.push('', '## 실제 요청 경로와 추론', '', '| 사례 | 실제 추론 | 실제 전송 경로 | 완료 관측 수 |', '| --- | --- | --- | ---: |');
+    for (const route of summary.workRoutes) lines.push(`| ${cell(route.kind)} | ${cell(route.effort)} | ${cell(route.transport)} | ${route.count} |`);
+    lines.push('', '저장된 요청 추론은 high입니다. 짧은 인사는 제품의 기본 텍스트 경로와 실제 적용된 추론 수준으로 별도 기록합니다. 작업 사례도 라우팅 프리셋을 지정하지 않으며 자식 작업 위임은 통과 조건이 아닙니다.');
+  }
   lines.push('', '## 해석 범위', '',
-    summary.suite === 'knowledge-recall'
+    summary.suite === 'work-ontology'
+      ? '- 네이티브 작업 도구의 작은 합성 기능 회귀 검사입니다. 파일 해시·도구 실행 관측·호스트의 검사 상태로 판정하며 완료했다는 모델 문장은 증거로 사용하지 않습니다. 비공개 도구 입력은 수집하지 않으므로 앱 평가에서 의존성 그래프와 검사 정의 자체를 독립적으로 재구성하지는 않습니다.'
+      : summary.suite === 'knowledge-recall'
       ? '- 저장 지식 검색의 합성 기능 회귀 검사입니다. 동일한 모델·설정·문제로 앱 버전 간 회귀를 비교하기 위한 것이며 실행 모드의 우열이나 공개 벤치마크 점수를 나타내지 않습니다.'
       : summary.suite === 'relations'
       ? '- 합성 관계 문제의 기능 회귀 검사이며 공개 대회·리더보드 점수나 일반 추론 성능 점수가 아닙니다.'
