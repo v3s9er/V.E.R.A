@@ -103,7 +103,7 @@ export function ModelTuningSettings({ client, providers, nativeDesktopAdmin }: {
   if (!client.isAdmin) return null;
   return <div className="tuning-settings stack">
     <Card className="panel tuning-panel">
-      <div className="panel-head"><div><h3>모델 튜닝</h3><p className="panel-hint">모델을 바꾸지 않고 추론·답변·보조 작업 방식을 조절합니다.</p></div><Badge tone={data?.settings.activeProfileId ? 'accent' : 'default'}>{data?.settings.activeProfileId ? '프로필 사용 중' : '기본값'}</Badge></div>
+      <div className="panel-head"><div><h3>모델 튜닝</h3><p className="panel-hint">선택한 모델의 추론·답변·문맥 설정을 조절합니다. 단일 하네스는 보조 에이전트를 호출하지 않습니다.</p></div><Badge tone={data?.settings.activeProfileId ? 'accent' : 'default'}>{data?.settings.activeProfileId ? '프로필 사용 중' : '기본값'}</Badge></div>
       <div className="tuning-top-grid"><Field label="공급자"><Select aria-label="튜닝 공급자" value={providerId} disabled={busy || dirty || creating} onChange={event => { epoch.current += 1; setProviderId(event.target.value); }}>
         {!providers.length && <option value="">먼저 모델을 연결하세요</option>}{providers.map(item => <option key={item.id} value={item.id}>{item.label} · {item.model}</option>)}
       </Select></Field><div className="tuning-profile-select"><Field label="프로필"><Select aria-label="튜닝 프로필" value={selectedId} disabled={blocked || dirty || creating} onChange={event => { setSelectedId(event.target.value); setDraft(tuningDraft(data?.settings.profiles.find(item => item.id === event.target.value))); setError(''); setNotice(''); }}>
@@ -117,8 +117,7 @@ export function ModelTuningSettings({ client, providers, nativeDesktopAdmin }: {
         <Field label="프로필 이름"><Input value={draft.name} maxLength={80} onChange={event => edit('name', event.target.value)} placeholder="예: 빠른 조사, 꼼꼼한 검증" /></Field>
         <div className="tuning-grid"><Field label="추론 단계"><Select value={draft.reasoningEffort} onChange={event => edit('reasoningEffort', event.target.value)}><option value="">기본값 유지</option>{data.capabilities.reasoningEfforts.map(value => <option key={value} value={value}>{EFFORT_LABEL[value] ?? value}</option>)}{draft.reasoningEffort && !data.capabilities.reasoningEfforts.includes(draft.reasoningEffort as any) && <option value={draft.reasoningEffort} disabled>{draft.reasoningEffort} · 지원 안 됨</option>}</Select></Field>
           <Field label="답변 길이"><Select value={draft.responseStyle} onChange={event => edit('responseStyle', event.target.value)}><option value="">기본값 유지</option><option value="default">기본</option><option value="concise">간결하게</option><option value="detailed">상세하게</option></Select></Field>
-          <Field label="보조 작업"><Select value={draft.helperMode} onChange={event => edit('helperMode', event.target.value)}><option value="">기본값 유지</option><option value="auto">필요할 때 사용</option><option value="off">사용 안 함</option></Select></Field>
-          <Field label="동시 보조 작업"><Select value={draft.maxParallelHelpers} onChange={event => edit('maxParallelHelpers', event.target.value)}><option value="">기본값 유지</option><option value="1">1개</option><option value="2">2개</option></Select></Field>
+          <div className="panel-hint">실행 구조: 선택한 모델 1개. 이전 보조 작업 설정은 보존하지만 현재 실행에는 적용하지 않습니다.</div>
         </div>
         <details className="tuning-advanced"><summary>출력·문맥 고급 설정</summary><div className="tuning-grid">
           <Field label="최대 출력 토큰"><Input type="number" min={256} max={131072} step={1} disabled={!data.capabilities.maxOutputTokens} value={draft.maxOutputTokens} placeholder="기본값 유지" onChange={event => edit('maxOutputTokens', event.target.value)} />{!data.capabilities.maxOutputTokens && <small>구독 CLI에서는 강제할 수 없습니다.</small>}{draft.maxOutputTokens && <button type="button" className="tuning-clear" onClick={() => edit('maxOutputTokens', '')}>설정 지우기</button>}</Field>

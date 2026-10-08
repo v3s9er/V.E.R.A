@@ -239,9 +239,11 @@ if (!mobileChat.includes('configureExecution(conversationId, { reasoningEffort }
   || !mobileChat.includes('accessibilityState={{ selected, disabled: savingConfiguration }}')
   || !mobileChat.includes("apply: 'next-run' | 'stop-current' = 'next-run'")) throw new Error('mobile per-conversation reasoning selection can race, skip persistence, or mutate an active run');
 if (!mobileChat.includes('const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0]')
-  || !mobileChat.includes('reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model)')
+  || !mobileChat.includes('reasoningEffortsFor(provider, providerModel ?? provider?.model)')
+  || !mobileChat.includes("const selectedExecutionMode = 'single' as const;")
+  || mobileChat.includes('selectScenario')
   || !mobileChat.includes('applyConversationConfiguration(conversationId')
-  || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile model, preset, workspace, access, or default-provider settings can race command execution');
+  || (mobileChat.match(/!beginConfigurationSave\(\)/g) ?? []).length < 5) throw new Error('mobile single-model, workspace, access, or default-provider settings can race command execution');
 if (!mobilePcList.includes('modalScrollContent') || !mobilePcList.includes('keyboardShouldPersistTaps="handled"')) throw new Error('mobile PC setup form cannot scroll above the keyboard');
 if (!mobileHome.includes('고정된 모체 PC 없이')
   || !mobileHome.includes('onSelectPc(candidate)')
@@ -282,7 +284,11 @@ if (!mobilePcList.includes('PAIRING_PIN_PATTERN.test(pin)')
 if (!mobileChat.includes('uploadSecureFile') || !mobileChat.includes('controller.abort()') || !mobileChat.includes('cancelAttachment') || !mobileChat.includes('120_000')) throw new Error('mobile encrypted attachment upload lacks cancel, timeout, or lifecycle cleanup');
 if (!app.includes('!client.isAdmin') || !app.includes('관리 제한')) throw new Error('paired-device admin scope is not visible in the workspace header');
 if (!settings.includes('const canManage = client.isAdmin') || !settings.includes('access-scope-banner') || !settings.includes('disabled={locked}')) throw new Error('settings do not expose and enforce paired-device read-only management scope');
-if (!settings.includes('readOnly={!canManage}') || !settings.includes('disabled={!canManage || !selectedRoutingPreset}')) throw new Error('routing graph and preset apply remain mutable for paired non-admin devices');
+if (!settings.includes('이전 프리셋 보관함 · 읽기 전용')
+  || !settings.includes('providerModels={modelOptions} readOnly />')
+  || !settings.includes('<SingleHarnessIndicator />')
+  || settings.includes('onClick={() => void applyRoutingPreset(')
+  || chat.includes('aria-label="대화 모델 시나리오"')) throw new Error('archived routing presets remain active or editable in the single-agent UI');
 if (!settings.includes("client.call('pairing.link.capability.set'")
   || settings.includes("pairing.link.update', { id: link.id, capabilities:")) throw new Error('device capability toggles can replay a stale full capability array');
 if (!schedulesView.includes('clearNaverCredentials: true')

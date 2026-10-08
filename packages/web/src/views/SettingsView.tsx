@@ -9,6 +9,7 @@ import { DependencySetup } from '../components/DependencySetup';
 import { ToolPortalSettings } from '../components/ToolPortalSettings';
 import { ModelTuningSettings } from '../components/ModelTuningSettings';
 import { KnowledgeEditor } from '../components/KnowledgeEditor';
+import { HarnessSettings, SingleHarnessIndicator } from '../components/HarnessSettings';
 import { loadModelCatalog, modelCatalogSummary } from '../model-catalog';
 
 interface PairingInfo {
@@ -839,7 +840,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
   const settingsSections = [
     { id: 'models', title: '모델 및 연결', adminOnly: false },
     ...(canManage ? [{ id: 'tuning', title: '튜닝 · 성능', adminOnly: true } as const] : []),
-    { id: 'routing', title: '모델 라우팅', adminOnly: false },
+    { id: 'routing', title: '프로젝트 하네스', adminOnly: false },
     { id: 'dependencies', title: '외부 도구', adminOnly: false },
     { id: 'voice', title: '음성 호출', adminOnly: true },
     { id: 'safety', title: '권한 및 안전', adminOnly: true },
@@ -1013,27 +1014,13 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
       <div className={section === 'routing' ? '' : 'settings-section-hidden'}>
       <Card className="panel">
         <div className="panel-head">
-          <div><h3>비용 최적화 모델 파이프라인</h3><p className="panel-hint">요청 복잡도와 작업 종류에 따라 가장 싼 적합 모델을 고르고, 지정한 순서대로 장애 조치합니다.</p></div>
-          {routing && <Select disabled={!canManage} value={routing.mode} onChange={(e) => void saveRouting({ mode: e.target.value as RoutingSettings['mode'] })}>
-            <option value="economy">절약 우선</option><option value="balanced">균형 (권장)</option><option value="quality">품질 우선</option><option value="manual">수동 지정</option>
-          </Select>}
+          <div><h3>실행 방식</h3><p className="panel-hint">모델·추론 강도는 대화에서 선택한 값을 유지합니다. 자동 모델 전환이나 다중 모델 실행은 하지 않습니다.</p></div>
         </div>
-        {!canManage && <div className="access-inline"><b>시나리오 미리보기</b><span>현재 구성과 토큰 통계는 볼 수 있습니다. 기본 라우팅과 프리셋 편집은 PC 데스크톱 관리자에서 진행하세요.</span></div>}
+        <SingleHarnessIndicator />
         <div className="routing-preset-panel">
-          <Field label="모델 시나리오 프리셋" hint="목록에서 클릭하면 노드 구조를 미리보고 적용할 수 있습니다">
-            <Button className="preset-browser-trigger" variant="ghost" onClick={() => setPresetBrowserOpen(true)}><span>{selectedRoutingPreset?.builtin ? '기본 프리셋' : '내 프리셋'}</span><b>{selectedRoutingPreset?.name ?? '프리셋 선택'}</b><span>목록·그래프 보기 ›</span></Button>
+          <Field label="이전 프리셋 보관함" hint="기존 데이터는 보존되지만 현재 실행에는 적용되지 않습니다. 읽기 전용입니다.">
+            <Button className="preset-browser-trigger" variant="ghost" onClick={() => setPresetBrowserOpen(true)}><span>보관된 설정</span><b>{routingPresets.length}개 프리셋</b><span>읽기 전용 보기 ›</span></Button>
           </Field>
-          <div className="type-row routing-preset-actions">
-            <Button onClick={() => void applyRoutingPreset()} disabled={!canManage || !selectedRoutingPresetId}>선택 프리셋 적용</Button>
-            <Input disabled={!canManage} value={routingPresetName} onChange={(event) => setRoutingPresetName(event.target.value)} placeholder="새 프리셋 이름" />
-            <Button variant="ghost" disabled={!canManage} onClick={() => void saveRoutingPreset(false)}>현재 트리 새로 저장</Button>
-            {routingPresets.some((item) => item.id === selectedRoutingPresetId && !item.builtin) && <>
-              <Button variant="ghost" disabled={!canManage} onClick={() => void saveRoutingPreset(true)}>선택 프리셋 덮어쓰기</Button>
-              <Button variant="danger" disabled={!canManage} onClick={deleteRoutingPreset}>삭제</Button>
-            </>}
-          </div>
-          {routingPresets.find((item) => item.id === selectedRoutingPresetId)?.description && <p className="panel-hint">{routingPresets.find((item) => item.id === selectedRoutingPresetId)?.description}</p>}
-          {routingPresetStatus && <div className="provider-test">{routingPresetStatus}</div>}
         </div>
         {telemetry && <div className="telemetry-strip">
           <div><span>최근 실행</span><b>{Number(telemetry.turns ?? 0).toLocaleString()}회</b></div>
@@ -1045,21 +1032,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
           <div><span>실패</span><b>{Number(telemetry.failures ?? 0).toLocaleString()}회</b></div>
           <div><span>예상 비용</span><b>${Number(telemetry.estimatedCost ?? 0).toFixed(4)}</b></div>
         </div>}
-        {routing?.graph && <RoutingGraphEditor graph={routing.graph} providers={providers} providerModels={modelOptions} onSave={canManage ? (graph) => void saveRouting({ graph }) : undefined} readOnly={!canManage} />}
-        {routing && <fieldset className="form-grid routing-options permission-fieldset" disabled={!canManage}>
-          <Field label="시나리오 실행 방식" hint="순차·투표는 노드 수만큼 모델 호출이 늘어납니다"><Select value={routing.executionMode ?? 'single'} onChange={(e) => void saveRouting({ executionMode: e.target.value as RoutingSettings['executionMode'] })}>
-            <option value="single">단일 선택 · 한 모델만 호출</option><option value="adaptive">적응형 협업 · 마지막 모델 우선, 필요할 때만 보조</option><option value="pipeline">순차 파이프라인 · 노드별 전달</option><option value="vote">회의·투표 · 그룹별 상호 토론</option><option value="hybrid">혼합 · 분류＋그룹 회의＋검증</option><option value="swarm">경쟁 스웜 · 병렬 풀이＋공유＋성공 검증까지 재시도</option>
-          </Select></Field>
-          {routing.executionMode === 'adaptive' && <p className="muted">마지막 모델이 먼저 실행합니다. 앞 모델은 등록된 읽기 전용 보조 모델이며 자동으로 전부 호출하지 않습니다. Codex 네이티브의 보조 실행은 감사 전용 토큰 정책과 세션 연결이 필요합니다. 권한과 예산은 그대로 유지됩니다.</p>}
-          {(routing.executionMode === 'vote' || routing.executionMode === 'hybrid' || routing.executionMode === 'swarm') && <Field label="그룹 내부 회의 라운드" hint="2라운드부터 같은 그룹의 의견·증거·실패 기록을 공유합니다"><Select value={String(routing.meetingRounds ?? 2)} onChange={(e) => void saveRouting({ meetingRounds: Number(e.target.value) })}>
-            <option value="1">1라운드 · 독립 의견만</option><option value="2">2라운드 · 의견 교환 + 투표 (권장)</option><option value="3">3라운드 · 재토론 + 최종 투표</option>
-          </Select></Field>}
-          {(routing.executionMode === 'vote' || routing.executionMode === 'hybrid') && <Field label="그룹 간 대표 회의" hint="각 그룹의 최종안을 대표 모델끼리 교환하고 재검토합니다"><Select value={String(routing.crossGroupRounds ?? 1)} onChange={(e) => void saveRouting({ crossGroupRounds: Number(e.target.value) })}><option value="0">사용 안 함</option><option value="1">1라운드 · 그룹 최종안 교환 (권장)</option><option value="2">2라운드 · 상호 반박</option><option value="3">3라운드 · 재합의</option></Select></Field>}
-          {routing.executionMode === 'swarm' && <Field label="최대 경쟁 반복" hint="검증 성공 시 즉시 종료하며, 실패가 계속될 때만 이 상한까지 재도전합니다"><Input type="number" min={1} max={12} value={routing.maxIterations ?? 6} onChange={(e) => void saveRouting({ maxIterations: Number(e.target.value) })} /></Field>}
-          <Field label="턴당 고비용 호출 상한"><Input type="number" min={0} max={8} value={routing.maxPremiumCalls} onChange={(e) => void saveRouting({ maxPremiumCalls: Number(e.target.value) })} /></Field>
-          <Field label="어려운 요청 자동 상향"><Toggle checked={routing.escalationEnabled} onChange={(v) => void saveRouting({ escalationEnabled: v })} /></Field>
-        </fieldset>}
-      </Card></div>
+      </Card>{section === 'routing' && <HarnessSettings client={client} />}</div>
 
       <div className={section === 'dependencies' ? '' : 'settings-section-hidden'}>
         <DependencySetup />
@@ -1366,7 +1339,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
         )}
       </Card></div>
       </div>
-      <Modal open={presetBrowserOpen} onClose={() => setPresetBrowserOpen(false)} title="모델 시나리오 프리셋" size="wide">
+      <Modal open={presetBrowserOpen} onClose={() => setPresetBrowserOpen(false)} title="이전 프리셋 보관함 · 읽기 전용" size="wide">
         <div className="preset-browser">
           <aside className="preset-browser-list">
             {routingPresets.map((item) => <button key={item.id} className={item.id === selectedRoutingPresetId ? 'active' : ''} onClick={() => {
@@ -1379,7 +1352,7 @@ export function SettingsView({ onOpenChat }: { onOpenChat?: () => void }) {
               <div className="preset-preview-head"><div><h4>{selectedRoutingPreset.name}</h4><p>{selectedRoutingPreset.description}</p></div><div className="preset-preview-badges"><Badge tone="accent">{EXECUTION_LABEL[selectedRoutingPreset.executionMode ?? 'single']}</Badge>{(selectedRoutingPreset.executionMode === 'vote' || selectedRoutingPreset.executionMode === 'hybrid' || selectedRoutingPreset.executionMode === 'swarm') && <Badge>{selectedRoutingPreset.meetingRounds ?? 2}라운드</Badge>}{selectedRoutingPreset.executionMode === 'swarm' && <Badge>최대 {selectedRoutingPreset.maxIterations ?? 6}회</Badge>}<Badge>고비용 상한 {selectedRoutingPreset.maxPremiumCalls}</Badge></div></div>
               {selectedRoutingPreset.graph && <RoutingGraphEditor key={selectedRoutingPreset.id} graph={selectedRoutingPreset.graph} providers={providers} providerModels={modelOptions} readOnly />}
             </> : <p className="panel-hint">왼쪽에서 프리셋을 선택하세요.</p>}
-            <div className="modal-actions"><Button variant="ghost" onClick={() => setPresetBrowserOpen(false)}>닫기</Button><Button variant="accent" disabled={!canManage || !selectedRoutingPreset} title={!canManage ? 'PC 데스크톱 관리자에서 적용할 수 있습니다.' : undefined} onClick={() => void applyRoutingPreset()}>이 프리셋 적용</Button></div>
+            <p className="panel-hint">보관된 실행 방식과 그래프입니다. 현재 하네스는 이 프리셋을 실행하지 않습니다.</p><div className="modal-actions"><Button variant="ghost" onClick={() => setPresetBrowserOpen(false)}>닫기</Button></div>
           </section>
         </div>
       </Modal>

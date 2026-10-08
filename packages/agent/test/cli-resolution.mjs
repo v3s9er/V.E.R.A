@@ -57,7 +57,7 @@ if (codexEnv.RUST_LOG !== 'error') throw new Error('Codex native runs must suppr
 const safeClaudeArgs = safeCliExtraArgs('claude-cli', [
   '--dangerously-skip-permissions', '--mcp-config', 'evil.json', '--fallback-model', 'haiku', '--add-dir', 'C:\\',
 ]);
-if (JSON.stringify(safeClaudeArgs) !== JSON.stringify(['--fallback-model', 'haiku'])) throw new Error('unsafe Claude extra arguments were not removed');
+if (JSON.stringify(safeClaudeArgs) !== JSON.stringify([])) throw new Error('unsafe Claude extra arguments or implicit model fallback were not removed');
 const safeCodexArgs = safeCliExtraArgs('codex-cli', ['--sandbox', 'danger-full-access', '--color', 'never', '--config', 'approval_policy="never"']);
 if (JSON.stringify(safeCodexArgs) !== JSON.stringify(['--color', 'never'])) throw new Error('unsafe Codex extra arguments were not removed');
 const cliSource = readFileSync(new URL('../src/ai/cli.ts', import.meta.url), 'utf8');

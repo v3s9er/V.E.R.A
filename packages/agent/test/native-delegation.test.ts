@@ -29,18 +29,14 @@ const withCase = (base: NativeAgentRequest, name: string): NativeAgentRequest =>
 const item = (tool = 'spawnAgent', status = 'running', overrides = {}) => ({ id: 'call', type: 'collabAgentToolCall', senderThreadId: 'parent', receiverThreadIds: ['child'],
   tool, status: 'completed', model: 'fixture', reasoningEffort: 'high', agentsStates: { child: { status, message: 'PRIVATE' } }, prompt: 'PRIVATE', ...overrides });
 
-test('native delegation is explicit, bounded, scoped and rejects duplicate coordinator trees', () => {
-  const base = { permissionMode: 'read-only', session: {} } as NativeAgentRequest;
-  assert.equal(nativeDelegationLimit(base), 0);
-  assert.deepEqual(nativeDelegationConfig(base, 'selected'), { 'agents.enabled': false, 'features.multi_agent': false, 'features.multi_agent_v2': false });
-  assert.equal(nativeDelegationLimit({ ...base, nativeDelegation: {} }), 2);
-  for (const maxAgents of [0, 3, -1, NaN, 1.5]) assert.throws(() => nativeDelegationLimit({ ...base, nativeDelegation: { maxAgents } }), /한도/);
-  assert.throws(() => nativeDelegationLimit({ ...base, nativeDelegation: {}, permissionMode: 'ask' }), /승인/);
-  assert.throws(() => nativeDelegationLimit({ ...base, nativeDelegation: {}, session: undefined }), /세션/);
-  assert.throws(() => nativeDelegationLimit({ ...base, nativeDelegation: {}, hostTools: { tools: [{ name: 'agent_spawn' }] } as any }), /중복/);
-  const config = nativeDelegationConfig({ ...base, nativeDelegation: {}, reasoningEffort: 'high' }, 'selected');
-  assert.equal(config['agents.default_subagent_model'], 'selected'); assert.equal(config['agents.default_subagent_reasoning_effort'], 'high');
-  assert.equal(config['agents.max_depth'], 1);
+test('single harness rejects every legacy delegation opt-in before starting a process', () => {
+ const base = { permissionMode: 'read-only', session: {} } as NativeAgentRequest;
+ assert.equal(nativeDelegationLimit(base), 0);
+ assert.deepEqual(nativeDelegationConfig(base, 'selected'), { 'agents.enabled': false, 'features.multi_agent': false, 'features.multi_agent_v2': false });
+ for (const nativeDelegation of [{}, {maxAgents:1}, {maxAgents:2}, {maxAgents:0}, null]) {
+   assert.throws(() => nativeDelegationLimit({...base, nativeDelegation} as NativeAgentRequest), /단일 에이전트/);
+   assert.throws(() => nativeDelegationConfig({...base, nativeDelegation} as NativeAgentRequest, 'selected'), /단일 에이전트/);
+ }
 });
 
 test('only correlated parent records grant bounded child ownership and public lifecycle metadata', () => {
@@ -111,58 +107,14 @@ test('current CLI activity lifecycle establishes ownership without paths, prompt
   assert.throws(() => bounded.activity('item/completed', { ...activity, id: 'restart-first', kind: 'interacted' }, 'parent'), /한도/);
 });
 
-test('installed v2 subAgentActivity events and spawn setting overrides follow the parent boundary', async () => sandbox(async (base, call) => {
-  const events: NativeToolEvent[] = [];
-  const result = await call({ ...withCase(base, 'MODERN'), onTool: event => events.push(event) });
-  assert.equal(events.filter(event => event.name === 'native_agent_spawn' && event.status === 'done').length, 1);
-  assert.equal(result.usage.reportStatus, 'missing');
-  await assert.rejects(call(withCase(base, 'MODERN_OVERRIDE')), /모델/);
+test('legacy native request fails before child execution and ordinary parent usage stays reported', async () => sandbox(async (base, call) => {
+ await assert.rejects(call(base), /단일 에이전트/);
+ const result = await call({...withCase(base, 'DISABLED'), nativeDelegation: undefined});
+ assert.equal(result.usage.promptTokens, 100);
+ assert.equal(result.usage.reportStatus, 'reported');
 }));
-
-test('protocol child text and usage never mix; child host calls denied while parent host remains usable', async () => sandbox(async (base, call) => {
-  let executions = 0, text = ''; const events: NativeToolEvent[] = [];
-  const req = withCase(base, 'CHILD_HOST');
-  req.onText = delta => text += delta; req.onTool = event => events.push(event);
-  req.hostTools = { tools: [{ name: 'safe_parent_tool', description: 'fixture', parameters: { type: 'object' } }], authorize: () => true,
-    execute: async () => { executions++; return { success: true, contentItems: [] }; }, dispose() {} };
-  const result = await call(req);
-  assert.equal(executions, 1); assert.equal(text, result.text); assert.ok(!text.includes('PRIVATE'));
-  assert.equal(result.usage.promptTokens, 100); assert.equal(result.usage.reportStatus, 'missing');
-  assert.equal(events.filter(e => e.name === 'native_agent_spawn').length, 2); assert.ok(!JSON.stringify(events).includes('PRIVATE'));
-}));
-
-test('native opt-in workers retire even without observed children and do not claim complete accounting', async () => sandbox(async (base, call) => {
-  const a = await call(base);
-  const next = { ...base, session: { ...base.session!, history: [{ role: 'user' as const, content: base.session!.input }, { role: 'assistant' as const, content: a.text }] } };
-  const b = await call(next); assert.notEqual(a.text.split(' ')[1], b.text.split(' ')[1]);
-  assert.equal(a.usage.reportStatus, 'missing'); assert.equal(b.usage.reportStatus, 'missing');
-  const c = await call({ ...base, reasoningEffort: 'xhigh' }); assert.notEqual(a.text.split(' ')[1], c.text.split(' ')[1]);
-  const d = await call({ ...withCase(base, 'DISABLED'), nativeDelegation: undefined }); assert.equal(d.usage.reportStatus, 'reported');
-}));
-
-test('parent correlation and child completion/model gates remain fail-closed', async () => sandbox(async (base, call) => {
-  for (const name of ['MODEL_MISMATCH', 'ACTUAL_MODEL_MISMATCH', 'SENDER_MISMATCH', 'BAD_PARENT_TURN', 'UNSETTLED']) {
-    await assert.rejects(call(withCase(base, name)), /보조 작업|식별자/);
-    if (name === 'UNSETTLED') {
-      const pid = Number(readFileSync(join(base.cwd, 'fixture-child-pid.txt'), 'utf8'));
-      assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH', 'failure must drain descendants before rejecting admission');
-    }
-  }
-  await assert.rejects(call({ ...withCase(base, 'DISABLED_SPAWN'), nativeDelegation: undefined }), /허용되지 않은/);
-}));
-
-test('delegated completion retires the owned native process tree before reporting success', async () => sandbox(async (base, call) => {
-  await call(withCase(base, 'RETIRE'));
-  const pid = Number(readFileSync(join(base.cwd, 'fixture-child-pid.txt'), 'utf8'));
-  assert.ok(Number.isInteger(pid) && pid > 0);
-  assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH');
-}));
-
-test('cancellation after native spawn aborts the full owned execution and never reports a completed answer', async () => sandbox(async (base, call) => {
-  const controller = new AbortController(); let streamed = '';
-  const req = withCase(base, 'HANG'); req.signal = controller.signal; req.onText = text => streamed += text;
-  req.onTool = event => { if (event.name === 'native_agent_spawn' && event.status === 'done') setTimeout(() => controller.abort(), 10); };
-  await assert.rejects(call(req), /중지/); assert.equal(streamed, '');
-  const pid = Number(readFileSync(join(base.cwd, 'fixture-child-pid.txt'), 'utf8'));
-  assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH', 'cancellation must drain descendants before rejecting admission');
+test('unexpected native child events fail closed without mixing child output', async () => sandbox(async (base, call) => {
+ let output = '';
+ await assert.rejects(call({...withCase(base, 'DISABLED_SPAWN'), nativeDelegation: undefined, onText: t => output += t}), /허용되지 않은/);
+ assert.equal(output, '');
 }));

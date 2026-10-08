@@ -11,6 +11,7 @@ import { NativeRunScheduler } from './native-run-scheduler.js';
 import { NativeDelegationEvents, nativeDelegationConfig, nativeDelegationLimit, sanitizeNativeDelegationRequest } from './native-delegation.js';
 import { CliProcessRetirement, waitForCliRetirements } from './cli-process-retirement.js';
 import { nativeHistory } from './native-history.js';
+import { SINGLE_AGENT_HARNESS, isAgentDelegationTool } from './single-agent-harness.js';
 import { normalizeProviderUsageReport, type NativeAgentRequest, type ProviderResult, type ProviderTiming, type Turn } from './provider.js';
 
 type Options = { command: string; prefixArgs: string[]; env: NodeJS.ProcessEnv; providerId: string; model: string; req: NativeAgentRequest };
@@ -465,9 +466,16 @@ class NativeWorker {
     a.toolCalls.add(p.callId); a.pendingTool = p.callId;
     this.status(p.tool === 'evidence_image' ? '원본 이미지 확인 중' : p.tool === 'evidence_text' ? '원본 문서 확인 중' : p.tool === 'evidence_python_syntax' ? '코드 문법 검사 중' : p.tool === 'evidence_python_values' ? '값·연산 검산 중' : p.tool === 'knowledge_lookup' ? '프로젝트 지식 조회 중' : p.tool.startsWith('agent_') ? '보조 작업 조율 중' : p.tool.startsWith('mcp_') ? '연결 도구 실행 중' : p.tool === 'desktop_act' ? 'PC 조작 중 · 결과 확인 대기' : 'PC 화면 확인 중');
     const timeoutMs = a.req.hostTools.timeoutMs?.(p.tool) ?? 25_000;
-    const timer = setTimeout(() => this.close(new Error('연결 도구가 응답하지 않아 중단했습니다.')), Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(90_000, timeoutMs)) : 25_000);
+    const timer = setTimeout(() => this.close(new Error('연결 도구가 응답하지 않아 중단했습니다.')), Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(150_000, timeoutMs)) : 25_000);
     a.toolTimer = timer;
-    void Promise.resolve().then(() => a.req.hostTools!.execute(p.tool, p.arguments, a.toolAbort.signal)).then(result => {
+    void Promise.resolve().then(() => {
+      a.toolAbort.signal.throwIfAborted();
+      if (this.active !== a || this.closed || a.cancelling || !(a.req.hostTools!.authorize?.(p.tool, a.req.permissionMode) ?? a.req.permissionMode === 'full')) {
+        const error = new Error('대기 중 연결 도구의 실행 권한이 변경되었습니다.');
+        this.close(error); throw error;
+      }
+      return a.req.hostTools!.execute(p.tool, p.arguments, a.toolAbort.signal);
+    }).then(result => {
       if (this.active === a && !a.cancelling && !this.closed) this.send({ id: m.id, result });
     }, error => {
       if (this.active === a && !a.cancelling && !this.closed) this.send({ id: m.id, result: { success: false,
@@ -500,13 +508,11 @@ class NativeWorker {
     this.retirement.retire();
     if (interrupted) {
       const failure = error ?? new Error('네이티브 연결이 종료되었습니다.');
-      // Do not release the caller's execution/admission lock while native
-      // helpers can still have side effects. This also covers cancellation
-      // before their spawn event has arrived; opt-in alone requires draining.
-      if (interrupted.delegation) void this.retirement.waitUntilClosed().then(() => interrupted.reject(failure), () => {
+      // Do not release the caller's execution/admission lock while its native
+      // process tree can still have side effects, including queued tool work.
+      void this.retirement.waitUntilClosed().then(() => interrupted.reject(failure), () => {
         interrupted.reject(new Error(`${failure.message} 이전 네이티브 실행 종료를 확인하지 못했습니다.`));
       });
-      else interrupted.reject(failure);
     }
   }
 }
@@ -523,9 +529,10 @@ export async function pooledNativeCodex(options: Options): Promise<ProviderResul
   const s = options.req.session;
   if (!s || options.req.permissionMode === 'ask') throw new Error('검증된 네이티브 세션과 실행 승인이 필요합니다.');
   const delegationLimit = nativeDelegationLimit(options.req);
+  if (options.req.hostTools?.tools.some(t => isAgentDelegationTool(t.name))) throw new Error('단일 에이전트 실행에 보조 작업 도구를 등록할 수 없습니다.');
   if (options.req.hostTools?.tools.some(t => !(options.req.hostTools!.authorize?.(t.name, options.req.permissionMode) ?? options.req.permissionMode === 'full'))) throw new Error('현재 권한에서 허용되지 않은 연결 도구입니다.');
   options.req.signal?.throwIfAborted();
-  const key = digest([s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
+  const key = digest([SINGLE_AGENT_HARNESS.revision, s.key, resolve(s.directory), options.providerId, options.model, options.command, options.prefixArgs,
     digest(options.env), resolve(options.req.cwd), options.req.permissionMode, s.instructions, options.req.hostTools?.tools ?? null,
     options.req.daybreakEnabled === true, delegationLimit, delegationLimit ? options.req.reasoningEffort ?? 'auto' : null]);
   const release = await scheduler.acquire(key, options.req.signal, position => options.req.onStatus?.(`네이티브 실행 대기 · ${position}번째 · 앞선 작업 완료 시 자동 시작`));

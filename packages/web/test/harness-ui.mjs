@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { chromium, expect } from '@playwright/test';
+import { fixtureServer } from './fixture-server.mjs';
+
+const screenshots = await mkdtemp(join(tmpdir(), 'vera-harness-ui-'));
+const server = await fixtureServer(); let browser;
+try {
+  browser = await chromium.launch({ channel: 'msedge', headless: true });
+  for (const [width, height] of [[1280, 900], [390, 844]]) {
+    const page = await browser.newPage({ viewport: { width, height } }); const errors = [];
+    page.on('pageerror', error => errors.push(error.message)); await page.route('**/*', server.route);
+    await page.goto(server.origin + '/test/harness-preview.html');
+    await expect(page.getByTestId('single-harness-runtime')).toContainText('자동 호출하지 않습니다');
+    await expect(page.getByLabel('문서 상대 경로', { exact: false })).toHaveValue('docs/guide.md');
+    await page.getByLabel('문서 상대 경로', { exact: false }).fill('docs/guide.md\nREADME.md'); await page.getByRole('button', { name: '문서 목록 저장' }).click();
+    await expect(page.getByRole('status')).toContainText('저장했습니다');
+    await page.getByLabel('등록 문서에서 검색').fill('validation'); await page.getByRole('button', { name: '검색', exact: true }).click();
+    await expect(page.getByText('독립적으로 검증된 사실은 아님', { exact: false })).toBeVisible();
+    const candidate = page.locator('.harness-candidate').filter({ hasText: 'Deterministic validation' });
+    await candidate.locator('summary').click(); await expect(candidate.locator('blockquote')).toContainText('Fixture uses');
+    await candidate.getByRole('button', { name: '근거 확인 후 승인' }).click();
+    assert.equal(await page.evaluate(() => window.harnessFixture.calls.filter(c => c.method === 'harness.approve').length), 0);
+    await page.getByRole('button', { name: '확인하고 진행' }).click(); await expect(candidate).toContainText('재사용 중');
+    await candidate.getByRole('button', { name: '철회', exact: true }).click(); await page.getByLabel('철회 사유').selectOption('stale-source'); await page.getByRole('button', { name: '재사용 철회' }).click(); await expect(candidate).toContainText('철회됨');
+    await expect(page.locator('.harness-candidate').filter({ hasText: 'Stale rule' }).getByRole('button', { name: '근거 확인 후 승인' })).toBeDisabled();
+    await page.locator('.harness-profiles article').filter({ hasText: '산출물 계약' }).getByRole('button', { name: '수정' }).click();
+    await expect(page.getByLabel('검증 ID', { exact: true })).toBeDisabled(); await expect(page.getByRole('dialog')).toContainText('조건을 그대로 보존'); await page.getByRole('button', { name: '검증 프로필 저장' }).click();
+    const preserved = await page.evaluate(() => window.harnessFixture.configurations.get('a').verifiers.find(p => p.id === 'artifact'));
+    assert.equal(preserved.schema.properties.ok.const, true, 'existing richer artifact contract preserved');
+    await page.getByRole('button', { name: '검증 추가' }).click(); await page.getByLabel('검증 ID', { exact: true }).fill('structured_result'); await page.getByLabel('검증 이름', { exact: true }).fill('구조화된 결과'); await page.getByLabel('JSON 산출물 상대 경로').fill('output/result.json'); await page.getByRole('button', { name: '필드 추가' }).click(); await page.getByLabel('필드 이름 1').fill('count'); await page.getByLabel('필드 형식 1').selectOption('integer'); await page.getByRole('button', { name: '검증 프로필 저장' }).click();
+    const created = await page.evaluate(() => window.harnessFixture.configurations.get('a').verifiers.find(p => p.id === 'structured_result'));
+    assert.deepEqual(created.schema, { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false });
+    await page.getByRole('button', { name: '검증 추가' }).click(); await page.getByLabel('검증 ID', { exact: true }).fill('unit_tests'); await page.getByLabel('검증 이름', { exact: true }).fill('명시적인 유닛 테스트'); await page.getByLabel('검증 방식').selectOption('command');
+    await page.getByLabel('실행 파일 절대 경로').fill('C:\\Fixture\\node.exe'); await page.getByLabel('인수 · 한 줄에 하나', { exact: false }).fill('--test\ntest/unit.mjs'); await page.getByLabel('검증 대상 소스 상대 경로', { exact: false }).fill('src/main.ts\ntest/unit.mjs');
+    await page.getByLabel('전체 PC 권한 실행을 명시적으로 승인합니다', { exact: false }).check(); await page.getByRole('button', { name: '검증 프로필 저장' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(1); await expect(page.getByRole('dialog')).toContainText('매번 확인 없이 실행');
+    assert.equal(await page.evaluate(() => window.harnessFixture.calls.filter(c => c.method === 'harness.verify').length), 0);
+    await page.getByRole('button', { name: '확인하고 진행' }).click(); const profile = page.locator('.harness-profiles article').filter({ hasText: '명시적인 유닛 테스트' }); await expect(profile).toBeVisible();
+    await profile.getByRole('button', { name: '검증 실행' }).click(); await page.getByRole('button', { name: '확인하고 진행' }).click(); await expect(page.getByLabel('최근 검증 결과')).toContainText('통과');
+    const calls = await page.evaluate(() => window.harnessFixture.calls); const registration = calls.findLast(c => c.method === 'harness.update' && c.params.verifiers);
+    assert.deepEqual(registration.params.verifiers.find(p => p.id === 'unit_tests').command.args, ['--test', 'test/unit.mjs']);
+    assert.deepEqual(calls.find(c => c.method === 'harness.verify').params, { workspaceId: 'a', verifierId: 'unit_tests' });
+    assert.ok(!calls.some(c => c.method === 'chat.start' || c.method.startsWith('providers.')));
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no horizontal overflow');
+    await page.screenshot({ path: join(screenshots, width + '-harness.png'), fullPage: true });
+    await page.getByLabel('하네스 작업영역').selectOption('b'); await expect(page.getByLabel('문서 상대 경로', { exact: false })).toHaveValue('README.md'); await expect(page.getByLabel('최근 검증 결과')).toHaveCount(0); await expect(page.locator('.harness-candidate')).toHaveCount(0);
+    assert.deepEqual(errors, []); await page.close();
+    console.log(width + ': docs, evidence approval/retraction, explicit command registration, result, workspace isolation passed');
+  }
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } }); await page.route('**/*', server.route);
+  await page.goto(server.origin + '/test/harness-preview.html?readonly'); await expect(page.getByText('관리자 연결에서만', { exact: false })).toBeVisible(); assert.equal(await page.evaluate(() => window.harnessFixture.calls.length), 0);
+  await page.goto(server.origin + '/test/harness-preview.html?workspace'); await expect(page.locator('.harness-profiles article').filter({ hasText: '명령 실행 제한 확인' }).getByRole('button', { name: '검증 실행' })).toBeDisabled(); await expect(page.locator('.harness-profiles article').filter({ hasText: '산출물 계약' }).getByRole('button', { name: '검증 실행' })).toBeEnabled(); assert.equal(await page.evaluate(() => window.harnessFixture.calls.filter(c => c.method === 'harness.verify').length), 0);
+  await page.goto(server.origin + '/test/runtime-preview.html?embedded&adaptiveRoute'); await page.getByLabel('추가 실행 설정').click(); await expect(page.getByTestId('single-harness-runtime')).toContainText('보관만'); await expect(page.getByLabel('대화 모델 시나리오')).toHaveCount(0); await page.getByRole('button', { name: '완료', exact: true }).click(); await expect(page.getByLabel('입력창 추론 강도', { exact: true })).toBeVisible();
+  await page.goto(server.origin + '/test/harness-preview.html?plugins'); await page.getByRole('button', { name: '연결 목록' }).click(); await page.getByLabel('설정 방식').selectOption('context7'); await page.getByRole('button', { name: '설치된 경로 불러오기' }).click(); await expect(page.getByLabel('설치된 Context7 진입 파일')).toHaveValue('C:\\Fixture\\context7\\index.js'); await page.getByLabel('설정 방식').selectOption('serena'); await page.getByRole('button', { name: '설치된 경로 불러오기' }).click(); await expect(page.getByRole('status')).toContainText('확인된 설치가 없습니다'); await expect(page.getByLabel('설치된 Serena 실행 파일')).toHaveValue('');
+  await page.close();
+} finally { await browser?.close(); await server.close(); }
+console.log('Screenshots: ' + screenshots);

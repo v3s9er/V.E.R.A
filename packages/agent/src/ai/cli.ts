@@ -9,6 +9,7 @@ import { pooledNativeCodex } from './cli-native-pool.js';
 import { discoverCodexModelCatalog, discoverCodexVersion, ModelListCache } from './cli-models.js';
 import { normalizeProviderUsageReport } from './provider.js';
 import { contextualTurns } from './request-context.js';
+import { assertSingleAgentRequest, SINGLE_AGENT_CLAUDE_ARGS, SINGLE_AGENT_CODEX_CONFIG } from './single-agent-harness.js';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { reasoningEffortsForModel, type ModelReasoningCapabilities, type ProviderModelCatalog, type ProviderType, type ReasoningEffort } from '@mr-robot/shared';
 import type { AiProvider, BrokerAgentRequest, ChatRequest, NativeAgentRequest, ProviderHealth, ProviderResult, ProviderUsage, Turn } from './provider.js';
@@ -65,6 +66,10 @@ export function cliSubscriptionEnvironment(
     // The CLI currently emits harmless plugin-icon and PowerShell snapshot
     // warnings on every Windows run. Keep native-agent errors actionable.
     env.RUST_LOG = 'error';
+  } else {
+    // Official server-side advisor switch: no stored setting may introduce a
+    // second model behind the single-agent harness. Never mutate user config.
+    env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = '1';
   }
   return env;
 }
@@ -75,7 +80,7 @@ export function safeCliExtraArgs(
   input: string[],
 ): string[] {
   const allowedPairs = type === 'claude-cli'
-    ? new Set(['--autocompact', '--fallback-model', '--prompt-suggestions'])
+    ? new Set(['--autocompact', '--prompt-suggestions'])
     : new Set(['--color']);
   const output: string[] = [];
   for (let index = 0; index < input.length; index++) {
@@ -429,6 +434,8 @@ export class CliProvider implements AiProvider {
         '-p', prompt, '--output-format', 'json', '--no-session-persistence',
         '--safe-mode', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--disable-slash-commands', '--no-chrome', '--permission-mode', 'plan', '--tools', '',
+        ...SINGLE_AGENT_CLAUDE_ARGS,
+        ...(effort ? ['--effort', effort] : []),
         ...(this.model ? ['--model', this.model] : []), ...extras,
       ];
 
@@ -468,6 +475,8 @@ export class CliProvider implements AiProvider {
         args: [...invocation.prefixArgs, '-p', '--output-format', 'json', '--no-session-persistence',
           '--safe-mode', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
           '--disable-slash-commands', '--no-chrome', '--permission-mode', 'plan', '--tools', '',
+          ...SINGLE_AGENT_CLAUDE_ARGS,
+          ...(req.reasoningEffort && req.reasoningEffort !== 'auto' ? ['--effort', req.reasoningEffort] : []),
           '--setting-sources', '', '--json-schema', JSON.stringify(ISOLATED_OUTPUT_SCHEMA),
           ...(this.model ? ['--model', this.model] : [])],
         env: cliSubscriptionEnvironment(this.type), label: this.label, cwd,
@@ -485,6 +494,7 @@ export class CliProvider implements AiProvider {
   }
 
   async runAgent(req: NativeAgentRequest): Promise<ProviderResult> {
+    assertSingleAgentRequest(req);
     await this.validateReasoningEffort(req.reasoningEffort);
     if (this.type === 'codex-cli' && req.daybreakEnabled && !req.session) throw new Error('Daybreak에는 대화 세션을 사용하는 최신 Codex 연결이 필요합니다.');
     if (req.permissionMode === 'ask') throw new Error('네이티브 CLI에는 확인 대기 권한을 직접 전달할 수 없습니다. 먼저 명시적으로 승인해야 합니다.');
@@ -507,6 +517,7 @@ export class CliProvider implements AiProvider {
         '--safe-mode',
         '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--disable-slash-commands', '--no-chrome',
+        ...SINGLE_AGENT_CLAUDE_ARGS,
         '--model', this.model,
         ...(effort ? ['--effort', effort] : []),
         ...extras,
@@ -519,6 +530,7 @@ export class CliProvider implements AiProvider {
         '-C', req.cwd,
         ...(this.model ? ['--model', this.model] : []),
         ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []),
+        ...Object.entries(SINGLE_AGENT_CODEX_CONFIG).flatMap(([key, value]) => ['-c', `${key}=${value}`]),
         ...extras,
       ];
     const invocation = resolveCliInvocation(this.type, this.command);

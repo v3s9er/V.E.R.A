@@ -155,7 +155,8 @@ test('presets create disabled local previews with no installation commands or cr
   assert.ok(serena.args.includes('ide'));
   assert.ok(serena.args.includes('C:\\작업\\project'));
   assert.doesNotMatch(JSON.stringify([context7, serena]), /npx|uvx|git\+|--api-key/);
-  assert.deepEqual(MCP_PRESETS[0].requiredEnvironment, ['CONTEXT7_API_KEY']);
+  assert.deepEqual(MCP_PRESETS[0].requiredEnvironment, []);
+  assert.deepEqual(MCP_PRESETS[0].optionalEnvironment, ['CONTEXT7_API_KEY']);
   assert.throws(() => previewMcpPreset({ preset: 'serena', executablePath: 'serena', projectRoot: 'C:\\project' }), /절대 경로/);
 });
 

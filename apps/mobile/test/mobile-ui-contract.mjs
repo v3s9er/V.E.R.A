@@ -41,9 +41,20 @@ check('running model and permission changes save for next run, with explicit sto
   && chat.includes('activeRun?.pendingConfig')
   && chat.includes('activeRun.effectiveConfig?.permissionMode')
   && chat.includes('configurationSaveInFlightRef.current.has(currentConversation.id)'));
-check('late execution-setting saves cannot change another conversation screen or command mode',
-  (chat.match(/if \(activeId\.current !== conversationId\) return;/g) ?? []).length >= 7
+check('late execution-setting saves cannot change another conversation screen',
+  (chat.match(/if \(activeId\.current !== conversationId\) return;/g) ?? []).length >= 5
   && chat.includes('mountedRef.current && activeId.current === conversationId'));
+check('single harness preserves legacy metadata but exposes only model and reasoning controls',
+  chat.includes("const selectedExecutionMode = 'single' as const;")
+  && chat.includes('const reasoningProvider = providers.find((provider) => provider.id === conversation?.providerId) ?? defaultProvider;')
+  && chat.includes('testID="single-harness-runtime"')
+  && chat.includes('보관만 하며 실행하지 않습니다.')
+  && settings.includes('testID="single-harness-settings"')
+  && settings.includes('프로젝트 문서·지식 승인·검증 프로필')
+  && !chat.includes('selectScenario') && !chat.includes('showScenarios') && !chat.includes('commandMode')
+  && !chat.includes('routingPresetId: null')
+  && chat.includes('providerId: providerId ?? null')
+  && chat.includes('const supportedEfforts = reasoningEffortsFor(provider, providerModel ?? provider?.model);'));
 check('reopening waits for only that conversation setting save before fetching its snapshot',
   chat.includes('useRef(new ConversationSaveBarrier())')
   && chat.indexOf('await configurationSaveInFlightRef.current.wait(id);') < chat.indexOf("client.call('conversations.get', { id })")

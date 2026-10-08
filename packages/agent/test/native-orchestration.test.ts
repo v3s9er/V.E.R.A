@@ -227,7 +227,9 @@ for (const mode of ['INTERRUPT_ACTIVE', 'IGNORE_INTERRUPT']) test(`cancellation 
     onText: () => { assert.fail('no output after cancellation'); },
   });
   await assert.rejects(pending, /중지/);
-  assert.ok(performance.now() - at < 3000, 'unresponsive CLI must be retired');
+  // Caller admission now waits for confirmed process closure, rather than
+  // returning before Windows taskkill finishes: 1.5s interrupt + <=5s drain.
+  assert.ok(performance.now() - at < 8000, 'unresponsive CLI must finish bounded retirement before releasing admission');
   assert.match(readFileSync(join(base.cwd, 'interrupt-observed.txt'), 'utf8'), /interrupt/);
   assert.equal((await call(base)).text, 'answer 1', 'cancelled partial turn is not resumed');
 }));

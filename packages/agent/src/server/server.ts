@@ -48,6 +48,7 @@ import { ModelRouter } from '../ai/router.js';
 import { ConversationStore } from '../conversations.js';
 import { MemoryStore } from '../memory.js';
 import { readProjectKnowledge } from '../project-knowledge.js';
+import { HarnessService, harnessObject } from '../harness-service.js';
 import { TelemetryStore } from '../telemetry.js';
 import { LocalTuningDatasets } from '../tuning-datasets.js';
 import { activeTuningProfile, getTuningCapabilities, normalizeProviderTuningSettings, resolveModelTuning } from '../ai/model-tuning.js';
@@ -95,7 +96,7 @@ import {
   type ToolPortalToolId,
 } from '../tool-portal.js';
 
-export const VERSION = '0.7.9';
+export const VERSION = '0.8.0';
 function executionConfigKey(value?: Partial<ChatExecutionConfig> | null): string {
   return JSON.stringify({
     providerId: value?.providerId ?? null, providerModel: value?.providerModel ?? null,
@@ -715,6 +716,7 @@ export class AgentServer {
   readonly router: ModelRouter;
   readonly conversations: ConversationStore;
   readonly memory: MemoryStore;
+  readonly harness: HarnessService;
   readonly telemetry: TelemetryStore;
   readonly scheduler: Scheduler;
   readonly dependencies = new DependencyManager();
@@ -801,6 +803,7 @@ export class AgentServer {
     status: string;
     ownerClientId: string;
     ownerLinkId?: string;
+    trustedDiscord?: boolean;
     permissionMode: PermissionMode;
     workspaceId?: string;
     effectiveConfig: ChatExecutionConfig;
@@ -808,12 +811,14 @@ export class AgentServer {
     queued: boolean;
     settled: Promise<void>;
   }>();
+  private readonly activeHarnessChecks = new Map<AbortController, { workspaceId: string; ownerLinkId?: string; permissionMode: PermissionMode }>();
   private busSubscriptions: Array<() => void> = [];
 
   constructor() {
     this.runJournal = new RunJournal(this.config.dir);
     this.conversations = new ConversationStore(this.config.dir);
     this.memory = new MemoryStore(this.config.dir);
+    this.harness = new HarnessService({ directory: joinFilePath(this.config.dir, 'harness'), resolveWorkspace: id => this.config.workspaces.find(workspace => workspace.id === id) });
     this.telemetry = new TelemetryStore(this.config.dir);
     this.contextBroker = new ContextBroker(this.config.dir);
     this.plugins = new PluginManager(this.bus, computer, this.registry, this.config, this.logger);
@@ -1312,6 +1317,15 @@ export class AgentServer {
 
   updateSettings(patch: Partial<AppSettings>): AppSettings {
     const updated = this.config.updateSettings(patch);
+    // A native provider's built-in tools do not cross our per-tool callback.
+    // Cancel the entire owned run when its already-granted ceiling is reduced.
+    for (const run of this.activeRuns.values()) {
+      const ceiling = run.trustedDiscord && updated.safety.mode !== 'read-only' ? 'full' : updated.safety.mode;
+      if (effectiveMode(ceiling, run.permissionMode) !== run.permissionMode) run.session.cancel('revoked');
+    }
+    for (const [controller, check] of this.activeHarnessChecks) {
+      if (effectiveMode(updated.safety.mode, check.permissionMode) !== check.permissionMode) controller.abort();
+    }
     this.bus.emit('settings.changed', updated);
     return updated;
   }
@@ -2026,6 +2040,7 @@ export class AgentServer {
     this.scheduler.stop();
     await this.revokeToolPortalAuthority('V.E.R.A Agent가 종료되었습니다.');
     for (const run of this.activeRuns.values()) run.session.cancel('shutdown');
+    for (const controller of this.activeHarnessChecks.keys()) controller.abort();
     for (const transfer of this.activeHttpTransfers) {
       if (!transfer.signal.aborted) transfer.abort(new Error('V.E.R.A Agent가 종료되어 전송을 중단했습니다.'));
     }
@@ -2043,7 +2058,7 @@ export class AgentServer {
       ? new Promise<void>((resolve) => server.close(() => resolve()))
       : Promise.resolve();
     const deadline = Date.now() + 5_000;
-    while (this.activeRuns.size > 0 && Date.now() < deadline) {
+    while ((this.activeRuns.size > 0 || this.activeHarnessChecks.size > 0) && Date.now() < deadline) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 25);
         timer.unref?.();
@@ -2059,11 +2074,13 @@ export class AgentServer {
     this.logger.info('stopped');
   }
 
-  /** Cancel every interactive run without shutting down the local agent. */
+  /** Cancel interactive runs and independent checks without shutting down the local agent. */
   cancelAllRuns(): number {
     const runs = [...this.activeRuns.values()];
     for (const run of runs) run.session.cancel();
-    return runs.length;
+    const checks = [...this.activeHarnessChecks.keys()];
+    for (const controller of checks) controller.abort();
+    return runs.length + checks.length;
   }
 
   /** Permission/revocation changes take effect for already-open sockets too. */
@@ -2071,6 +2088,7 @@ export class AgentServer {
     for (const run of this.activeRuns.values()) {
       if (run.ownerLinkId === linkId) run.session.cancel('revoked');
     }
+    for (const [controller, check] of this.activeHarnessChecks) if (check.ownerLinkId === linkId) controller.abort();
     this.hub?.disconnectLink(linkId);
   }
 
@@ -2127,6 +2145,15 @@ export class AgentServer {
       if (clientPermission(client) === 'read-only') {
         throw new Error('이 기기는 읽기 전용입니다. 대화·기억·예약 데이터를 변경할 수 없습니다.');
       }
+    };
+    const assertHarnessAdmin = (client: WsClient): void => {
+      assertAdmin(client);
+      if (client.state.auth?.trustedDiscord) throw new Error('하네스 문서와 승인은 PC 관리자 연결에서만 사용할 수 있습니다.');
+    };
+    const harnessPermission = (client: WsClient): PermissionMode => effectiveMode(this.config.settings.safety.mode, client.state.auth?.permissionCap);
+    const assertHarnessIdle = (workspaceId: string): void => {
+      if ([...this.activeRuns.values()].some(run => run.workspaceId === workspaceId)
+        || [...this.activeHarnessChecks.values()].some(check => check.workspaceId === workspaceId)) throw new Error('이 프로젝트의 작업이 끝난 뒤 하네스 설정·승인·독립 검사를 변경하세요.');
     };
     const canControlRun = (client: WsClient, run: { ownerClientId: string; ownerLinkId?: string }): boolean => (
       client.state.auth?.isAdmin === true
@@ -2269,7 +2296,8 @@ export class AgentServer {
     h.set('projects.delete', (params, client) => {
       assertAdmin(client);
       const id = str(p(params).id);
-      if ([...this.activeRuns.keys()].some(key => (this.conversations.get(key)?.workspaceId ?? this.config.workspaces.find(w => w.isDefault)?.id) === id)) throw new Error('실행 중인 프로젝트는 연결 해제할 수 없습니다.');
+      if ([...this.activeRuns.keys()].some(key => (this.conversations.get(key)?.workspaceId ?? this.config.workspaces.find(w => w.isDefault)?.id) === id)
+        || [...this.activeHarnessChecks.values()].some(check => check.workspaceId === id)) throw new Error('실행 중인 프로젝트는 연결 해제할 수 없습니다.');
       // Registration only. Retain files, conversations and explicit workspace
       // IDs; orphaned conversations must be deliberately reassigned before use.
       const ok = this.config.removeWorkspace(id);
@@ -2433,6 +2461,36 @@ export class AgentServer {
       this.bus.emit('conversations.changed', this.conversations.list());
       return { ok };
     });
+    h.set('harness.get', (params, client) => {
+      assertHarnessAdmin(client); const body = harnessObject(params, ['workspaceId']);
+      return this.harness.get(body.workspaceId, harnessPermission(client));
+    });
+    h.set('harness.update', (params, client) => {
+      assertHarnessAdmin(client); assertContentWrite(client); const body = harnessObject(params, ['workspaceId', 'documents', 'verifiers']); assertHarnessIdle(body.workspaceId);
+      return this.harness.update(body.workspaceId, { ...(body.documents !== undefined ? { documents: body.documents } : {}), ...(body.verifiers !== undefined ? { verifiers: body.verifiers } : {}) }, harnessPermission(client));
+    });
+    h.set('harness.search', (params, client) => {
+      assertHarnessAdmin(client); const body = harnessObject(params, ['workspaceId', 'query']);
+      return this.harness.search(body.workspaceId, body.query);
+    });
+    h.set('harness.candidates', (params, client) => {
+      assertHarnessAdmin(client); const body = harnessObject(params, ['workspaceId']);
+      return this.harness.candidates(body.workspaceId);
+    });
+    h.set('harness.approve', (params, client) => {
+      assertHarnessAdmin(client); assertContentWrite(client); const body = harnessObject(params, ['workspaceId', 'candidateId', 'confirmation']); assertHarnessIdle(body.workspaceId);
+      return this.harness.approve(body.workspaceId, body.candidateId, body.confirmation);
+    });
+    h.set('harness.retract', (params, client) => {
+      assertHarnessAdmin(client); assertContentWrite(client); const body = harnessObject(params, ['workspaceId', 'candidateId', 'reason']); assertHarnessIdle(body.workspaceId);
+      return this.harness.retract(body.workspaceId, body.candidateId, body.reason);
+    });
+    h.set('harness.verify', (params, client) => {
+      assertHarnessAdmin(client); const body = harnessObject(params, ['workspaceId', 'verifierId']); assertHarnessIdle(body.workspaceId);
+      const controller = new AbortController(), permissionMode = harnessPermission(client);
+      this.activeHarnessChecks.set(controller, { workspaceId: body.workspaceId, ownerLinkId: client.state.auth?.linkId, permissionMode });
+      return this.harness.verify(body.workspaceId, body.verifierId, permissionMode, controller.signal).finally(() => this.activeHarnessChecks.delete(controller));
+    });
     h.set('memory.list', () => this.memory.list());
     h.set('memory.inspect', async (params) => {
       const body = p(params);
@@ -2514,6 +2572,7 @@ export class AgentServer {
       assertContentWrite(client);
       const auth = client.state.auth;
       if (!auth) throw new Error('인증되지 않은 연결입니다.');
+      const initialPrincipal = { isAdmin: auth.isAdmin, linkId: auth.linkId, trustedDiscord: auth.trustedDiscord };
       const body = p(params);
       // Validate attacker-controlled policy input and cheap busy conditions
       // before consuming an admission-window start.
@@ -2559,10 +2618,8 @@ export class AgentServer {
       const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : conversation.workspaceId;
       const workspace = resolveProjectWorkspace(this.config.workspaces, workspaceId);
       if (!isolation && workspaceId && !workspace) throw new Error('연결 해제된 프로젝트입니다. 이 대화에서 프로젝트를 다시 선택하세요.');
-      // Discord model selection must not inherit a PC-edited routing preset.
-      const routingPresetId = client.state.auth?.trustedDiscord ? undefined : typeof body.routingPresetId === 'string' ? body.routingPresetId : conversation.routingPresetId;
-      const conversationRouting = routingPresetId ? this.config.routingForPreset(routingPresetId) : null;
-      if (routingPresetId && !conversationRouting) throw new Error('이 대화의 모델 시나리오가 삭제되었습니다. 다른 시나리오를 선택하세요.');
+      // Legacy scenario IDs remain stored for inspection, but cannot override
+      // the selected model or block execution when their old graph is absent.
       const effectivePermissionMode = effectiveMode(
         client.state.auth?.trustedDiscord && this.config.settings.safety.mode !== 'read-only' ? 'full' : this.config.settings.safety.mode,
         effectiveMode(
@@ -2578,6 +2635,17 @@ export class AgentServer {
         conversation.tokenPolicy,
       );
       const runWorkspaceId = isolation ? undefined : workspace?.id;
+      const initialWorkspacePath = workspace?.path;
+      const assertRunAuthority = (): void => {
+        session.signal()?.throwIfAborted();
+        const current = client.state.auth;
+        if (!current || current.isAdmin !== initialPrincipal.isAdmin || current.linkId !== initialPrincipal.linkId || current.trustedDiscord !== initialPrincipal.trustedDiscord
+          || current.linkId && !this.config.deviceLinks.some(link => link.id === current.linkId && !link.revokedAt)) throw new Error('실행 권한이 변경되었습니다. 다시 시작하세요.');
+        const currentMode = effectiveMode(current.trustedDiscord && this.config.settings.safety.mode !== 'read-only' ? 'full' : this.config.settings.safety.mode,
+          effectiveMode(effectivePermissionMode, current.permissionCap));
+        if (currentMode !== effectivePermissionMode) throw new Error('현재 권한이 변경되어 실행을 중단했습니다. 새 권한으로 다시 시작하세요.');
+        if (!isolation && workspace && this.config.workspaces.find(item => item.id === workspace.id)?.path !== initialWorkspacePath) throw new Error('작업 폴더가 변경되어 실행을 중단했습니다.');
+      };
       this.busyConversations.add(conversationId);
       session.begin();
       const runStartedAt = Date.now();
@@ -2605,9 +2673,9 @@ export class AgentServer {
       let markSettled!: () => void;
       const settled = new Promise<void>(resolve => { markSettled = resolve; });
       const effectiveConfig: ChatExecutionConfig = {
-        providerId: routingPresetId ? undefined : typeof body.providerId === 'string' ? body.providerId : conversation.providerId,
-        providerModel: routingPresetId ? undefined : typeof body.providerModel === 'string' ? body.providerModel : conversation.providerModel,
-        routingPresetId,
+        providerId: typeof body.providerId === 'string' ? body.providerId : conversation.providerId,
+        providerModel: typeof body.providerModel === 'string' ? body.providerModel : conversation.providerModel,
+        routingPresetId: undefined,
         reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort as ReasoningEffort : conversation.reasoningEffort,
         daybreakEnabled: conversation.daybreakEnabled === true,
         permissionMode: effectivePermissionMode,
@@ -2620,6 +2688,7 @@ export class AgentServer {
         status: '시작 중',
         ownerClientId: client.id,
         ownerLinkId: client.state.auth?.linkId,
+        trustedDiscord: client.state.auth?.trustedDiscord === true,
         permissionMode: effectivePermissionMode,
         workspaceId: runWorkspaceId,
         effectiveConfig, savedConfig: executionConfigKey(conversation), queued: false, settled,
@@ -2655,8 +2724,13 @@ export class AgentServer {
         const recovery = this.runJournal.recovery(conversationId, client.state.auth?.linkId, client.state.auth?.isAdmin === true);
         this.runJournal.begin(progress.runId, conversationId, client.state.auth?.linkId);
         const history = this.conversations.turns(conversationId);
-        const selfContained = isSelfContainedRequest(text, history, conversationRouting?.executionMode, Boolean(isolation));
+        const selfContained = isSelfContainedRequest(text, history, undefined, Boolean(isolation));
         const extraTools = isolation || selfContained ? [] : this.plugins.aiTools(text);
+        const harnessCapabilities = !isolation && !selfContained && workspace && auth.isAdmin && !auth.trustedDiscord
+          ? await this.harness.capabilities(workspace.id, {
+            allowed: () => client.state.auth?.isAdmin === true && client.state.auth?.trustedDiscord !== true,
+            permission: () => effectiveMode(this.config.settings.safety.mode, effectiveMode(effectivePermissionMode, client.state.auth?.permissionCap)),
+          }) : undefined;
         let observed = !isolation && !selfContained && workspace && runWorkspaceId
           ? await readProjectKnowledge(workspace.path, runWorkspaceId) : { facts: [], partial: false };
         session.signal()?.throwIfAborted();
@@ -2688,6 +2762,7 @@ export class AgentServer {
           {
             signal: session.signal(),
             beforeModelCall: (source) => {
+              assertRunAuthority();
               // Record only after the existing Discord authorization succeeds.
               // A denied selection is not evidence that this model ran.
               if (client.state.auth?.trustedDiscord) {
@@ -2696,6 +2771,7 @@ export class AgentServer {
               }
               noteModelSource(source);
             },
+            beforeToolCall: () => assertRunAuthority(),
             onProviderTiming: timing => { if (transport.length < 128) transport.push({ ...timing, atMs: Date.now() - runStartedAt }); },
             onText: (delta) => { if (progress.text(delta)) publishProgress(); sendRunEvent('chat.delta', { conversationId, text: delta }); },
             onTool: (info) => {
@@ -2736,6 +2812,7 @@ export class AgentServer {
             reasoningEffort: effectiveConfig.reasoningEffort,
             daybreakEnabled: effectiveConfig.daybreakEnabled,
             context: retained,
+            harnessCapabilities,
             knowledgeLookup: !hasKnowledge ? undefined : async (query: string) => {
               session.signal()?.throwIfAborted();
               // A long-running task can edit manifests. Tool-time reads must not
@@ -2746,7 +2823,7 @@ export class AgentServer {
               return result.context || '관련 지식 없음. 알려지지 않은 것이며 대상이 없거나 안전하다는 증거가 아닙니다. 필요한 원본을 허용된 도구로 확인하세요.';
             },
             permissionMode: effectivePermissionMode,
-            routing: conversationRouting,
+            routing: null,
             workspacePath: isolation ? undefined : workspace?.path,
             isolation,
             cacheKey: `mrrobot:${conversationId}`,

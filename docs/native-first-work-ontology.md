@@ -1,5 +1,7 @@
 # Native-first execution and work ontology
 
+> Historical 0.7.9 design and measurements. In 0.8.0, helpers and legacy multi-model execution are disabled; see [the current single-agent harness](single-agent-harness.md). The measurements below are not results for the new runtime.
+
 V.E.R.A keeps one default coordinator: the selected subscription agent. The host supplies permission boundaries, run ownership, cancellation, scoped knowledge, objective receipts and UI state. It does not insert a second LLM planning or voting pass into ordinary native requests.
 
 ## Execution ownership

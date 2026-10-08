@@ -152,8 +152,9 @@ check('loop turns well-formed', result.turns.filter((t) => t.role === 'assistant
 check('one completed tool round emits one adaptive progress signal', progressKinds.length === 1 && progressKinds[0] === 'tool');
 
 // Safety: destructive tool must be cancelled when the user denies.
-const denied = await server.loop.run([], '위험한거 해줘', { confirm: async () => false });
-check('deny -> destructive tool cancelled', denied.turns.some((t) => t.role === 'tool' && JSON.stringify(t.toolResults).includes('cancelled')));
+let deniedApprovals = 0;
+const denied = await server.loop.run([], '명령 실행해줘', { confirm: async () => { deniedApprovals++; return false; } });
+check('deny -> destructive tool cancelled after a real approval request', deniedApprovals === 1 && denied.turns.some((t) => t.role === 'tool' && JSON.stringify(t.toolResults).includes('cancelled')));
 
 const node = (id, role, x) => ({ id, kind: 'model', label: id, role, providerId: provider.id, providerModel: 'mock-model', x, y: 20 });
 let pipelineBudgetProfile;
@@ -166,9 +167,9 @@ const pipeline = await server.loop.run([], '파이프라인 테스트', {
     graph: { nodes: [node('stage-1', 'router', 10), node('stage-2', 'reasoning', 200), node('stage-3', 'summarizer', 400)], edges: [{ id: 'p1', from: 'stage-1', to: 'stage-2' }, { id: 'p2', from: 'stage-2', to: 'stage-3' }] },
   },
 });
-check('three-node pipeline called both handoff stages', pipelineStageCalls === 2, String(pipelineStageCalls));
-check('pipeline route reports three stages', pipeline.route?.reason.includes('3단계'), pipeline.route?.reason);
-check('pipeline budget profile accounts for every configured model stage', pipelineBudgetProfile?.executionMode === 'pipeline' && pipelineBudgetProfile?.plannedModelCalls === 3);
+check('archived pipeline never calls handoff models', pipelineStageCalls === 0, String(pipelineStageCalls));
+check('archived pipeline keeps the selected primary', pipeline.route?.model === 'mock-model', pipeline.route?.model);
+check('archived pipeline budget profile plans one primary execution', pipelineBudgetProfile?.executionMode === 'single' && pipelineBudgetProfile?.plannedModelCalls === 1);
 
 const vote = await server.loop.run([], '회의 테스트', { confirm: async () => true }, [], {
   routing: {
@@ -176,8 +177,8 @@ const vote = await server.loop.run([], '회의 테스트', { confirm: async () =
     graph: { nodes: [node('expert-a', 'general', 20), node('expert-b', 'reasoning', 20), node('judge', 'critic', 400)], edges: [{ id: 'v1', from: 'expert-a', to: 'judge' }, { id: 'v2', from: 'expert-b', to: 'judge' }] },
   },
 });
-check('vote scenario exchanged opinions across two rounds', voteOpinionCalls === 4, String(voteOpinionCalls));
-check('validation judge reports participants and rounds', vote.route?.reason.includes('참가자 2명 · 내부 2라운드'), vote.route?.reason);
+check('archived vote performs no model voting', voteOpinionCalls === 0, String(voteOpinionCalls));
+check('archived vote does not claim unperformed participant rounds', !vote.route?.reason.includes('라운드') && vote.route?.model === 'mock-model', vote.route?.reason);
 
 const crossGroupVote = await server.loop.run([], '그룹 간 회의 테스트', { confirm: async () => true }, [], {
   routing: {
@@ -189,10 +190,10 @@ const crossGroupVote = await server.loop.run([], '그룹 간 회의 테스트', 
     },
   },
 });
-check('group representatives exchange final positions', crossGroupCalls === 2 && crossGroupVote.route?.reason.includes('그룹 간 1라운드'), `${crossGroupCalls} / ${crossGroupVote.route?.reason}`);
+check('archived groups do not spawn representatives', crossGroupCalls === 0 && crossGroupVote.route?.model === 'mock-model', `${crossGroupCalls} / ${crossGroupVote.route?.reason}`);
 
 let swarmBudgetProfile;
-const swarm = await server.loop.run([], '허가된 CTF 테스트', {
+const swarm = await server.loop.run([], '보관된 스웜 설정 테스트', {
   confirm: async () => true,
   configureModelBudget: (profile) => { swarmBudgetProfile = profile; },
 }, [], {
@@ -205,13 +206,12 @@ const swarm = await server.loop.run([], '허가된 CTF 테스트', {
     },
   },
 });
-check('CTF swarm runs every solver concurrently before verification', swarmSolverCalls === 3, String(swarmSolverCalls));
-check('CTF swarm stops after verifier accepts a reproduced flag', swarmVerifierCalls === 1 && swarm.route?.reason.includes('플래그 검증 성공'), swarm.route?.reason);
-check('swarm budget profile includes bounded configured iterations', swarmBudgetProfile?.executionMode === 'swarm' && swarmBudgetProfile?.plannedModelCalls === 16);
+check('archived swarm never runs competing solver agents', swarmSolverCalls === 0, String(swarmSolverCalls));
+check('archived swarm does not claim an unperformed model verification', swarmVerifierCalls === 0 && !swarm.route?.reason.includes('검증 성공'), swarm.route?.reason);
+check('archived swarm budget plans only the primary model', swarmBudgetProfile?.executionMode === 'single' && swarmBudgetProfile?.plannedModelCalls === 1);
 
-// A premium ceiling is a count of real provider invocations, not a count of
-// provider selections. Three tool rounds plus the final response must spend
-// only one premium call and continue every later round on a free tool model.
+// Only host-owned admission is an active call budget. An archived scenario's
+// coordinator-node ceiling cannot silently become a one-turn tool-loop limit.
 const premiumBudgetProvider = server.providersAdd({
   label: 'Premium Budget', type: 'openai-compatible', baseUrl: mockBaseUrl,
   model: 'premium-budget', apiKey: 'test-key', source: 'api', costTier: 2,
@@ -220,16 +220,22 @@ server.providersAdd({
   label: 'Free Budget', type: 'openai-compatible', baseUrl: mockBaseUrl,
   model: 'free-budget', apiKey: 'test-key', source: 'free', costTier: 0,
 });
-const budgetResult = await server.loop.run([], '명령 실행하고 세 번 검증해줘', { confirm: async () => true }, [], {
-  providerId: premiumBudgetProvider.id,
-  providerModel: 'premium-budget',
-  reasoningEffort: 'high',
-  routing: { mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true },
-});
-check('multi-tool loop never exceeds actual premium invocation ceiling', premiumBudgetCalls === 1, String(premiumBudgetCalls));
-check('all post-ceiling tool rounds continue on free model', freeBudgetCalls === 3 && budgetResult.text === 'BUDGET-COMPLETE', `${freeBudgetCalls} / ${budgetResult.text}`);
-check('fallback system identity and route use the actual free model', freeBudgetSystems.every((system) => system.includes('Free Budget') && system.includes('free-budget')) && budgetResult.route?.model === 'free-budget', `${budgetResult.route?.providerLabel} / ${budgetResult.route?.model}`);
-
+let budgetAdmissionError, budgetAdmissions = 0, budgetSettlements = 0;
+try {
+  await server.loop.run([], '명령 실행하고 세 번 검증해줘', {
+    confirm: async () => true,
+    reserveModelCall: () => {
+      if (++budgetAdmissions > 1) throw new ModelBudgetExceededError('host call admission exhausted');
+      return { finish: () => { budgetSettlements++; return true; } };
+    },
+  }, [], {
+    providerId: premiumBudgetProvider.id, providerModel: 'premium-budget', reasoningEffort: 'high',
+    routing: { mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true },
+  });
+} catch (error) { budgetAdmissionError = error; }
+check('actual admission stops the second primary call before provider execution',
+  budgetAdmissionError instanceof ModelBudgetExceededError && premiumBudgetCalls === 1 && budgetSettlements === 1);
+check('budget exhaustion never silently substitutes a free model', freeBudgetCalls === 0 && freeBudgetSystems.length === 0);
 // A single-mode scenario is a local router choice, not a fan-out. The graph
 // can describe many roles while only the selected model receives the prompt.
 let singleCascadeCalls = 0;
@@ -370,88 +376,28 @@ try {
 check('stageCall rethrows typed admission failures before provider use instead of converting them to stage text',
   pipelineAdmissionError instanceof ModelBudgetExceededError && fatalStageProviderCalls === 0);
 
-let fatalRaceProviderCalls = 0;
-let siblingAbortObserved = false;
-let siblingProviderSettled = false;
-let fatalRaceLeaseFinishes = 0;
-let resolveSiblingAbort;
-const siblingAbortPromise = new Promise((resolveAbort) => { resolveSiblingAbort = resolveAbort; });
-const fatalRaceProvider = {
-  ...fatalStageProvider, id: 'fatal-race', label: 'Fatal Race', model: 'fatal-race',
-  async chat(req) {
-    fatalRaceProviderCalls++;
-    if (fatalRaceProviderCalls === 1) {
-      return { text: 'first branch completes over budget', toolCalls: [], usage: { promptTokens: 3, completionTokens: 2 } };
-    }
-    return await new Promise((_resolve, reject) => {
-      const abort = () => {
-        siblingAbortObserved = true;
-        resolveSiblingAbort();
-        setTimeout(() => {
-          siblingProviderSettled = true;
-          reject(req.signal?.reason ?? new Error('fatal sibling abort'));
-        }, 40);
-      };
-      if (req.signal?.aborted) abort();
-      else req.signal?.addEventListener('abort', abort, { once: true });
-    });
+let fatalPrimaryCalls=0, fatalPrimarySettlements=0, fatalPrimaryError;
+let fatalPrimaryReported=0, fatalPrimaryAccounted=0;
+const fatalPrimary = {
+  ...fatalStageProvider, id:'fatal-primary', model:'fatal-primary',
+  async chat() {
+    fatalPrimaryCalls++;
+    return {text:'must not be returned as success',toolCalls:[],usage:{promptTokens:3,completionTokens:2}};
   },
 };
-const fatalRaceLoop = new AgentLoop({
-  default: () => fatalRaceProvider,
-  resolve: () => fatalRaceProvider,
-  costTier: () => 0,
-}, { execute: async () => '{}' });
-let fatalRaceReservation = 0;
-let swarmAdmissionError;
-let fatalRaceRunSettled = false;
-let fatalRaceActualPrompt = 0;
-let fatalRaceAccounted = 0;
-const fatalRacePromise = fatalRaceLoop.run([], 'fatal swarm', {
-  reserveModelCall: () => {
-    fatalRaceReservation++;
-    const reservation = fatalRaceReservation;
-    return {
-      accountedTokens: 50,
-      finish: () => {
-        fatalRaceLeaseFinishes++;
-        return reservation !== 1;
-      },
-    };
-  },
-  onModelUsage: (delta) => {
-    fatalRaceActualPrompt += delta.promptTokens + delta.completionTokens;
-    fatalRaceAccounted += delta.accountedTokens ?? 0;
-  },
-}, [], {
-  routing: {
-    mode: 'quality', executionMode: 'swarm', maxIterations: 1, roles: {}, maxPremiumCalls: 4, escalationEnabled: true,
-    graph: {
-      nodes: [fatalNode('fatal-solver-a', 'coding', 0), fatalNode('fatal-solver-b', 'reasoning', 10), fatalNode('fatal-verifier', 'critic', 100)],
-      edges: [{ id: 'fatal-a', from: 'fatal-solver-a', to: 'fatal-verifier' }, { id: 'fatal-b', from: 'fatal-solver-b', to: 'fatal-verifier' }],
-    },
-  },
-}).catch((error) => { swarmAdmissionError = error; }).finally(() => { fatalRaceRunSettled = true; });
-await Promise.race([
-  siblingAbortPromise,
-  new Promise((resolveDelay) => setTimeout(resolveDelay, 250)),
-]);
-const drainedBeforeReject = siblingAbortObserved
-  && siblingProviderSettled === false
-  && fatalRaceRunSettled === false
-  && fatalRaceLeaseFinishes === 1;
-await fatalRacePromise;
-check('fatal parallel admission aborts siblings, drains actual provider settlement, and prevents follow-up stages',
-  drainedBeforeReject
-    && siblingProviderSettled
-    && fatalRaceRunSettled
-    && swarmAdmissionError instanceof ModelBudgetExceededError
-    && fatalRaceProviderCalls === 2
-    && fatalRaceLeaseFinishes === 2,
-  `${fatalRaceProviderCalls} / ${fatalRaceLeaseFinishes}`);
-check('failed parallel run reports actual and reservation-floor usage exactly once',
-  fatalRaceActualPrompt === 5 && fatalRaceAccounted === 100,
-  `${fatalRaceActualPrompt} / ${fatalRaceAccounted}`);
+try {
+  await new AgentLoop({default:()=>fatalPrimary,costTier:()=>0}, {execute:async()=>{throw Error('No tools after failed admission');}}).run([], 'fatal legacy swarm', {
+    reserveModelCall:()=>({accountedTokens:50,finish:()=>{fatalPrimarySettlements++;return false;}}),
+    onModelUsage:delta=>{fatalPrimaryReported+=delta.promptTokens+delta.completionTokens;fatalPrimaryAccounted+=delta.accountedTokens??0;},
+  }, [], {
+    routing:{mode:'quality',executionMode:'swarm',maxIterations:1,roles:{},maxPremiumCalls:4,escalationEnabled:true,
+      graph:{nodes:[fatalNode('a','coding',0),fatalNode('b','reasoning',10),fatalNode('judge','critic',100)],edges:[]}},
+  });
+} catch(error) { fatalPrimaryError=error; }
+check('failed primary settlement aborts the single run without siblings or final model fallback',
+  fatalPrimaryError instanceof ModelBudgetExceededError && fatalPrimaryCalls===1 && fatalPrimarySettlements===1);
+check('failed single run reports actual and reservation-floor usage exactly once',
+  fatalPrimaryReported===5 && fatalPrimaryAccounted===50, `${fatalPrimaryReported} / ${fatalPrimaryAccounted}`);
 
 // Equivalent JSON arguments must share one repeat signature even when a model
 // changes object key order. Two consecutive blocked rounds end the paid loop.
@@ -543,35 +489,29 @@ check('native ask mode requests explicit approval', nativeApprovals === 1, Strin
 check('native steering starts bounded continuation', nativeCalls.length === 2 && nativeCalls[1].prompt.includes('검증도 추가해줘'), String(nativeCalls.length));
 check('native continuation returns latest result and aggregates usage', nativeResult.text === 'native-2' && nativeResult.usage.promptTokens === 6);
 
-// Native steering continuations are separate paid invocations as well. Once
-// the first native run consumes the limit, the continuation must be selected,
-// identified and effort-clamped against the actual free native provider.
-const budgetedNativeCalls = [];
-const premiumNative = {
-  ...nativeProvider, id: 'premium-native', label: 'Premium Native', model: 'premium-native-model',
-  async runAgent(req) { budgetedNativeCalls.push({ provider: 'premium', ...req }); return { text: 'premium-native-result', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } }; },
-};
-const freeNative = {
-  ...nativeProvider, id: 'free-native', label: 'Free Native', model: 'free-native-model', supportedReasoning: ['auto'],
-  async runAgent(req) { budgetedNativeCalls.push({ provider: 'free', ...req }); return { text: 'free-native-result', toolCalls: [], usage: { promptTokens: 2, completionTokens: 1 } }; },
-};
-const nativeBudgetRegistry = {
-  default: () => premiumNative,
-  costTier: (id) => id === premiumNative.id ? 2 : 0,
-  freeProvider: () => freeNative,
-};
-const nativeBudgetLoop = new AgentLoop(nativeBudgetRegistry, { execute: async () => '{}' });
-let budgetSteeringReads = 0;
-const nativeBudgetResult = await nativeBudgetLoop.run([], '파일을 수정해줘', {
-  takeSteering: () => ++budgetSteeringReads === 1 ? ['테스트를 한 번 더 실행해줘'] : [],
-}, [], {
-  workspacePath: process.env.MR_ROBOT_HOME,
-  permissionMode: 'workspace',
-  reasoningEffort: 'high',
-  routing: { mode: 'balanced', executionMode: 'single', roles: {}, maxPremiumCalls: 1, escalationEnabled: true },
-});
-check('native continuations obey the same premium invocation ceiling', budgetedNativeCalls.filter((call) => call.provider === 'premium').length === 1 && budgetedNativeCalls.filter((call) => call.provider === 'free').length === 1, JSON.stringify(budgetedNativeCalls.map((call) => call.provider)));
-check('native fallback recomputes identity, effort and final route', budgetedNativeCalls[1]?.reasoningEffort === 'auto' && budgetedNativeCalls[1]?.prompt.includes('Free Native') && nativeBudgetResult.route?.model === 'free-native-model', `${budgetedNativeCalls[1]?.reasoningEffort} / ${nativeBudgetResult.route?.model}`);
+// Native steering uses the same selected model and must pass admission again.
+// Exhaustion is not permission to substitute an unrelated free provider.
+const budgetedNativeCalls=[];
+const premiumNative={...nativeProvider,id:'premium-native',label:'Premium Native',model:'premium-native-model',
+  async runAgent(req){budgetedNativeCalls.push(req);return {text:'premium-native-result',toolCalls:[],usage:{promptTokens:2,completionTokens:1}};}};
+const nativeBudgetLoop=new AgentLoop({
+ default:()=>premiumNative,costTier:()=>2,freeProvider:()=>{throw Error('No implicit free-provider lookup');},
+},{execute:async()=>'{"ok":true}'});
+let nativeBudgetError,budgetSteeringReads=0,nativeBudgetAdmissions=0,nativeBudgetSettlements=0;
+try {
+ await nativeBudgetLoop.run([], '파일을 수정해줘', {
+  takeSteering:()=>++budgetSteeringReads===1?['테스트를 한 번 더 실행해줘']:[],
+  reserveModelCall:()=>{
+   if(++nativeBudgetAdmissions>1)throw new ModelBudgetExceededError('native host admission exhausted');
+   return {finish:()=>{nativeBudgetSettlements++;return true;}};
+  },
+ },[],{workspacePath:process.env.MR_ROBOT_HOME,permissionMode:'workspace',reasoningEffort:'high',
+ routing:{mode:'balanced',executionMode:'single',roles:{},maxPremiumCalls:1,escalationEnabled:true}});
+}catch(error){nativeBudgetError=error;}
+check('native steering respects host admission before any extra provider execution',
+ nativeBudgetError instanceof ModelBudgetExceededError&&budgetedNativeCalls.length===1&&nativeBudgetSettlements===1);
+check('native selected identity effort and workspace authority remain intact',
+ budgetedNativeCalls[0]?.reasoningEffort==='high'&&budgetedNativeCalls[0]?.prompt.includes('Premium Native')&&budgetedNativeCalls[0]?.permissionMode==='workspace');
 
 // Cleanup
 await server.stop();

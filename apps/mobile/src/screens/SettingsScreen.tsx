@@ -120,6 +120,12 @@ export function SettingsScreen({ client }: { client: MrRobotClient }) {
         </View>
       )}
 
+      <View style={styles.card} testID="single-harness-settings">
+        <Text style={styles.title}>단일 에이전트 하네스</Text>
+        <Text style={styles.dim}>선택한 모델이 문맥 조회·실행·검증을 담당합니다. 다른 모델·보조 에이전트를 자동 호출하지 않습니다.</Text>
+        <Text style={styles.faint}>모델과 추론 강도는 대화 입력창에서 선택하세요. 이전 실행 프리셋은 보존되지만 적용되지 않습니다. 프로젝트 문서·지식 승인·검증 프로필은 PC 또는 웹 설정의 프로젝트 하네스에서 관리합니다.</Text>
+      </View>
+
       <View style={styles.card}>
         <View style={styles.cardHead}>
           <Text style={styles.title}>AI 제공자</Text>

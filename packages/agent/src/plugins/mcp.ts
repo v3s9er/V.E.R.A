@@ -8,6 +8,7 @@ import { McpDiscovery, type McpDiscoveryRequest } from './mcp-discovery.js';
 import { boundMcpResult, mcpResultLimit } from './mcp-output.js';
 import { McpResults } from './mcp-results.js';
 import { MCP_PRESETS, previewMcpPreset } from './mcp-presets.js';
+import { installedMcpPresets, mcpChildEnvironment } from './mcp-installed.js';
 
 interface McpServerConfigBase {
   id: string;
@@ -139,7 +140,7 @@ export function createMcpPlugin(runtime: McpPluginRuntime = {}): MrRobotPlugin {
       else {
         const transport = new StdioClientTransport({
           command: config.command, args: config.args, cwd: config.cwd,
-          env: { ...getDefaultEnvironment(), ...config.env },
+          env: mcpChildEnvironment(config.command, getDefaultEnvironment(), config.env),
           stderr: 'pipe', maxBufferSize: 8 * 1024 * 1024,
         });
         const client = new Client({ name: 'mr-robot', version: '0.2.0' }, { capabilities: {} });
@@ -193,6 +194,7 @@ export function createMcpPlugin(runtime: McpPluginRuntime = {}): MrRobotPlugin {
       pluginCtx = ctx;
       ctx.registerCommand('mcp.presets.list', () => MCP_PRESETS, { destructive: false });
       ctx.registerCommand('mcp.presets.preview', previewMcpPreset, { destructive: false });
+      ctx.registerCommand('mcp.presets.installed', () => installedMcpPresets(), { destructive: false, adminOnly: true });
       ctx.registerCommand('mcp.servers.list', () => storedConfigs().map(publicConfig), { destructive: false });
       ctx.registerCommand('mcp.servers.add', async (raw) => {
         const body = (raw ?? {}) as Partial<McpServerConfig>;

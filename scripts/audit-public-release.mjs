@@ -50,7 +50,7 @@ function forbiddenTrackedPath(path) {
     'android-password.dpapi', 'native-sessions.json', 'run-journal.json',
   ]);
   if (rootRuntimeFiles.has(lower)) return 'repository-root runtime state';
-  if (/^(?:\.mr-robot|context-cache|private|runtime|shared|voice|docker|signing)\//i.test(normalized)) {
+  if (/^(?:\.mr-robot|context-cache|harness|tools|private|runtime|shared|voice|docker|signing)\//i.test(normalized)) {
     return 'repository-root runtime directory';
   }
   if (/^plugins\/[^/]+\.json$/i.test(normalized)) return 'plugin runtime state';
@@ -162,6 +162,7 @@ const requiredIgnoreProbes = [
   'config.json', 'config.json.bak', 'conversations.json', 'memory.json', 'schedules.json',
   'routing-traces.jsonl', 'native-sessions.json', 'run-journal.json', 'run-journal.json.fixture.tmp', 'pairing-secret.dpapi', 'plugins/remote-link.json',
   'context-cache/stats.json', 'private/work-calendar/state.bin', 'runtime/cloudflared.yml',
+  'harness/project.knowledge.json', 'tools/serena/credentials.json',
   'shared/private.txt', 'voice/model/file', 'docker/ctf-toolbox/Dockerfile',
   'signing/mr-robot-release.jks', 'android-password.dpapi', '.dev.vars.local',
   '.wrangler/state.json', '.mr-robot-output/result.txt', '.mr-robot-transfer.part',

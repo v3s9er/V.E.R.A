@@ -15,6 +15,7 @@ import { RunActivityPanel } from '../components/RunActivityPanel.js';
 import { RunTimeline } from '../components/RunTimeline.js';
 import { activityLabel, mergeToolActivity, runPresentation, terminalRunUpdate } from '@mr-robot/shared';
 import { ModelPicker } from '../components/ModelPicker.js';
+import { SingleHarnessIndicator } from '../components/HarnessSettings';
 import './ConversationNavigation.css';
 interface UiTool { key: string; name: string; summary: string; status: 'start' | 'done' | 'error'; detail?: string; callId?: string }
 interface UiMsg { id: string; role: 'user' | 'assistant'; content: string; tools: UiTool[]; done: boolean; error?: string }
@@ -1100,10 +1101,10 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
   const respondConfirm = async (approve: boolean): Promise<void> => { if (!confirm) return; const { requestId, conversationId } = confirm; setConfirm(null); await client.call('chat.confirmResponse', { requestId, conversationId, approve }).catch(() => undefined); };
 
   const selectedPreset = routingPresets.find((preset) => preset.id === selected?.routingPresetId);
-  const selectedExecutionMode = selectedPreset ? selectedPreset.executionMode ?? 'single' : selected?.routingPresetId ? undefined : 'single';
+  const selectedExecutionMode = 'single' as const;
   const selectedProvider = providers.find((provider) => provider.id === selected?.providerId);
   const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
-  const reasoningProvider = selected?.routingPresetId ? undefined : selectedProvider ?? defaultProvider;
+  const reasoningProvider = selectedProvider ?? defaultProvider;
   const availableReasoningEfforts = reasoningEffortsForProvider(reasoningProvider, selected?.providerModel ?? reasoningProvider?.model);
   const displayedReasoningEffort = selected?.reasoningEffort ?? 'auto';
   const reasoningSupportUnconfirmed = !availableReasoningEfforts.some(({ value }) => value === displayedReasoningEffort);
@@ -1273,7 +1274,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
           <div className="chat-actions">
             <div className="composer-options" aria-label="대화 실행 설정">
 {selected && <div className="composer-model-controls">
-              <ModelPicker providers={providers} catalogs={providerModels} providerId={selected.providerId} model={selected.providerModel} scenario={!!selected.routingPresetId} disabled={executionControlsDisabled} refreshing={refreshingModels} onRefresh={force => void discoverProviderModels(providers, force)} onSelect={(providerId, providerModel) => {
+              <ModelPicker providers={providers} catalogs={providerModels} providerId={selected.providerId} model={selected.providerModel} scenario={false} disabled={executionControlsDisabled} refreshing={refreshingModels} onRefresh={force => void discoverProviderModels(providers, force)} onSelect={(providerId, providerModel) => {
                 const target = selectedRef.current;
                 if (!target) return;
                 const next = providerId ? providers.find(p => p.id === providerId) : defaultProvider;
@@ -1297,7 +1298,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                   {reasoningSupportUnconfirmed && <option value={displayedReasoningEffort} disabled>{displayedReasoningEffort} · 지원 확인 필요</option>}
                 </Select>
               </label>
-              <button type="button" className="composer-more" aria-label="추가 실행 설정" title="실행 PC · 프리셋 · 질문 예산" aria-haspopup="dialog" onClick={() => setShowComposerSettings(true)}>⋯</button>
+              <button type="button" className="composer-more" aria-label="추가 실행 설정" title="실행 PC · 단일 하네스 · 질문 예산" aria-haspopup="dialog" onClick={() => setShowComposerSettings(true)}>⋯</button>
               {supportsDaybreak(reasoningProvider, selected?.providerModel ?? reasoningProvider?.model) && <button type="button" className="daybreak-toggle" aria-label="Daybreak" aria-pressed={selected?.daybreakEnabled === true} disabled={executionControlsDisabled} title="승인된 계정의 Daybreak 사용 · PC 접근 권한과 별개" onClick={() => void updateExecutionConfig({ daybreakEnabled: !selected?.daybreakEnabled })}>☀ <span>Daybreak</span><span className="daybreak-state">{selected?.daybreakEnabled ? '켜짐' : '꺼짐'}</span></button>}
             </div>
             <div className="composer-send-actions">
@@ -1325,20 +1326,7 @@ export function ChatView({ profile, voiceCommand, onVoiceCommandHandled, activeP
                 {executionPcs.map((pc) => <option key={pc.id} value={pc.id}>실행 PC · {pc.name}</option>)}
               </Select>}
 </label>
-          <label className="composer-settings-field"><span>모델 시나리오</span>              <Select className="scenario-select" aria-label="대화 모델 시나리오" value={selected.routingPresetId ?? ''} onChange={(event) => {
-                const target = selectedRef.current;
-                if (!target) return;
-                const routingPresetId = event.target.value || null;
-                const nextProvider = routingPresetId ? undefined : selectedProvider ?? defaultProvider;
-                void updateExecutionConfig({
-                  routingPresetId,
-                  reasoningEffort: compatibleReasoningEffort(target.reasoningEffort, nextProvider, target.providerModel ?? nextProvider?.model),
-                });
-              }} disabled={executionControlsDisabled}>
-                <option value="">단일 모델</option>
-                {routingPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.builtin ? '' : '내 시나리오 · '}{preset.name}{preset.executionMode === 'adaptive' ? ' · 적응형 협업' : preset.executionMode === 'pipeline' ? ' · 순차' : preset.executionMode === 'vote' ? ' · 투표' : preset.executionMode === 'hybrid' ? ' · 혼합' : preset.executionMode === 'swarm' ? ' · 경쟁 스웜' : ''}</option>)}
-              </Select>
-<small>선택하지 않으면 입력창에서 고른 단일 모델로 실행합니다.</small></label>
+          <SingleHarnessIndicator archivedName={selected?.routingPresetId ? selectedPreset?.name ?? '저장된 프리셋' : undefined} />
                         <label className="composer-select-control" title={selectedTokenPolicy.detail}>
                 <span className="composer-control-label">질문 예산</span>
                 <Select className="composer-control-select" aria-label="입력창 질문 토큰 예산" value={selectedTokenPolicy.value} onChange={event => void updateExecutionConfig({ tokenPolicy: event.target.value as ConversationTokenPolicy })} disabled={executionControlsDisabled || !client.canUseAuditOnly}>

@@ -1,11 +1,14 @@
-import { isAbsolute, win32 } from 'node:path';
+import { isAbsolute, join, win32 } from 'node:path';
+import { createHash } from 'node:crypto';
+import { mrRobotHome } from '../config.js';
 
 export const MCP_PRESETS = [
   {
     id: 'context7', name: 'Context7',
     description: '라이브러리 이름과 버전을 좁혀 최신 API 문서를 조회합니다.',
     documentation: 'https://context7.com/docs/resources/developer',
-    requiredEnvironment: ['CONTEXT7_API_KEY'],
+    requiredEnvironment: [],
+    optionalEnvironment: ['CONTEXT7_API_KEY'],
     setup: '공식 Context7 MCP를 검토·설치한 뒤 dist/index.js의 절대 경로를 지정하세요. API 키는 mcp.servers.add의 env로만 전달하세요.',
   },
   {
@@ -47,8 +50,14 @@ export function previewMcpPreset(raw: unknown) {
     const projectRoot = absolutePath(body.projectRoot, 'projectRoot');
     return {
       id: 'serena', name: 'Serena', command: executablePath,
-      args: ['start-mcp-server', '--transport', 'stdio', '--context', 'ide', '--project', projectRoot, '--open-web-dashboard', 'false'],
-      cwd: projectRoot, env: {}, enabled: false,
+      args: ['start-mcp-server', '--transport', 'stdio', '--context', 'ide', '--project', projectRoot, '--open-web-dashboard', 'false', '--enable-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+      cwd: projectRoot,
+      env: {
+        // Explicit private directories also avoid Windows packaged-app AppData redirection.
+        UV_PYTHON_INSTALL_DIR: join(mrRobotHome(), 'tools', 'uv-python'),
+        UV_CACHE_DIR: join(mrRobotHome(), 'tools', 'uv-cache'),
+        SERENA_HOME: join(mrRobotHome(), 'tools', 'serena-state', createHash('sha256').update(projectRoot).digest('hex').slice(0, 24)),
+      }, enabled: false,
     };
   }
   throw new Error('지원하는 MCP 프리셋은 context7, serena입니다.');

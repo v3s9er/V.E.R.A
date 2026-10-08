@@ -133,6 +133,26 @@ function boundedString(value: unknown, label: string, max: number, optional = fa
   return value;
 }
 
+/** Validate before touching live state: a value accepted here must survive the
+ * strict disk decoder on restart. null clears identifiers only on update. */
+function validateConversationMetadata(input: unknown, update = false): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('대화 설정이 올바르지 않습니다.');
+  const source = input as Record<string, unknown>;
+  for (const [key, label, limit] of [
+    ['title', '대화 제목', 512], ['providerId', '공급자 ID', 256],
+    ['providerModel', '모델 ID', 512], ['routingPresetId', '프리셋 ID', 256],
+    ['workspaceId', '작업 폴더 ID', 256],
+  ] as const) {
+    if (update && key !== 'title' && source[key] === null) continue;
+    boundedString(source[key], label, limit, true);
+  }
+  for (const key of ['pinned', 'daybreakEnabled']) {
+    if (source[key] !== undefined && typeof source[key] !== 'boolean') throw new Error('대화 설정은 켜짐 또는 꺼짐이어야 합니다.');
+  }
+  if (source.permissionMode !== undefined && !permissionModes.includes(source.permissionMode as PermissionMode)) throw new Error('대화 권한이 올바르지 않습니다.');
+  if (source.status !== undefined && !conversationStatuses.has(source.status as ConversationStatus)) throw new Error('대화 상태가 올바르지 않습니다.');
+}
+
 function safeNumber(value: unknown, label: string, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
     throw new Error(`${label} 숫자가 올바르지 않습니다.`);
@@ -646,13 +666,14 @@ export class ConversationStore {
   }
 
   create(input: ConversationCreateInput = {}): ConversationDetail {
+    validateConversationMetadata(input);
     if (input.reasoningEffort !== undefined && !reasoningEfforts.has(input.reasoningEffort)) throw new Error('대화 추론 단계가 올바르지 않습니다.');
     if (input.tokenPolicy !== undefined && !tokenPolicies.has(input.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     const now = Date.now();
     const item: StoredConversation = {
       id: randomUUID(),
       origin: input.origin === 'discord' ? 'discord' : undefined,
-      title: input.title?.trim() || '새 대화',
+      title: input.title?.trim().slice(0, 120) || '새 대화',
       status: 'active',
       pinned: input.pinned === true,
       createdAt: now,
@@ -701,6 +722,7 @@ export class ConversationStore {
   }
 
   update(id: string, patch: { daybreakEnabled?: boolean; origin?: 'discord' | null; title?: string; status?: ConversationStatus; pinned?: boolean; reasoningEffort?: ReasoningEffort; providerId?: string | null; providerModel?: string | null; routingPresetId?: string | null; workspaceId?: string | null; permissionMode?: PermissionMode; tokenPolicy?: ConversationTokenPolicy }): ConversationDetail {
+    validateConversationMetadata(patch, true);
     const item = this.require(id);
     if (patch.tokenPolicy !== undefined && !tokenPolicies.has(patch.tokenPolicy)) throw new Error('대화 토큰 정책이 올바르지 않습니다.');
     if (patch.reasoningEffort !== undefined && !reasoningEfforts.has(patch.reasoningEffort)) throw new Error('대화 추론 단계가 올바르지 않습니다.');

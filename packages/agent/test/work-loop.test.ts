@@ -21,7 +21,7 @@ async function fixture(fn: (dir: string) => Promise<void>) {
 test('default native has one coordinator and work checks are actual host file observations', () => fixture(async dir => {
   const updates: WorkOntologySummary[] = [];
   const p = provider({ runAgent: async req => {
-    assert.deepEqual(req.nativeDelegation, { maxAgents: 2 });
+    assert.equal(req.nativeDelegation, undefined);
     assert.ok(!req.hostTools!.tools.some(t => t.name.startsWith('agent_')));
     const host = req.hostTools!, signal = req.signal!;
     assert.equal(host.authorize!('work_plan', 'read-only'), true);
@@ -115,60 +115,28 @@ test('API work checks can retry after repairs without granting endless unchanged
   assert.equal(answer.text, 'fixed'); assert.equal(updates.at(-1)!.verified, 1);
 }));
 
-test('final work receipts are checked after detached helpers finish cancellation settlement', () => fixture(async dir => {
-  writeFileSync(join(dir, 'result.txt'), 'expected fixture');
-  const updates: WorkOntologySummary[] = [];
-  const order: string[] = [];
-  let step = 0, helperAborted = false, helperSettled = false;
-  let markStarted!: () => void;
-  const helperStarted = new Promise<void>(resolve => { markStarted = resolve; });
-  const schedule = [
-    ['work_plan', plan],
-    ['work_update', { id: 'artifact', status: 'completed' }],
-    ['agent_spawn', { task: 'Review the bounded fixture independently' }],
-    ['work_check', { id: 'artifact' }],
-  ] as const;
-  const p = provider({ type: 'openai-compatible', supportsTools: true,
-    chat: async req => {
-      const call = schedule[step++];
-      if (call?.[0] === 'work_check') await helperStarted;
-      if (!call) {
-        const receipt = JSON.parse(req.turns.at(-1)!.toolResults![0].content);
-        assert.equal(receipt.summary.verified, 1, 'the main agent really checked the original file');
-        assert.equal(helperSettled, false, 'the helper is still detached when the main model returns');
-        order.push('main-check-passed');
-        return result('main completed independently');
-      }
-      return result('', [{ id: `settle-${step}`, name: call[0], args: JSON.stringify(call[1]) }]);
-    },
-    chatIsolated: req => new Promise(resolve => {
-      markStarted();
-      req.signal!.addEventListener('abort', () => {
-        helperAborted = true;
-        order.push('helper-aborted');
-        // Simulate a provider's in-flight side effect completing while it
-        // settles cancellation. Merely requesting abort must not be enough.
-        setImmediate(() => {
-          writeFileSync(join(dir, 'result.txt'), 'changed during helper cancellation');
-          helperSettled = true;
-          order.push('helper-settled');
-          resolve(result('late helper result'));
-        });
-      }, { once: true });
-    }),
-  });
-  const answer = await new AgentLoop({ default: () => p } as any, {} as any).run([], 'Review the project file and verify its acceptance conditions', {
-    onWorkUpdate: summary => {
-      updates.push(summary);
-      if (summary.checksFailed) order.push('final-check-failed');
-    },
-  }, [], { workspacePath: dir, permissionMode: 'read-only', tokenPolicy: 'standard' });
-  assert.equal(helperAborted, true);
-  assert.equal(helperSettled, true);
-  assert.equal(answer.text, 'main completed independently');
-  assert.equal(updates.at(-1)!.verified, 0);
-  assert.equal(updates.at(-1)!.checksPassed, 0);
-  assert.equal(updates.at(-1)!.checksFailed, 1);
-  assert.deepEqual(order, ['main-check-passed', 'helper-aborted', 'helper-settled', 'final-check-failed']);
-  assert.ok(!JSON.stringify(answer.turns).includes('late helper result'));
+test('failed final file receipt gets one same-session correction, without another coordinator', () => fixture(async dir => {
+ let calls=0;
+ const updates: WorkOntologySummary[]=[];
+ const p=provider({runAgent:async req=>{
+   calls++; assert.equal(req.nativeDelegation,undefined);
+   assert.equal(req.session!.key,'repair');
+   if(calls===1) {
+     await req.hostTools!.execute('work_plan',plan,req.signal!);
+     writeFileSync(join(dir,'result.txt'),'expected fixture');
+     await req.hostTools!.execute('work_update',{id:'artifact',status:'completed'},req.signal!);
+     await req.hostTools!.execute('work_check',{id:'artifact'},req.signal!);
+     writeFileSync(join(dir,'result.txt'),'invalidated after reported success');
+     return result('claimed done');
+   }
+   assert.equal(calls,2); assert.match(req.session!.input,/observed failures/);
+   assert.equal(req.session!.history.at(-1)!.content,'claimed done');
+   writeFileSync(join(dir,'result.txt'),'expected fixture');
+   return result('verified repair');
+ }});
+ const output=await new AgentLoop({default:()=>p} as any,{} as any).run([], 'Create and check project file', {onWorkUpdate:s=>updates.push(s)}, [], {
+  workspacePath:dir,permissionMode:'workspace',tokenPolicy:'audit-only',cacheKey:'repair',nativeSessionDirectory:dir,
+ });
+ assert.equal(calls,2); assert.equal(output.text,'verified repair'); assert.equal(updates.at(-1)!.verified,1);
+ assert.equal(output.usage.promptTokens,2);
 }));

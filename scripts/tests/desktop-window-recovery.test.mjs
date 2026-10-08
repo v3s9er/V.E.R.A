@@ -49,7 +49,10 @@ test('load rejection and did-fail-load coalesce without leaking error data', asy
   window.loadURL = url => { window.loads.push(url); return Promise.reject(Object.assign(new Error('secret URL'), {errno:-102})); };
   recovery.start();
   window.webContents.emit('did-fail-load', {}, -102, 'sensitive text', 'https://secret.invalid', true);
-  await wait(1);
+  // Drain loadURL's rejection, but do not race a real 1ms wait against the
+  // intentionally separate 2ms retry (both can expire together under load).
+  await Promise.resolve();
+  assert.equal(window.loads.length, 1);
   assert.equal(logs.length, 1);
   assert.equal(logs[0], 'desktop-ui:load-failed:-102');
 });

@@ -32,7 +32,7 @@ export class AdaptiveExecution {
   }
   guidance(): string {
     const instruction = this.depth === 'direct' ? 'Answer directly. Do not create plans or helpers for a simple request.'
-      : this.depth === 'deep' ? 'Separate hypotheses, gather independent evidence, reproduce safely and check counterexamples. Delegate only independent branches with explicit scope and evidence requirements. Sequential reasoning stays with you.'
+      : this.depth === 'deep' ? 'Separate hypotheses, gather independent evidence, reproduce safely and check counterexamples. Investigate independent branches within this same conversation; do not create another agent or model coordinator.'
       : 'Use a short plan only if useful. Batch independent reads, execute dependent changes in order and verify actual artifacts.';
     return `Execution depth hint: ${this.depth}. ${instruction} Reassess based on actual evidence. Never broaden access with difficulty, silently replace the selected model, repeat an uncertain write, or report completion without evidence. Authentication/environment failures require concrete repairs, not more reasoning.`;
   }

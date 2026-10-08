@@ -1,0 +1,37 @@
+.harness-settings { display: grid; gap: 16px; min-width: 0; }
+.harness-settings .panel { min-width: 0; }
+.harness-settings .panel-head { gap: 12px; flex-wrap: wrap; }
+.single-harness-indicator { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft, var(--bg)); font-size: 13px; line-height: 1.6; }
+.single-harness-indicator .badge { justify-self: start; }
+.single-harness-indicator small { color: var(--text-dim); }
+.harness-lines { width: 100%; resize: vertical; min-height: 84px; font-family: inherit; line-height: 1.55; }
+.harness-search { display: flex; align-items: flex-end; gap: 10px; margin-top: 20px; }
+.harness-search .field { flex: 1; min-width: 0; margin-bottom: 0; }
+.harness-search > .btn { margin-bottom: 3px; }
+.harness-results, .harness-candidates, .harness-profiles { display: grid; gap: 10px; margin-top: 14px; }
+.harness-results article, .harness-candidate, .harness-profiles article, .harness-receipt { padding: 14px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
+.harness-item-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.harness-settings p, .harness-settings b, .harness-settings small, .harness-settings blockquote { overflow-wrap: anywhere; }
+.harness-settings small, .harness-results small { color: var(--text-dim); }
+.harness-settings details { margin: 12px 0; }
+.harness-settings summary { cursor: pointer; font-size: 13px; }
+.harness-evidence { padding: 12px 0; }
+.harness-evidence blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--border); white-space: pre-wrap; }
+.harness-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
+.harness-warning { padding: 12px; border: 1px solid var(--border); border-left: 3px solid #d4a356; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+.harness-path { font-family: ui-monospace, monospace; font-size: 12px; }
+.harness-receipt { margin-top: 16px; }
+.harness-receipt pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.harness-profile-form { display: grid; gap: 14px; min-width: 0; }
+.harness-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.5; }
+.harness-check input { flex: 0 0 auto; margin-top: 3px; }
+.harness-field-row { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(80px, 110px) auto auto; align-items: center; gap: 8px; margin: 10px 0; }
+.harness-notice { color: var(--text); padding: 8px 0; }
+@media (max-width: 600px) {
+  .harness-settings .panel { padding: 16px; }
+  .harness-settings .panel-head { align-items: flex-start; }
+  .harness-field-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .harness-profile-form .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .harness-actions .btn { flex: 1; min-height: 40px; }
+  .single-harness-indicator { padding: 12px; }
+}

@@ -72,6 +72,17 @@ export function PluginsView() {
   const [mcpEnable, setMcpEnable] = useState(false);
   const [mcpNotice, setMcpNotice] = useState('');
   const [mcpServers, setMcpServers] = useState<McpServerSummary[] | null>(null);
+  const loadInstalledMcp = async (): Promise<void> => {
+    if (!canManage || busy || mcpPreset === 'manual') return;
+    const selected = mcpPreset; setBusy(true); setError(''); setMcpNotice('');
+    try {
+      const installed = await client.call('plugins.call', { name: 'mcp.presets.installed', params: {} }) as Array<{ id: string; installed: boolean; version: string; executablePath?: string }>;
+      const entry = installed.find(item => item.id === selected && item.installed && item.executablePath);
+      if (!entry) { setMcpEntryPath(''); setMcpNotice('이 PC에 확인된 설치가 없습니다. 먼저 관리자가 선택한 하네스 도구를 설치하거나 경로를 직접 지정하세요.'); }
+      else { setMcpEntryPath(entry.executablePath!); setMcpNotice(entry.id + ' ' + entry.version + ' 설치 경로를 불러왔습니다. 경로와 프로젝트 범위를 확인한 뒤 저장하세요.'); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '설치 경로를 확인하지 못했습니다.'); }
+    finally { setBusy(false); }
+  };
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfig | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [workbenchId, setWorkbenchId] = useState<string | null>(null);
@@ -922,12 +933,12 @@ export function PluginsView() {
             {p.id === 'mcp-host' && <div className="provider-add">
               <h4>MCP stdio 서버 연결</h4>
               <div className="form-grid">
-                <label className="field"><span>설정 방식</span><Select value={mcpPreset} disabled={busy} onChange={event => { const preset = event.target.value as typeof mcpPreset; setMcpPreset(preset); setMcpId(preset === 'manual' ? '' : preset); setMcpEnable(false); setMcpNotice(''); }}><option value="manual">직접 입력</option><option value="context7">Context7 · 라이브러리 문서</option><option value="serena">Serena · 코드 심볼</option></Select></label>
+                <label className="field"><span>설정 방식</span><Select value={mcpPreset} disabled={busy} onChange={event => { const preset = event.target.value as typeof mcpPreset; setMcpPreset(preset); setMcpId(preset === 'manual' ? '' : preset); setMcpEntryPath(''); setMcpEnable(false); setMcpNotice(''); }}><option value="manual">직접 입력</option><option value="context7">Context7 · 라이브러리 문서</option><option value="serena">Serena · 코드 심볼</option></Select></label>
                 <label className="field"><span>서버 ID</span><Input value={mcpId} disabled={busy} onChange={event => setMcpId(event.target.value)} placeholder={mcpPreset === 'serena' ? 'serena-my-project' : 'my-server'} /></label>
                 {mcpPreset === 'manual' ? <>
                   <label className="field"><span>실행 명령</span><Input value={mcpCommand} disabled={busy} onChange={event => setMcpCommand(event.target.value)} placeholder="node" /></label>
                   <label className="field"><span>인자</span><Input value={mcpArgs} disabled={busy} onChange={event => setMcpArgs(event.target.value)} placeholder={'"C:\\MCP\\server.js"'} /></label>
-                </> : <label className="field"><span>{mcpPreset === 'context7' ? '설치된 Context7 진입 파일' : '설치된 Serena 실행 파일'}</span><Input value={mcpEntryPath} disabled={busy} onChange={event => setMcpEntryPath(event.target.value)} placeholder={mcpPreset === 'context7' ? 'C:\\MCP\\context7\\dist\\index.js' : 'C:\\MCP\\serena.exe'} /></label>}
+                </> : <label className="field"><span>{mcpPreset === 'context7' ? '설치된 Context7 진입 파일' : '설치된 Serena 실행 파일'}</span><Input value={mcpEntryPath} disabled={busy} onChange={event => setMcpEntryPath(event.target.value)} placeholder={mcpPreset === 'context7' ? 'C:\\MCP\\context7\\dist\\index.js' : 'C:\\MCP\\serena.exe'} /><Button type="button" variant="ghost" disabled={busy} onClick={() => void loadInstalledMcp()}>설치된 경로 불러오기</Button></label>}
                 {mcpPreset === 'serena' && <label className="field"><span>프로젝트 절대 경로</span><Input value={mcpProjectPath} disabled={busy} onChange={event => setMcpProjectPath(event.target.value)} placeholder="C:\\Projects\\my-project" /></label>}
               </div>
               {mcpPreset !== 'manual' && <p className="panel-hint">{mcpPreset === 'context7' ? '설치된 Node.js로 실행합니다. 패키징된 앱에서는 PC의 PATH에서 node를 찾습니다. API 키는 이 화면에 입력하지 마세요.' : '선택한 프로젝트로 시작하고 대시보드는 자동으로 열지 않습니다. 프로젝트마다 서버 ID를 구분하세요.'} 서버 프로그램은 자동 설치하지 않습니다.</p>}

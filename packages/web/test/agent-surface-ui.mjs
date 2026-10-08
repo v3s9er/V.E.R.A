@@ -34,7 +34,8 @@ try {
     await page.getByRole('region', { name: '실시간 작업 로그' }).getByText('파일 읽기', { exact: true }).waitFor();
     const feed = page.locator('.run-timeline');
     assert.equal(await feed.locator('li').count(), 3);
-    await feed.getByText('선택: 적응형 협업', { exact: true }).waitFor();
+    await feed.getByText('선택: 단일 모델', { exact: true }).waitFor();
+    assert.doesNotMatch(await feed.innerText(), /선택: 적응형 협업/, 'archived presets must not advertise active orchestration');
     await feed.getByText('테스트 범위 확인', { exact: true }).waitFor();
     assert.doesNotMatch(await feed.innerText(), /undefined|\{\s*"|NaN/);
     const headerBackground = await page.locator('.chat-commandbar').evaluate(el => getComputedStyle(el).backgroundColor);

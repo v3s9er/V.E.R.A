@@ -29,17 +29,17 @@ async function fixture(check:(f:any)=>Promise<void>){
 
 test('pipeline keeps the exact final native model and passes prior evidence without an API advisor',()=>fixture(async f=>{
  const result=await f.loop.run([],'Analyze the supplied file data without tools.',{onStatus:(s:string)=>f.status.push(s)},[],f.options);
- assert.deepEqual(f.called,['chat:plan-model','chat:solve-model','native:judge-model']);
+ assert.deepEqual(f.called,['native:judge-model']);
  assert.equal(result.route.model,'judge-model');assert.equal(result.route.effort,'high');assert.equal(result.text,'VERIFIED_FINAL');
  assert.equal(f.nativeRequests[0].permissionMode,'read-only');assert.equal(f.nativeRequests[0].cwd,f.root);
- assert.match(f.nativeRequests[0].prompt,/EVIDENCE_plan-model/);assert.match(f.nativeRequests[0].prompt,/EVIDENCE_solve-model/);assert.match(f.nativeRequests[0].prompt,/SCOPED_EVIDENCE/);
- assert.equal(result.usage.promptTokens,9);assert.equal(result.usage.completionTokens,6);
- assert.ok(f.status.some((s:string)=>s.endsWith(' · plan-model')));assert.ok(f.status.some((s:string)=>s.endsWith(' · solve-model')));
+ assert.doesNotMatch(f.nativeRequests[0].prompt,/EVIDENCE_plan-model|EVIDENCE_solve-model/);assert.match(f.nativeRequests[0].prompt,/SCOPED_EVIDENCE/);
+ assert.equal(result.usage.promptTokens,3);assert.equal(result.usage.completionTokens,2);
+ assert.ok(f.status.some((s:string)=>s.includes('저장된 다중 모델')));
 }));
 
 test('pipeline native final still requires consent in ask mode',()=>fixture(async f=>{
  const result=await f.loop.run([],'Analyze file data.',{confirm:async()=>false},[],{...f.options,permissionMode:'ask'});
- assert.deepEqual(f.called,['chat:plan-model','chat:solve-model']);assert.match(result.text,/취소/);
+ assert.deepEqual(f.called,[]);assert.match(result.text,/취소/);
 }));
 
 test('isolated pipeline never receives a host native final executor',()=>fixture(async f=>{
@@ -50,5 +50,5 @@ test('isolated pipeline never receives a host native final executor',()=>fixture
 test('native final failure propagates without substituting a different model',()=>fixture(async f=>{
  f.providers['judge-model'].runAgent=async()=>{throw Error('SELECTED_NATIVE_FAILED');};
  await assert.rejects(f.loop.run([],'Analyze file data.',{},[],f.options),/SELECTED_NATIVE_FAILED/);
- assert.deepEqual(f.called,['chat:plan-model','chat:solve-model']);
+ assert.deepEqual(f.called,[]);
 }));

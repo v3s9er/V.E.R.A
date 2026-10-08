@@ -28,6 +28,8 @@ web-build/
 /run-journal.json.*.tmp
 /pairing-secret.dpapi
 /context-cache/
+/harness/
+/tools/
 /plugins/*.json
 /private/
 /runtime/

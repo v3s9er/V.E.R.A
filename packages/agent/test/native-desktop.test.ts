@@ -43,6 +43,23 @@ test('dynamic tool failures return a human-readable model result without ending 
   const result = await run('NORMAL', async () => { throw Error('window stale'); });
   assert.equal(result.text, 'desktop error explained');
 });
+
+test('native capability is reauthorized after enqueue and before execution', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'vera-native-queued-authority-'));
+  let revoked = false, calls = 0;
+  try {
+    await assert.rejects(pooledNativeCodex({ command: process.execPath,
+      prefixArgs: [fileURLToPath(new URL('./fixtures/native-desktop-app-server.mjs', import.meta.url))],
+      env: process.env, providerId: 'fixture', model: 'fixture', req: {
+        prompt: 'NORMAL', cwd: directory, permissionMode: 'full',
+        onStatus: status => { if (status === 'PC 화면 확인 중') revoked = true; },
+        session: { key: 'queued-authority', directory, input: 'NORMAL', history: [], context: '', instructions: 'fixture' },
+        hostTools: { tools: DESKTOP_TOOLS, authorize: () => !revoked,
+          execute: async () => { calls++; return output; }, dispose() {} },
+      } }), /실행 권한이 변경/);
+    assert.equal(revoked, true); assert.equal(calls, 0);
+  } finally { closeNativeWorkers(); await waitForCliRetirements(process.env); rmSync(directory, { recursive: true, force: true }); }
+});
 test('cancellation aborts an active host capability and releases it', async () => {
   const abort = new AbortController(); let stopped = false;
   await assert.rejects(run('NORMAL', async (_name, _args, signal) => {

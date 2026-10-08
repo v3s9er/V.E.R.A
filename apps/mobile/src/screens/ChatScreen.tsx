@@ -112,7 +112,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [modelRefreshStatus, setModelRefreshStatus] = useState('');
   const modelRefreshInFlight = useRef(false);
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
-  const [commandMode, setCommandMode] = useState<'pc' | 'scenario'>('pc');
   const [input, setInput] = useState('');
   const inputRef = useRef(input); inputRef.current = input;
   const drafts = useRef(new Map<string, string>());
@@ -136,7 +135,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const [customModelExpanded, setCustomModelExpanded] = useState(false);
   const [customProviderId, setCustomProviderId] = useState('');
   const [customModel, setCustomModel] = useState('');
-  const [showScenarios, setShowScenarios] = useState(false);
   const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [showAccess, setShowAccess] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
@@ -277,14 +275,12 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
   const activeRun = conversation ? runs[conversation.id] : undefined;
   const busy = Boolean(activeRun?.running);
   const selectedPreset = routingPresets.find(preset => preset.id === conversation?.routingPresetId);
-  const selectedExecutionMode = selectedPreset ? selectedPreset.executionMode ?? 'single' : conversation?.routingPresetId ? undefined : 'single';
+  const selectedExecutionMode = 'single' as const;
   useEffect(() => {
     if (busy) onExecutionBusyChange?.(true);
   }, [busy, onExecutionBusyChange]);
   const defaultProvider = providers.find((provider) => provider.isDefault) ?? providers[0];
-  const reasoningProvider = conversation?.routingPresetId
-    ? undefined
-    : providers.find((provider) => provider.id === conversation?.providerId) ?? defaultProvider;
+  const reasoningProvider = providers.find((provider) => provider.id === conversation?.providerId) ?? defaultProvider;
   const reasoningEfforts = reasoningEffortsFor(reasoningProvider, conversation?.providerModel ?? reasoningProvider?.model);
   const selectedReasoningEffort = conversation?.reasoningEffort ?? 'auto';
   const reasoningSupportUnconfirmed = !reasoningEfforts.includes(selectedReasoningEffort);
@@ -364,7 +360,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setHistoryError(runList === null ? '실행 상태를 확인하지 못했습니다. 새 요청을 보내지 않았습니다. 연결을 확인하고 이 대화를 다시 선택하세요.' : recovery?.message ?? '');
     setHistoryPage({ id, info: detail.history });
     setActivity([]);
-    setCommandMode(detail.routingPresetId ? 'scenario' : 'pc');
     const restored = detail.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ id: nextId(), role: m.role as 'user' | 'assistant', content: m.content, tools: [], done: true }));
     setMessages(active?.running
       ? [...restored, { id: nextId(), role: 'assistant', content: `${active.partialTextTruncated ? '…이전 출력 일부 생략…\n' : ''}${active.partialText ?? ''}`, tools: [], done: false }]
@@ -624,7 +619,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
     setUnseenMessages(false);
     setMessages((items) => appendPendingAttempt(items, text));
     try {
-      const result = await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, routingPresetId: commandMode === 'scenario' ? currentConversation.routingPresetId : undefined, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode, tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive' }, 10 * 60_000) as { ok?: boolean; text?: string; error?: string };
+      const result = await client.call('chat.start', { text, conversationId: currentConversation.id, reasoningEffort: currentConversation.reasoningEffort, providerId: currentConversation.providerId, providerModel: currentConversation.providerModel, workspaceId: currentConversation.workspaceId, permissionMode: currentConversation.permissionMode, tokenPolicy: client.canUseAuditOnly ? currentConversation.tokenPolicy ?? 'adaptive' : 'adaptive' }, 10 * 60_000) as { ok?: boolean; text?: string; error?: string };
       if (!requestOwnership.current.owns(currentConversation.id, requestToken)) return;
       if (result.ok === false) throw new Error(result.error || '작업 실행에 실패했습니다.');
       setConfirm(current => current?.conversationId === currentConversation.id ? null : current);
@@ -778,7 +773,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       const updated = await configureExecution(conversationId, {
         providerId: providerId ?? null,
         providerModel: providerModel ?? null,
-        routingPresetId: null,
         reasoningEffort,
         daybreakEnabled: supportsDaybreak(provider, providerModel ?? provider?.model) && conversation.daybreakEnabled === true,
       });
@@ -791,56 +785,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
       });
       if (activeId.current !== conversationId) return;
       setReasoningSaveFailed(false);
-      setCommandMode(providerId ? 'scenario' : 'pc');
       setShowModels(false);
-      setShowScenarios(false);
-    } catch {
-      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
-    } finally {
-      finishConfigurationSave(conversationId);
-    }
-  };
-
-  const switchCommandMode = async (mode: 'pc' | 'scenario'): Promise<void> => {
-    if (!conversation || configurationSaveInFlightRef.current.has(conversation.id)) return;
-    if (mode !== 'pc' || !conversation.routingPresetId) { setCommandMode(mode); return; }
-    if (!beginConfigurationSave()) return;
-    const conversationId = conversation.id;
-    const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
-    const reasoningEffort = reasoningEffortsFor(provider, conversation.providerModel ?? provider?.model).includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
-    try {
-      const updated = await configureExecution(conversationId, { routingPresetId: null, reasoningEffort });
-      applyConversationConfiguration(conversationId, {
-        routingPresetId: updated.routingPresetId,
-        reasoningEffort: updated.reasoningEffort,
-      });
-      if (activeId.current !== conversationId) return;
-      setReasoningSaveFailed(false);
-      setCommandMode(mode);
-    } catch {
-      if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
-    } finally {
-      finishConfigurationSave(conversationId);
-    }
-  };
-
-  const selectScenario = async (routingPresetId?: string): Promise<void> => {
-    if (!conversation || !beginConfigurationSave()) return;
-    const conversationId = conversation.id;
-    const provider = providers.find((item) => item.id === conversation.providerId) ?? defaultProvider;
-    const supportedEfforts = reasoningEffortsFor(routingPresetId ? undefined : provider, conversation.providerModel ?? provider?.model);
-    const reasoningEffort = supportedEfforts.includes(conversation.reasoningEffort) ? conversation.reasoningEffort : 'auto';
-    try {
-      const updated = await configureExecution(conversationId, { routingPresetId: routingPresetId ?? null, reasoningEffort });
-      applyConversationConfiguration(conversationId, {
-        routingPresetId: updated.routingPresetId,
-        reasoningEffort: updated.reasoningEffort,
-      });
-      if (activeId.current !== conversationId) return;
-      setCommandMode('scenario');
-      setReasoningSaveFailed(false);
-      setShowScenarios(false);
-      if (!routingPresetId) setShowModels(true);
     } catch {
       if (mountedRef.current && activeId.current === conversationId) setConfigurationSaveFailed(true);
     } finally {
@@ -1061,7 +1006,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
         const choices = visibleModelChoices(providerModels[provider.id] ?? [provider.model], conversation?.providerId === provider.id ? conversation.providerModel : undefined).filter(model => `${provider.label} ${model}`.toLowerCase().includes(modelSearch.trim().toLowerCase()));
         if (!choices.length) return null;
         return <View key={provider.id}><Text style={styles.modelSectionTitle}>{provider.label}</Text>{choices.map((modelName) => {
-        const selected = (conversation?.providerId ?? defaultProvider?.id) === provider.id && (conversation?.providerModel ?? provider.model) === modelName && !conversation?.routingPresetId;
+        const selected = (conversation?.providerId ?? defaultProvider?.id) === provider.id && (conversation?.providerModel ?? provider.model) === modelName;
         return <TouchableOpacity key={`${provider.id}:${modelName}`} style={[styles.modelChoice, selected && styles.modelChoiceOn, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectModel(provider.id, modelName)}>
           <Text style={styles.modelName}>{selected ? '✓ ' : ''}{modelName}</Text>
         </TouchableOpacity>;
@@ -1192,7 +1137,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
           <View style={shortKeyboardViewport ? styles.composerCompactControls : undefined}>
           <View style={[styles.composerToolbar, shortKeyboardViewport && { flex: 1 }]}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="입력창 모델 선택" style={[styles.composerSelectBtn, styles.composerModelBtn, configurationLocked && styles.disabledBtn]} onPress={openModelPicker} disabled={configurationLocked}>
-              <Text style={styles.composerSelectText} numberOfLines={1}>{conversation?.routingPresetId ? '복합 트리' : conversation?.providerModel || providers.find(p => p.id === conversation?.providerId)?.model || '모델 선택'} ⌄</Text>
+              <Text style={styles.composerSelectText} numberOfLines={1}>{conversation?.providerModel || providers.find(p => p.id === conversation?.providerId)?.model || defaultProvider?.model || '모델 선택'} ⌄</Text>
             </TouchableOpacity>
             <TouchableOpacity
               accessibilityRole="button"
@@ -1245,7 +1190,7 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
             <ScrollView keyboardShouldPersistTaps="handled" style={styles.optionsScroll}>
               <Text style={styles.optionsSection}>실행 환경</Text>
               <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked || busy} onPress={() => { setShowChatOptions(false); setShowWorkspaces(true); }}><Text style={styles.optionsLabel}>작업 폴더</Text><Text style={styles.optionsValue} numberOfLines={1}>{workspaces.find(w => w.id === conversation?.workspaceId)?.name || '선택 안 함'} ›</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowScenarios(true); }}><Text style={styles.optionsLabel}>모델 시나리오</Text><Text style={styles.optionsValue} numberOfLines={1}>{routingPresets.find(p => p.id === conversation?.routingPresetId)?.name || '단일 모델'} ›</Text></TouchableOpacity>
+              <View style={styles.harnessSummary} testID="single-harness-runtime"><Text style={styles.optionsLabel}>단일 에이전트 하네스</Text><Text style={styles.harnessText}>선택한 모델이 문맥 조회·실행·검증을 담당합니다. 다른 모델·보조 에이전트를 자동 호출하지 않습니다.</Text>{conversation?.routingPresetId && <Text style={styles.harnessText}>이전 프리셋 ‘{selectedPreset?.name ?? '저장된 프리셋'}’은 보관만 하며 실행하지 않습니다.</Text>}</View>
               <TouchableOpacity style={styles.optionsRow} accessibilityLabel="대화 토큰 정책" disabled={configurationLocked} onPress={() => { setShowChatOptions(false); setShowTokenPolicy(true); }}><Text style={styles.optionsLabel}>질문 예산</Text><Text style={styles.optionsValue}>{QUESTION_LABELS[conversation?.tokenPolicy ?? 'adaptive']} ›</Text></TouchableOpacity>
               <Text style={styles.optionsSection}>현재 대화</Text>
               <TouchableOpacity style={styles.optionsRow} disabled={configurationLocked || busy} onPress={() => conversation && void togglePin(conversation)}><Text style={styles.optionsLabel}>{conversation?.pinned ? '대화 고정 해제' : '대화 고정'}</Text><Text style={styles.optionsValue}>⌖</Text></TouchableOpacity>
@@ -1275,28 +1220,6 @@ export function ChatScreen({ client, pc, keyboardVisible = false, onExecutionBus
                 {singleModelChoices(true)}
               </ScrollView>
               <TouchableOpacity style={styles.bigBtn} onPress={() => setShowModels(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal visible={showScenarios} transparent animationType="fade" onRequestClose={() => setShowScenarios(false)} accessibilityViewIsModal>
-        <KeyboardAvoidingView style={styles.modalKeyboardAvoiding} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={0}>
-          <View style={[styles.modalBackdrop, { paddingTop: Math.max(12, insets.top), paddingBottom: Math.max(12, insets.bottom), paddingLeft: Math.max(12, insets.left + 8), paddingRight: Math.max(12, insets.right + 8) }]}>
-            <View style={styles.modal}>
-              <Text style={styles.modalTitle}>모바일 실행 방식</Text>
-              <Text style={styles.modalText}>단일 모델 또는 PC에 저장된 복합 트리를 이 대화에 적용합니다.</Text>
-              <ScrollView style={styles.modelList} keyboardShouldPersistTaps="handled">
-                <Text style={styles.modelSectionTitle}>단일 모델</Text>
-                {singleModelChoices(true)}
-                <Text style={styles.modelSectionTitle}>복합 트리</Text>
-                {routingPresets.map((preset) => <TouchableOpacity key={preset.id} style={[styles.modelChoice, savingConfiguration && styles.disabledBtn]} disabled={savingConfiguration} onPress={() => void selectScenario(preset.id)}>
-                  <Text style={styles.modelProvider}>{preset.name}</Text>
-                  <Text style={styles.modelName}>{preset.executionMode === 'adaptive' ? '적응형 협업' : preset.executionMode === 'vote' ? '의견 교환·투표' : preset.executionMode === 'pipeline' ? '순차 검증' : preset.executionMode === 'hybrid' ? '분류·회의·검증' : '단일 라우팅'} · {preset.graph?.nodes.length ?? 0}노드</Text>
-                  <Text style={styles.faintChoice}>{preset.description}</Text>
-                </TouchableOpacity>)}
-              </ScrollView>
-              <TouchableOpacity style={styles.bigBtn} onPress={() => setShowScenarios(false)}><Text style={styles.bigBtnText}>닫기</Text></TouchableOpacity>
             </View>
           </View>
         </KeyboardAvoidingView>
@@ -1508,6 +1431,8 @@ const styles = StyleSheet.create({
   optionsHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   optionsScroll: { flexShrink: 1 },
   optionsSection: { color: colors.faint, fontSize: 11, fontWeight: '700', marginTop: 18, marginBottom: 6 },
+  harnessSummary: { gap: 8, paddingVertical: 12 },
+  harnessText: { color: colors.dim, fontSize: 13, lineHeight: 20 },
   optionsRow: { minHeight: 48, paddingHorizontal: 10, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 14, borderRadius: 12 },
   optionsRowOn: { backgroundColor: 'rgba(124,92,255,.12)' },
   optionsLabel: { color: colors.text, fontSize: 13, flexShrink: 1 },
